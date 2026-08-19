@@ -33,6 +33,8 @@
 #include "core/object/worker_thread_pool.h"
 #include "core/os/condition_variable.h"
 #include "core/os/mutex.h"
+
+#include <cstdlib>
 #include "core/templates/local_vector.h"
 #include "core/templates/simple_type.h"
 #include "core/templates/tuple.h"
@@ -133,12 +135,35 @@ class CommandQueueMT {
 		pending.store(true);
 	}
 
+	// Negative control: setting GODOT_QUEUE_NOTIFY_ALWAYS=1 restores the previous behaviour of
+	// signalling the pump for every single command. Both paths live in the same binary so they
+	// can be compared back to back, on the same scene, without rebuilding.
+	static inline const bool notify_every_command = []() {
+		const char *v = std::getenv("GODOT_QUEUE_NOTIFY_ALWAYS");
+		return v != nullptr && v[0] == '1';
+	}();
+
 	template <typename T, bool NeedsSync, typename... Args>
 	_FORCE_INLINE_ void _push_internal(Args &&...args) {
 		MutexLock mlock(mutex);
+
+		// Only wake the pump when the queue goes from empty to non-empty.
+		//
+		// notify_yield_over() locks the WorkerThreadPool's global task mutex, looks the task up
+		// in a hash map and signals a condition variable -- i.e. a kernel wake-up. Doing that for
+		// *every* command is what an ETW profile of this project showed: on a 400-entity scene,
+		// SwapContext accounted for 39% of the process' CPU samples and KeAlertThreadByThreadIdEx
+		// for 26%, with almost nothing left for actual work.
+		//
+		// While `pending` is true the pump has already been signalled and has not finished
+		// draining: _flush() re-reads command_mem.size() on every iteration under this same
+		// mutex, so commands appended in the meantime are picked up without a new signal.
+		// `pending` is only cleared by _flush(), also under this mutex, so the test cannot race.
+		const bool was_idle = !pending.load(std::memory_order_relaxed);
+
 		create_command<T>(std::forward<Args>(args)...);
 
-		if (pump_task_id != WorkerThreadPool::INVALID_TASK_ID) {
+		if (pump_task_id != WorkerThreadPool::INVALID_TASK_ID && (was_idle || notify_every_command)) {
 			WorkerThreadPool::get_singleton()->notify_yield_over(pump_task_id);
 		}
 
