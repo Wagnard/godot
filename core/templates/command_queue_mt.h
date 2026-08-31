@@ -163,7 +163,23 @@ class CommandQueueMT {
 
 		create_command<T>(std::forward<Args>(args)...);
 
-		if (pump_task_id != WorkerThreadPool::INVALID_TASK_ID && (was_idle || notify_every_command)) {
+		// A synchronous push always notifies, whatever `pending` says. `NeedsSync` is a template
+		// parameter, so for the fire-and-forget pushes -- the thousands per frame this whole
+		// change exists to make cheaper -- the condition folds back to `was_idle` at compile time
+		// and costs nothing. A synchronous caller is about to block on sync_cond_var anyway, so
+		// the wake-up is free next to the round trip it is already paying for.
+		//
+		// This is the safety net. The reasoning above assumes every consumed wake-up is followed
+		// by a drain, and the engine does not honour that everywhere: `yield_is_over` lives on the
+		// ThreadData so a nested yield can steal it, `flushing` is thread_local and shared across
+		// queues so _flush() can return without draining, and the physics pump skips its drain
+		// while `doing_sync` is armed. Any of those consumes a wake-up without draining, and with
+		// `pending` stuck true nothing would ever notify again -- an unrecoverable freeze,
+		// observed in a dump: main thread parked in push_and_sync, render pump asleep in yield().
+		// Because RenderingServer::sync() runs once per frame and is a synchronous push, it now
+		// acts as a heartbeat that drains everything. The worst case degrades to one frame of
+		// latency instead of a deadlock, and the global invariant no longer has to hold.
+		if (pump_task_id != WorkerThreadPool::INVALID_TASK_ID && (was_idle || NeedsSync || notify_every_command)) {
 			WorkerThreadPool::get_singleton()->notify_yield_over(pump_task_id);
 		}
 
