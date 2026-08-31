@@ -565,7 +565,26 @@ void WorkerThreadPool::_wait_collaboratively(ThreadData *p_caller_pool_thread, T
 		}
 
 		if (task_to_process) {
+			// `yield_is_over` lives on the ThreadData, not on the Task, so it is shared between
+			// this waiter and whatever nested task we are about to run on the same pool thread.
+			// If that task yields too -- ResourceLoader does -- its wait consumes the flag, and
+			// the wake-up meant for us is gone. Our caller is then never notified again:
+			// notify_yield_over() is one-shot for ResourceLoader, and CommandQueueMT only
+			// re-notifies while its queue is empty. Stash the flag across the nested run so the
+			// nested waiter can only consume wake-ups that arrive during its own execution.
+			bool outer_yield_is_over;
+			{
+				MutexLock lock(task_mutex);
+				outer_yield_is_over = p_caller_pool_thread->yield_is_over;
+				p_caller_pool_thread->yield_is_over = false;
+			}
+
 			_process_task(task_to_process);
+
+			if (outer_yield_is_over) {
+				MutexLock lock(task_mutex);
+				p_caller_pool_thread->yield_is_over = true;
+			}
 		}
 	}
 }
