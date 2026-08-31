@@ -572,6 +572,15 @@ namespace Godot.NativeInterop
             get => _data == IntPtr.Zero;
         }
 
+        // [MySupCom] The interned pointer, so callers can key a cache on a StringName's identity
+        // without decoding it into a managed string. `_data` *is* the identity: `operator ==` and
+        // `IsEmpty` above both compare nothing else.
+        internal readonly IntPtr Interned
+        {
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            get => _data;
+        }
+
         public static bool operator ==(godot_string_name left, godot_string_name right)
         {
             return left._data == right._data;

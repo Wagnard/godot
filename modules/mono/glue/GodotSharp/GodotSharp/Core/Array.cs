@@ -1013,7 +1013,9 @@ namespace Godot.Collections
 
             for (int i = 0; i < count; i++)
             {
-                yield return this[i];
+                // `count` already bounds the loop, so skip the indexer's redundant bounds check:
+                // it re-reads Count, which costs a P/Invoke per element.
+                yield return GetElementAtUnchecked(i);
             }
         }
 
@@ -1050,6 +1052,18 @@ namespace Godot.Collections
         internal unsafe void GetVariantBorrowElementAtUnchecked(int index, out godot_variant elem)
         {
             elem = NativeValue.DangerousSelfRef.Elements[index];
+        }
+
+        /// <summary>
+        /// Unchecked counterpart of the indexer getter, for callers that have already bounded
+        /// <paramref name="index"/> themselves. Kept out of the iterators that use it because
+        /// <see cref="godot_variant"/> is a ref struct and cannot be hoisted into an iterator's
+        /// state machine.
+        /// </summary>
+        internal Variant GetElementAtUnchecked(int index)
+        {
+            GetVariantBorrowElementAtUnchecked(index, out godot_variant borrowElem);
+            return Variant.CreateCopyingBorrowed(borrowElem);
         }
 
         private void ThrowIfReadOnly()
@@ -1915,6 +1929,18 @@ namespace Godot.Collections
         // IEnumerable<T>
 
         /// <summary>
+        /// Unchecked counterpart of the indexer getter, for callers that have already bounded
+        /// <paramref name="index"/> themselves. Kept out of the iterator that uses it because
+        /// <see cref="godot_variant"/> is a ref struct and cannot be hoisted into an iterator's
+        /// state machine.
+        /// </summary>
+        private T GetElementAtUnchecked(int index)
+        {
+            _underlyingArray.GetVariantBorrowElementAtUnchecked(index, out godot_variant borrowElem);
+            return VariantUtils.ConvertTo<T>(borrowElem);
+        }
+
+        /// <summary>
         /// Gets an enumerator for this <see cref="Array{T}"/>.
         /// </summary>
         /// <returns>An enumerator.</returns>
@@ -1924,7 +1950,9 @@ namespace Godot.Collections
 
             for (int i = 0; i < count; i++)
             {
-                yield return this[i];
+                // `count` already bounds the loop, so skip the indexer's redundant bounds check:
+                // it re-reads Count, which costs a P/Invoke per element.
+                yield return GetElementAtUnchecked(i);
             }
         }
 

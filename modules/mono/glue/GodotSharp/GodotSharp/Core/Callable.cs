@@ -26,6 +26,10 @@ namespace Godot
     /// }
     /// </code>
     /// </example>
+    // Call/CallDeferred each stackalloc two fixed-size scratch spans; without this the JIT
+    // zero-initializes them on every invocation, even for a no-argument call. Generated
+    // NativeCalls.cs already carries the attribute for the same pattern.
+    [SkipLocalsInit]
     public readonly partial struct Callable
     {
         private readonly GodotObject _target;

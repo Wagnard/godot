@@ -94,11 +94,11 @@ namespace Godot.Bridge
         {
             try
             {
-                using var stringName = StringName.CreateTakingOwnershipOfDisposableValue(
-                    NativeFuncs.godotsharp_string_name_new_copy(CustomUnsafe.AsRef(nativeTypeName)));
-                string nativeTypeNameStr = stringName.ToString();
+                // [MySupCom] Fast path: the interned pointer identifies the class, so no decode.
+                if (!_constructorByInternedName.TryGetValue(nativeTypeName->Interned, out var ctor))
+                    ctor = RegisterNativeConstructor(nativeTypeName);
 
-                var instance = Constructors.Invoke(nativeTypeNameStr, godotObject);
+                var instance = ctor.Invoke(godotObject);
 
                 return GCHandle.ToIntPtr(CustomGCHandle.AllocStrong(instance));
             }
@@ -107,6 +107,58 @@ namespace Godot.Bridge
                 ExceptionUtils.LogException(e);
                 return IntPtr.Zero;
             }
+        }
+
+        // [MySupCom] Constructor lookup keyed by the interned StringName pointer.
+        //
+        // The stock path decoded the native class name into a managed string on *every* managed
+        // wrapper the engine creates, purely to key `Constructors.BuiltInMethodConstructors`,
+        // which is a `Dictionary<string, ...>`. In a game that instantiates glTF scenes at
+        // runtime that decode — `UTF32Encoding.GetChars` and its replacement-fallback buffer —
+        // together with the temporary `StringName` was the single largest source of managed
+        // allocation measured by `dotnet-trace`: about 17 MB per two minutes of play, ahead of
+        // everything the game itself allocated.
+        //
+        // A StringName is interned, so its data pointer is its identity — `godot_string_name`'s
+        // `operator ==` compares nothing else. Keying on that pointer removes the decode, the
+        // string and the temporary StringName from the hot path; only the first sighting of a
+        // given class name pays.
+        //
+        // Semantics are unchanged, including the exception thrown for an unknown type.
+        private readonly struct NativeConstructor
+        {
+            public readonly Func<IntPtr, GodotObject> Invoke;
+
+            // Roots the interned name. Deliberately never disposed: without it the name could be
+            // freed and its pointer handed out again for a different class, and this cache would
+            // then answer with the wrong constructor.
+            private readonly StringName _keepAlive;
+
+            public NativeConstructor(Func<IntPtr, GodotObject> invoke, StringName keepAlive)
+            {
+                Invoke = invoke;
+                _keepAlive = keepAlive;
+            }
+        }
+
+        private static readonly ConcurrentDictionary<IntPtr, NativeConstructor>
+            _constructorByInternedName = new();
+
+        // [MySupCom] Slow path, taken once per distinct class name.
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static unsafe NativeConstructor RegisterNativeConstructor(godot_string_name* nativeTypeName)
+        {
+            var stringName = StringName.CreateTakingOwnershipOfDisposableValue(
+                NativeFuncs.godotsharp_string_name_new_copy(CustomUnsafe.AsRef(nativeTypeName)));
+
+            string nativeTypeNameStr = stringName.ToString();
+
+            if (!Constructors.BuiltInMethodConstructors.TryGetValue(nativeTypeNameStr, out var constructor))
+                throw new InvalidOperationException("Wrapper class not found for type: " + nativeTypeNameStr);
+
+            var entry = new NativeConstructor(constructor, stringName);
+            _constructorByInternedName[nativeTypeName->Interned] = entry;
+            return entry;
         }
 
         [UnmanagedCallersOnly]
@@ -123,10 +175,22 @@ namespace Godot.Bridge
 
                 Debug.Assert(!scriptType.IsAbstract, $"Cannot create script instance. The class '{scriptType.FullName}' is abstract.");
 
-                var ctor = scriptType
-                    .GetConstructors(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
-                    .Where(c => c.GetParameters().Length == argCount)
-                    .FirstOrDefault();
+                // Plain loop rather than LINQ: the predicate would capture `argCount`, allocating a
+                // closure, a Func and an iterator on every instantiation. Also keeps the matching
+                // constructor's parameters so they are not looked up a second time below.
+                ConstructorInfo? ctor = null;
+                ParameterInfo[]? ctorParameters = null;
+                foreach (var candidate in scriptType.GetConstructors(
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+                {
+                    var candidateParameters = candidate.GetParameters();
+                    if (candidateParameters.Length == argCount)
+                    {
+                        ctor = candidate;
+                        ctorParameters = candidateParameters;
+                        break;
+                    }
+                }
 
                 if (ctor == null)
                 {
@@ -144,10 +208,14 @@ namespace Godot.Bridge
 
                 var obj = (GodotObject)RuntimeHelpers.GetUninitializedObject(scriptType);
 
-                var parameters = ctor.GetParameters();
+                var parameters = ctorParameters!;
                 int paramCount = parameters.Length;
 
-                var invokeParams = new object?[paramCount];
+                // instance_create passes argCount == 0 on the common path, so this is almost
+                // always the shared empty instance. Invoke cannot write into a zero-length array.
+                var invokeParams = paramCount == 0
+                    ? System.Array.Empty<object?>()
+                    : new object?[paramCount];
 
                 for (int i = 0; i < paramCount; i++)
                 {
