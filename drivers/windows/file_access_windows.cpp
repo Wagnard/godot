@@ -559,9 +559,11 @@ bool FileAccessWindows::store_buffer(const uint8_t *p_src, uint64_t p_length) {
 	ERR_FAIL_COND_V(!p_src && p_length > 0, false);
 
 	if (flags == READ_WRITE || flags == WRITE_READ) {
-		if (prev_op == READ) {
-			// Rewind the CRT cursor to the caller's logical position so the
-			// write lands where they expect, not past any buffered read-ahead.
+		// Rewind the CRT cursor to the caller's logical position so the write
+		// lands where they expect, not past any buffered read-ahead. `prev_op`
+		// alone is not a reliable signal: seek()'s in-cache fast path clears it
+		// without moving the CRT cursor, so a live cache must be checked too.
+		if (prev_op == READ || read_cache_filled > 0) {
 			_sync_for_write();
 		}
 		prev_op = WRITE;
