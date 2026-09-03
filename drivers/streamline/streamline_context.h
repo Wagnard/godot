@@ -108,6 +108,13 @@ public:
 	static StreamlineContext &get();
 
 	sl::FrameToken *last_token = nullptr;
+	// Our own frame index, handed to slGetNewFrameToken. See get_new_frame_token().
+	uint32_t frame_index = 0;
+
+	// The token of the frame the render thread is drawing. Set by the draw command itself
+	// (RenderingServerDefault::_draw), so it travels through the command queue with the frame
+	// it belongs to and cannot be renewed under the render thread's feet. Read by dlss.cpp.
+	sl::FrameToken *render_token = nullptr;
 	bool is_game = false;
 
 	sl::ViewportHandle dlssg_viewport;

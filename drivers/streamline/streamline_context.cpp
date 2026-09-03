@@ -232,7 +232,18 @@ void StreamlineContext::reflex_get_state(sl::ReflexState &reflexState) {
 }
 
 sl::FrameToken *StreamlineContext::get_new_frame_token() {
-	sl::Result result = this->slGetNewFrameToken ? this->slGetNewFrameToken(last_token, nullptr) : sl::Result::eOk;
+	// The frame index is ours, monotonic per request. Left to Streamline (nullptr), the index
+	// only advances on present: a frame rendered without one — the window being minimized,
+	// which is what alt-tab does to an exclusive fullscreen window — yields two tokens
+	// carrying the same index, and the next slSetConstants is refused with
+	// eErrorDuplicatedConstants, so that frame is never upscaled. Reproduced with the game's
+	// DevVideo probe: one refusal per minimization, every run. One token per main-loop
+	// iteration is what the engine requests anyway; giving it a number of its own just stops
+	// the count from depending on whether the swapchain presented the previous frame. The
+	// other half of the same refusal is which token the render thread reads: see
+	// RenderingServerDefault::draw.
+	++frame_index;
+	sl::Result result = this->slGetNewFrameToken ? this->slGetNewFrameToken(last_token, &frame_index) : sl::Result::eOk;
 	ERR_FAIL_COND_V_MSG(result != sl::Result::eOk, nullptr, StreamlineContext::result_to_string(result));
 	return last_token;
 }

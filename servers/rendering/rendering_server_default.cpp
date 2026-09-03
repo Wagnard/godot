@@ -39,6 +39,10 @@
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_server_globals.h"
 
+#ifdef STREAMLINE_ENABLED
+#include "drivers/streamline/streamline_context.h"
+#endif
+
 #ifndef XR_DISABLED
 #include "servers/xr/xr_server.h"
 #endif
@@ -73,7 +77,11 @@ void RenderingServerDefault::request_frame_drawn_callback(const Callable &p_call
 	frame_drawn_callbacks.push_back(p_callable);
 }
 
-void RenderingServerDefault::_draw(bool p_swap_buffers, double frame_step) {
+void RenderingServerDefault::_draw(bool p_swap_buffers, double frame_step, uint64_t p_frame_token) {
+#ifdef STREAMLINE_ENABLED
+	// The Streamline token this draw was issued with, see draw(). Read on this thread only.
+	StreamlineContext::get().render_token = (sl::FrameToken *)p_frame_token;
+#endif
 	GodotProfileZoneGroupedFirst(_profile_zone, "rasterizer->begin_frame");
 	RSG::rasterizer->begin_frame(frame_step);
 
@@ -445,10 +453,22 @@ void RenderingServerDefault::draw(bool p_present, double frame_step) {
 	// Needs to be done before changes is reset to 0, to not force the editor to redraw.
 	RS::get_singleton()->emit_signal(SNAME("frame_pre_draw"));
 	changes = 0;
+
+	// The Streamline frame token is renewed by the main thread at the end of every iteration,
+	// while the DLSS pass runs on the render thread and used to read it at execution time. A
+	// render that lagged past that renewal took the next token, and a quick one right after
+	// took the same token again: slSetConstants refused it as duplicated constants and that
+	// frame was never upscaled — one refusal per window minimization in the game's DevVideo
+	// probe. The token now rides the draw command with its frame, in queue order with
+	// everything else the render thread does for it.
+	uint64_t frame_token = 0;
+#ifdef STREAMLINE_ENABLED
+	frame_token = (uint64_t)StreamlineContext::get().last_token;
+#endif
 	if (create_thread) {
-		command_queue.push(this, &RenderingServerDefault::_draw, p_present, frame_step);
+		command_queue.push(this, &RenderingServerDefault::_draw, p_present, frame_step, frame_token);
 	} else {
-		_draw(p_present, frame_step);
+		_draw(p_present, frame_step, frame_token);
 	}
 }
 
