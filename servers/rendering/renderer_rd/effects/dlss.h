@@ -58,6 +58,11 @@ public:
 		Projection reprojection;
 		Projection cam_projection;
 		Transform3D cam_transform;
+		// Previous camera, for the matrices handed to Streamline. `reprojection` above is
+		// built in the decode shader's convention (z in [-1,1], y flipped) and must stay so;
+		// Streamline gets a separate set built from these, in the depth buffer's convention.
+		Projection prev_cam_projection;
+		Transform3D prev_cam_transform;
 		bool dlss_g = false;
 
 		// DLSS Ray Reconstruction buffers

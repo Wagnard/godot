@@ -427,16 +427,42 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext
 	// Set SL Options
 	if (StreamlineContext::get().slSetConstants != nullptr) {
 		sl::float4x4 mtxIdentity = sl_make_identity_matrix();
-		context->constants.cameraViewToClip = sl_convert_matrix(p_params.cam_projection); // projection mtx (unjittered)
-		context->constants.clipToCameraView = sl_convert_matrix(p_params.cam_projection.inverse()); // projection mtx (unjittered, inverted)
-		context->constants.clipToLensClip = mtxIdentity; // keep identity unless some lens distortion is applied
-		context->constants.clipToPrevClip = sl_convert_matrix(p_params.reprojection); // reprojection matrix
-		context->constants.prevClipToClip = sl_convert_matrix(p_params.reprojection.inverse()); // inverted reprojection matrix
 
+		// Streamline forms its clip-space point from the pixel and the value it reads in the
+		// tagged depth buffer, then runs it through these matrices. That depth is reverse-Z in
+		// [0,1] (near = 1, depthInverted below). The matrices used to be the raw GL projection
+		// (z in [-1,1], near = -1, not reversed) and p_params.reprojection (z in [-1,1] reversed,
+		// y flipped) — three conventions in one struct, each disagreeing with the depth. Fed
+		// raw, the whole [0,1] range lands in the few centimetres in front of the near plane, so
+		// a camera translation reprojects the sky and a building 30 m away as if both were
+		// 10 cm from the eye; a rotation is a depth-independent homography and comes out right
+		// regardless. Seen as static geometry jumping for a frame under DLSS-G whenever the
+		// camera displacement changed (start of a walk; every physics tick with interpolation
+		// off), never on mouse look.
+		//
+		// So Streamline gets its own set, built in the depth buffer's convention: reverse-Z
+		// remapped to [0,1], y as the GL/D3D projection has it (up), un-jittered as required.
+		// p_params.reprojection is left untouched: the motion vector decode pass above depends
+		// on its [-1,1] convention (motion_vector_inc.glsl remaps depth*2-1 before using it).
+		Projection sl_corr;
+		sl_corr.set_depth_correction(false, true, true);
+		Projection sl_proj = sl_corr * p_params.cam_projection;
+		Projection sl_prev_proj = sl_corr * p_params.prev_cam_projection;
+		Projection sl_reproj = sl_prev_proj * Projection(p_params.prev_cam_transform.affine_inverse()) * Projection(p_params.cam_transform) * sl_proj.inverse();
+
+		context->constants.cameraViewToClip = sl_convert_matrix(sl_proj); // projection mtx (unjittered)
+		context->constants.clipToCameraView = sl_convert_matrix(sl_proj.inverse()); // projection mtx (unjittered, inverted)
+		context->constants.clipToLensClip = mtxIdentity; // keep identity unless some lens distortion is applied
+		context->constants.clipToPrevClip = sl_convert_matrix(sl_reproj); // reprojection matrix
+		context->constants.prevClipToClip = sl_convert_matrix(sl_reproj.inverse()); // inverted reprojection matrix
+
+		// Basis stores its axes transposed, as rows: rows[i] is not axis i. For any camera not
+		// facing world -Z the rows describe a mirrored camera.
+		const Basis &cam_basis = p_params.cam_transform.get_basis();
 		context->constants.cameraPos = sl_convert_vector(p_params.cam_transform.get_origin());
-		context->constants.cameraFwd = sl_convert_vector(-p_params.cam_transform.get_basis().rows[2]);
-		context->constants.cameraUp = sl_convert_vector(p_params.cam_transform.get_basis().rows[1]);
-		context->constants.cameraRight = sl_convert_vector(p_params.cam_transform.get_basis().rows[0]);
+		context->constants.cameraFwd = sl_convert_vector(-cam_basis.get_column(2));
+		context->constants.cameraUp = sl_convert_vector(cam_basis.get_column(1));
+		context->constants.cameraRight = sl_convert_vector(cam_basis.get_column(0));
 
 		context->constants.cameraNear = p_params.z_near;
 		context->constants.cameraFar = p_params.z_far;

@@ -1852,7 +1852,9 @@ void RenderForwardClustered::_render_3d_upscaling(const RenderDataRD *p_render_d
 		for (uint32_t v = 0; v < rb->get_view_count(); v++) {
 			real_t fov = p_render_data->scene_data->cam_projection.get_fov();
 			real_t aspect = p_render_data->scene_data->cam_projection.get_aspect();
-			real_t fovy = p_render_data->scene_data->cam_projection.get_fovy(fov, aspect);
+			// get_fov() is horizontal; the vertical angle wants 1/aspect (see set_perspective and
+			// the FSR2 path above). With `aspect` a 75-degree camera was reported as 135 degrees.
+			real_t fovy = p_render_data->scene_data->cam_projection.get_fovy(fov, 1.0 / aspect);
 			Vector2 jitter = p_render_data->scene_data->taa_jitter * Vector2(rb->get_internal_size()) * 0.5f;
 			RendererRD::DLSSContext::Parameters params;
 			params.context = rb_data->get_dlss_context();
@@ -1893,6 +1895,8 @@ void RenderForwardClustered::_render_3d_upscaling(const RenderDataRD *p_render_d
 			params.reprojection = (correction * prev_proj) * prev_transform.affine_inverse() * cur_transform * (correction * cur_proj).inverse();
 			params.cam_projection = cur_proj;
 			params.cam_transform = cur_transform;
+			params.prev_cam_projection = prev_proj;
+			params.prev_cam_transform = prev_transform;
 
 			rb->set_upscaler_ready(dlss_effect->is_ready(rb_data->get_dlss_context()));
 			dlss_effect->upscale(params);
