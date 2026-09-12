@@ -302,6 +302,7 @@ void RendererViewport::_configure_3d_render_buffers(Viewport *p_viewport) {
 			rb_config.set_anisotropic_filtering_level(p_viewport->anisotropic_filtering_level);
 			rb_config.set_use_taa(use_taa);
 			rb_config.set_use_frame_generation(p_viewport->frame_generation);
+			rb_config.set_frame_generation_multiplier(p_viewport->frame_generation_multiplier);
 			rb_config.set_use_debanding(p_viewport->use_debanding);
 
 			p_viewport->render_buffers->configure(&rb_config);
@@ -1122,6 +1123,14 @@ void RendererViewport::viewport_set_frame_generation(RID p_viewport, bool p_fram
 	ERR_FAIL_NULL(viewport);
 
 	viewport->frame_generation = p_frame_generation;
+	_configure_3d_render_buffers(viewport);
+}
+
+void RendererViewport::viewport_set_frame_generation_multiplier(RID p_viewport, int p_multiplier) {
+	Viewport *viewport = viewport_owner.get_or_null(p_viewport);
+	ERR_FAIL_NULL(viewport);
+
+	viewport->frame_generation_multiplier = CLAMP(p_multiplier, 2, 4);
 	_configure_3d_render_buffers(viewport);
 }
 

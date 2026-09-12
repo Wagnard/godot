@@ -64,6 +64,7 @@ public:
 		Projection prev_cam_projection;
 		Transform3D prev_cam_transform;
 		bool dlss_g = false;
+		int dlss_g_frames = 1; // generated frames between two rendered ones: 1 = 2x, 2 = 3x, 3 = 4x
 
 		// DLSS Ray Reconstruction buffers
 		bool dlss_rr = false; // Enable DLSS-RR mode instead of regular DLSS

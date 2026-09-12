@@ -4347,6 +4347,14 @@
 				Toggles Frame Generation technology on a viewport. (Currently supports DLSS 3.0 - NVIDIA only)
 			</description>
 		</method>
+		<method name="viewport_set_frame_generation_multiplier">
+			<return type="void" />
+			<param index="0" name="viewport" type="RID" />
+			<param index="1" name="multiplier" type="int" />
+			<description>
+				Sets how many frames DLSS Frame Generation presents per rendered frame on the viewport, from 2 to 4. See [member Viewport.frame_generation_multiplier].
+			</description>
+		</method>
 		<method name="viewport_set_fsr_sharpness">
 			<return type="void" />
 			<param index="0" name="viewport" type="RID" />

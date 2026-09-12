@@ -347,6 +347,9 @@
 		<member name="frame_generation" type="bool" setter="set_frame_generation" getter="get_frame_generation" default="false">
 			Enables Frame Generation technology on this viewport, if available. (currently DLSS 3.0 is supported - NVIDIA only)
 		</member>
+		<member name="frame_generation_multiplier" type="int" setter="set_frame_generation_multiplier" getter="get_frame_generation_multiplier" default="2">
+			How many frames DLSS Frame Generation presents per rendered frame: [code]2[/code] is the classic 2x, [code]3[/code] and [code]4[/code] are Multi Frame Generation. Clamped by the renderer to what the device supports. Only effective while [member frame_generation] is enabled.
+		</member>
 		<member name="fsr_sharpness" type="float" setter="set_fsr_sharpness" getter="get_fsr_sharpness" default="0.2">
 			Determines how sharp the upscaled image will be when using the FSR upscaling mode. Sharpness halves with every whole number. Values go from 0.0 (sharpest) to 2.0. Values above 2.0 won't make a visible difference.
 			To control this property on the root viewport, set the [member ProjectSettings.rendering/scaling_3d/fsr_sharpness] project setting.

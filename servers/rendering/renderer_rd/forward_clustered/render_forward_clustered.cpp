@@ -1867,6 +1867,7 @@ void RenderForwardClustered::_render_3d_upscaling(const RenderDataRD *p_render_d
 			params.exposure = exposure;
 			params.output = rb->get_upscaled_texture(v);
 			params.dlss_g = rb->get_frame_generation();
+			params.dlss_g_frames = rb->get_frame_generation_multiplier() - 1;
 			params.preset = '?'; // FIXME: Unique preset per viewport? Does anyone need this?
 			params.z_near = p_render_data->scene_data->z_near;
 			params.z_far = p_render_data->scene_data->z_far;

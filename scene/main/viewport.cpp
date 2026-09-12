@@ -5084,6 +5084,24 @@ bool Viewport::get_frame_generation() const {
 	return frame_generation;
 }
 
+// Frames DLSS-G generates between two rendered ones, plus one: 2 is the classic 2x, 3 and 4
+// are Multi Frame Generation, which the runtime only grants on hardware that supports it
+// (DLSSGState::numFramesToGenerateMax). The renderer clamps to what the device reports.
+void Viewport::set_frame_generation_multiplier(int p_multiplier) {
+	ERR_MAIN_THREAD_GUARD;
+	p_multiplier = CLAMP(p_multiplier, 2, 4);
+	if (frame_generation_multiplier == p_multiplier) {
+		return;
+	}
+
+	frame_generation_multiplier = p_multiplier;
+	RS::get_singleton()->viewport_set_frame_generation_multiplier(viewport, p_multiplier);
+}
+
+int Viewport::get_frame_generation_multiplier() const {
+	return frame_generation_multiplier;
+}
+
 void Viewport::set_scaling_3d_scale(float p_scaling_3d_scale) {
 	ERR_MAIN_THREAD_GUARD;
 	// Clamp to reasonable values that are actually useful.
@@ -5350,6 +5368,8 @@ void Viewport::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("set_frame_generation", "frame_generation"), &Viewport::set_frame_generation);
 	ClassDB::bind_method(D_METHOD("get_frame_generation"), &Viewport::get_frame_generation);
+	ClassDB::bind_method(D_METHOD("set_frame_generation_multiplier", "multiplier"), &Viewport::set_frame_generation_multiplier);
+	ClassDB::bind_method(D_METHOD("get_frame_generation_multiplier"), &Viewport::get_frame_generation_multiplier);
 
 	ClassDB::bind_method(D_METHOD("set_fsr_sharpness", "fsr_sharpness"), &Viewport::set_fsr_sharpness);
 	ClassDB::bind_method(D_METHOD("get_fsr_sharpness"), &Viewport::get_fsr_sharpness);
@@ -5404,6 +5424,7 @@ void Viewport::_bind_methods() {
 	}
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "scaling_3d_scale", PROPERTY_HINT_RANGE, "0.25,2.0,0.01"), "set_scaling_3d_scale", "get_scaling_3d_scale");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "frame_generation"), "set_frame_generation", "get_frame_generation");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "frame_generation_multiplier", PROPERTY_HINT_RANGE, "2,4,1"), "set_frame_generation_multiplier", "get_frame_generation_multiplier");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "texture_mipmap_bias", PROPERTY_HINT_RANGE, "-2,2,0.001"), "set_texture_mipmap_bias", "get_texture_mipmap_bias");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "anisotropic_filtering_level", PROPERTY_HINT_ENUM, String::utf8("Disabled (Fastest),2× (Faster),4× (Fast),8× (Average),16x (Slow)")), "set_anisotropic_filtering_level", "get_anisotropic_filtering_level");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "fsr_sharpness", PROPERTY_HINT_RANGE, "0,2,0.01"), "set_fsr_sharpness", "get_fsr_sharpness");

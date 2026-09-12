@@ -53,6 +53,7 @@ private:
 	bool use_taa = false;
 	bool use_debanding = false;
 	bool use_frame_generation = false;
+	int frame_generation_multiplier = 2;
 
 protected:
 	static void _bind_methods();
@@ -96,6 +97,9 @@ public:
 
 	bool get_use_frame_generation() const { return use_frame_generation; }
 	void set_use_frame_generation(bool p_frame_generation) { use_frame_generation = p_frame_generation; }
+
+	int get_frame_generation_multiplier() const { return frame_generation_multiplier; }
+	void set_frame_generation_multiplier(int p_multiplier) { frame_generation_multiplier = p_multiplier; }
 
 	RenderSceneBuffersConfiguration() {}
 	virtual ~RenderSceneBuffersConfiguration() {}

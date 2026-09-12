@@ -517,6 +517,32 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext
 		bool wantActivateDLSSG = p_params.dlss_g;
 		bool canActivateDLSSG = StreamlineContext::get().dlssg_delay == 0;
 
+		// Multi Frame Generation: the count is what the caller asks, clamped to what the device
+		// reports (DLSSGState::numFramesToGenerateMax — 1 on 40-series, 3 on 50-series). Asking
+		// for more than the maximum is refused by the runtime, so it is clamped rather than passed.
+		uint32_t wantFrames = MAX(1, p_params.dlss_g_frames);
+		// Read only when a value is about to be applied: the state query also resets the
+		// "frames presented since last call" counter, and there is nothing to learn every frame.
+		bool applyFrames = wantActivateDLSSG && (StreamlineContext::get().dlssg_viewport != context->viewport || StreamlineContext::get().dlssg_frames != wantFrames);
+		if (applyFrames && StreamlineContext::get().slDLSSGGetState != nullptr) {
+			sl::DLSSGState dlssGState{};
+			if (StreamlineContext::get().slDLSSGGetState(context->viewport, dlssGState, nullptr) == sl::Result::eOk && dlssGState.numFramesToGenerateMax > 0) {
+				wantFrames = MIN(wantFrames, dlssGState.numFramesToGenerateMax);
+			}
+		}
+
+		// A multiplier change while DLSS-G is on re-sets the options on the same viewport.
+		if (wantActivateDLSSG && StreamlineContext::get().dlssg_viewport == context->viewport && StreamlineContext::get().dlssg_frames != wantFrames) {
+			WARN_PRINT("DLSS-G on viewport " + itos((unsigned int)context->viewport) + ": " + itos(wantFrames + 1) + "x");
+			dlssGOptions.mode = sl::DLSSGMode::eOn;
+			dlssGOptions.numFramesToGenerate = wantFrames;
+			sl::Result result = StreamlineContext::get().slDLSSGSetOptions(context->viewport, dlssGOptions);
+			if (result != sl::Result::eOk) {
+				ERR_FAIL_MSG("Failed to call streamline slDLSSGSetOptions. Result: " + String(StreamlineContext::result_to_string(result)));
+			}
+			StreamlineContext::get().dlssg_frames = wantFrames;
+		}
+
 		// Disable previous DLSS-G context if needed
 		if (StreamlineContext::get().dlssg_viewport != sl::ViewportHandle(-1) && ((!wantActivateDLSSG && StreamlineContext::get().dlssg_viewport == context->viewport) || (wantActivateDLSSG && StreamlineContext::get().dlssg_viewport != context->viewport))) {
 			WARN_PRINT("Disabling DLSS-G on viewport: " + itos((unsigned int)StreamlineContext::get().dlssg_viewport));
@@ -531,15 +557,17 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext
 
 		// Enable new DLSS-G context if needed
 		if (canActivateDLSSG && wantActivateDLSSG && StreamlineContext::get().dlssg_viewport != context->viewport) {
-			WARN_PRINT("Enabling DLSS-G on viewport: " + itos((unsigned int)context->viewport));
+			WARN_PRINT("Enabling DLSS-G on viewport: " + itos((unsigned int)context->viewport) + " at " + itos(wantFrames + 1) + "x");
 
 			dlssGOptions.mode = sl::DLSSGMode::eOn;
+			dlssGOptions.numFramesToGenerate = wantFrames;
 			sl::Result result = StreamlineContext::get().slDLSSGSetOptions(context->viewport, dlssGOptions);
 			if (result != sl::Result::eOk) {
 				ERR_FAIL_MSG("Failed to call streamline slDLSSGSetOptions. Result: " + String(StreamlineContext::result_to_string(result)));
 			}
 
 			StreamlineContext::get().dlssg_viewport = context->viewport;
+			StreamlineContext::get().dlssg_frames = wantFrames;
 		}
 	}
 

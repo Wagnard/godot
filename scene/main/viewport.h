@@ -335,6 +335,7 @@ private:
 	Scaling3DMode scaling_3d_mode = SCALING_3D_MODE_BILINEAR;
 	float scaling_3d_scale = 1.0;
 	bool frame_generation = false;
+	int frame_generation_multiplier = 2;
 	float fsr_sharpness = 0.2f;
 	float texture_mipmap_bias = 0.0f;
 	AnisotropicFiltering anisotropic_filtering_level = ANISOTROPY_4X;
@@ -622,6 +623,9 @@ public:
 
 	void set_frame_generation(bool p_frame_generation);
 	bool get_frame_generation() const;
+
+	void set_frame_generation_multiplier(int p_multiplier);
+	int get_frame_generation_multiplier() const;
 
 	void set_fsr_sharpness(float p_fsr_sharpness);
 	float get_fsr_sharpness() const;
