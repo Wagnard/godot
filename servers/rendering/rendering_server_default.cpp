@@ -305,6 +305,16 @@ void RenderingServerDefault::finish() {
 			server_task_id = WorkerThreadPool::INVALID_TASK_ID;
 		}
 		server_thread = Thread::MAIN_ID;
+#ifdef RD_ENABLED
+		// The render thread took ownership of the RD in `_assign_mt_ids`; hand it back, since
+		// the display server destroys it from the main thread. Without this, `finalize()`
+		// fails its thread guard at exit, the driver is never torn down, and Streamline is
+		// never shut down: DLSS-G then cleans itself up in DllMain at process exit and aborts.
+		RenderingDevice *rd = RenderingDevice::get_singleton();
+		if (rd) {
+			rd->make_current();
+		}
+#endif
 	} else {
 		_finish();
 	}
