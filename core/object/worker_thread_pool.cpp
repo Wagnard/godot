@@ -175,6 +175,23 @@ void WorkerThreadPool::_process_task(Task *p_task) {
 			}
 		}
 
+		// SHUTDOWN RACE. _handle_runlevel() only marks a thread idle for PRE_EXIT_LANGUAGES
+		// when BOTH queues are empty. A thread woken by _switch_runlevel() while a
+		// low-priority task was still queued therefore skips the mark, finds nothing in the
+		// high-priority queue and goes back to sleep -- and nothing ever wakes it again once
+		// that task is done, so exit_languages_threads() waits forever. Seen in an editor
+		// dump (2026-09-14): runlevel 1, both queues empty, 5 of 16 threads idle, the other
+		// 11 asleep in _thread_function with signaled == false. The thread that drains the
+		// last task pokes the stragglers so they re-evaluate the runlevel.
+		if (unlikely(runlevel == RUNLEVEL_PRE_EXIT_LANGUAGES) && !task_queue.first() && !low_priority_task_queue.first()) {
+			for (uint32_t i = 0; i < threads.size(); i++) {
+				if (!threads[i].pre_exited_languages) {
+					threads[i].cond_var.notify_one();
+					threads[i].signaled = true;
+				}
+			}
+		}
+
 		task_mutex.unlock();
 	}
 
@@ -866,6 +883,17 @@ void WorkerThreadPool::exit_languages_threads() {
 	_switch_runlevel(RUNLEVEL_PRE_EXIT_LANGUAGES);
 	while (runlevel_data.pre_exit_languages.num_idle_threads != threads.size()) {
 		control_cond_var.wait(lock);
+		// Belt and braces for the race described in _process_task(): every time the count
+		// moves, poke the threads that have not reported yet so a lost wake-up cannot
+		// strand the shutdown.
+		if (!task_queue.first() && !low_priority_task_queue.first()) {
+			for (uint32_t i = 0; i < threads.size(); i++) {
+				if (!threads[i].pre_exited_languages) {
+					threads[i].cond_var.notify_one();
+					threads[i].signaled = true;
+				}
+			}
+		}
 	}
 
 	// Wait until all threads have detached from scripting languages.
