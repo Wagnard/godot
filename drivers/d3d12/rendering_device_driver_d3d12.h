@@ -393,6 +393,17 @@ public:
 	virtual void fence_free(FenceID p_fence) override;
 
 private:
+	// DXGI_ERROR_DEVICE_REMOVED (0x887A0005) is what every call returns once the device is
+	// gone; the cause is only available from GetDeviceRemovedReason(), and only tells which
+	// kind of loss it was (GPU hung, driver internal error, external reset...). Reported once,
+	// from wherever the loss is first observed, so it precedes the error cascade in the log.
+	bool device_removed_reported = false;
+	void _report_device_removed(const char *p_where);
+	static const char *_device_removed_reason_name(HRESULT p_reason);
+
+public:
+
+private:
 	/********************/
 	/**** SEMAPHORES ****/
 	/********************/

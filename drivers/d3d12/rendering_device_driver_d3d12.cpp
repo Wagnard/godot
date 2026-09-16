@@ -1406,6 +1406,9 @@ RDD::TextureID RenderingDeviceDriverD3D12::texture_create(const TextureFormat &p
 					IID_PPV_ARGS(main_texture.GetAddressOf()));
 			initial_state = D3D12_RESOURCE_STATE_COPY_DEST;
 		}
+		if (!SUCCEEDED(res)) {
+			_report_device_removed("texture_create");
+		}
 		ERR_FAIL_COND_V_MSG(!SUCCEEDED(res), TextureID(), "CreateResource failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
 		texture = main_texture.Get();
 	}
@@ -2400,6 +2403,40 @@ RDD::FenceID RenderingDeviceDriverD3D12::fence_create() {
 	return FenceID(fence);
 }
 
+const char *RenderingDeviceDriverD3D12::_device_removed_reason_name(HRESULT p_reason) {
+	switch (p_reason) {
+		case S_OK:
+			return "S_OK (device is not removed)";
+		case DXGI_ERROR_DEVICE_HUNG:
+			return "DXGI_ERROR_DEVICE_HUNG (GPU hung executing commands; TDR)";
+		case DXGI_ERROR_DEVICE_REMOVED:
+			return "DXGI_ERROR_DEVICE_REMOVED (adapter physically removed or driver upgraded)";
+		case DXGI_ERROR_DEVICE_RESET:
+			return "DXGI_ERROR_DEVICE_RESET (reset caused by another application or the system)";
+		case DXGI_ERROR_DRIVER_INTERNAL_ERROR:
+			return "DXGI_ERROR_DRIVER_INTERNAL_ERROR (driver crashed, e.g. while compiling a pipeline)";
+		case DXGI_ERROR_INVALID_CALL:
+			return "DXGI_ERROR_INVALID_CALL (invalid API usage; would be caught by the debug layer)";
+		case DXGI_ERROR_ACCESS_DENIED:
+			return "DXGI_ERROR_ACCESS_DENIED";
+		default:
+			return "unknown";
+	}
+}
+
+void RenderingDeviceDriverD3D12::_report_device_removed(const char *p_where) {
+	if (device_removed_reported || device == nullptr) {
+		return;
+	}
+	HRESULT reason = device->GetDeviceRemovedReason();
+	if (reason == S_OK) {
+		return;
+	}
+	device_removed_reported = true;
+	ERR_PRINT(vformat("D3D12: device removed, first observed in %s. GetDeviceRemovedReason() = 0x%08ux: %s. Every D3D12 error printed after this line is a consequence, not a cause.",
+			p_where, (uint64_t)reason, _device_removed_reason_name(reason)));
+}
+
 Error RenderingDeviceDriverD3D12::fence_wait(FenceID p_fence) {
 	FenceInfo *fence = (FenceInfo *)(p_fence.id);
 	fence->d3d_fence->SetEventOnCompletion(fence->fence_value, fence->event_handle);
@@ -2407,6 +2444,10 @@ Error RenderingDeviceDriverD3D12::fence_wait(FenceID p_fence) {
 #ifdef PIX_ENABLED
 	PIXNotifyWakeFromFenceSignal(fence->event_handle);
 #endif
+
+	// A lost device signals its fences, so this is the earliest place the CPU can notice a
+	// TDR that happened while the previous frame was executing.
+	_report_device_removed("fence_wait");
 
 	return (res == WAIT_FAILED) ? FAILED : OK;
 }
@@ -2513,6 +2554,7 @@ Error RenderingDeviceDriverD3D12::command_queue_execute_and_present(CommandQueue
 		res = swap_chain->d3d_swap_chain->Present(swap_chain->sync_interval, swap_chain->present_flags);
 		if (!SUCCEEDED(res)) {
 			print_verbose(vformat("D3D12: Presenting swapchain failed with error 0x%08ux.", (uint64_t)res));
+			_report_device_removed("Present");
 			any_present_failed = true;
 		}
 	}
@@ -2811,6 +2853,9 @@ Error RenderingDeviceDriverD3D12::swap_chain_resize(CommandQueueID p_cmd_queue, 
 	if (swap_chain->d3d_swap_chain != nullptr) {
 		_swap_chain_release_buffers(swap_chain);
 		res = swap_chain->d3d_swap_chain->ResizeBuffers(p_desired_framebuffer_count, surface->width, surface->height, DXGI_FORMAT_UNKNOWN, creation_flags);
+		if (!SUCCEEDED(res)) {
+			_report_device_removed("swap_chain_resize");
+		}
 		ERR_FAIL_COND_V(!SUCCEEDED(res), ERR_UNAVAILABLE);
 	} else {
 		DEV_ASSERT(swap_chain->render_pass.id == 0);
@@ -5380,6 +5425,9 @@ RDD::PipelineID RenderingDeviceDriverD3D12::render_pipeline_create(
 		D3D12_GRAPHICS_PIPELINE_STATE_DESC desc = pipeline_desc.GraphicsDescV0();
 		res = device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(pso.GetAddressOf()));
 	}
+	if (!SUCCEEDED(res)) {
+		_report_device_removed("CreateGraphicsPipelineState");
+	}
 	ERR_FAIL_COND_V_MSG(!SUCCEEDED(res), PipelineID(), "Create(Graphics)PipelineState failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
 
 	PipelineInfo *pipeline_info = memnew(PipelineInfo);
@@ -5528,6 +5576,9 @@ RDD::PipelineID RenderingDeviceDriverD3D12::compute_pipeline_create(ShaderID p_s
 	} else {
 		D3D12_COMPUTE_PIPELINE_STATE_DESC desc = pipeline_desc.ComputeDescV0();
 		res = device->CreateComputePipelineState(&desc, IID_PPV_ARGS(pso.GetAddressOf()));
+	}
+	if (!SUCCEEDED(res)) {
+		_report_device_removed("CreateComputePipelineState");
 	}
 	ERR_FAIL_COND_V_MSG(!SUCCEEDED(res), PipelineID(), "Create(Compute)PipelineState failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
 
