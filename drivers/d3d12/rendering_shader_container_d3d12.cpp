@@ -476,6 +476,24 @@ bool RenderingShaderContainerD3D12::_convert_nir_to_dxil(const HashMap<int, nir_
 #endif
 		};
 
+		// Intel GPUs hang (DXGI_ERROR_DEVICE_HUNG) on the DXIL that a GLSL `discard` produces:
+		// SPIR-V has no conditional OpKill, so it is always a branch, and a divergent branch
+		// followed by a loop (the light loops) trips the driver. nir_to_dxil already runs
+		// nir_opt_peephole_select with these exact options in its optimization loop, but
+		// without `discard_ok`; that flag lets the pass hoist the discard out of the branch
+		// into a `discard_if(cond)`, which DXIL emits as a plain conditional `dx.op.discard`.
+		// Same semantics, no divergent control flow. Applied on every vendor on purpose: the
+		// shader cache is not keyed on the GPU, so gating it would break laptops with an
+		// Intel iGPU next to a discrete GPU. See godotengine/godot#118719, #120857, #122994.
+		{
+			nir_opt_peephole_select_options peephole_options = {};
+			peephole_options.limit = 8;
+			peephole_options.indirect_load_ok = true;
+			peephole_options.expensive_alu_ok = true;
+			peephole_options.discard_ok = true;
+			nir_opt_peephole_select(it.value, &peephole_options);
+		}
+
 		blob dxil_blob = {};
 		bool ok = nir_to_dxil(it.value, &nir_to_dxil_options, &logger, &dxil_blob);
 		ERR_FAIL_COND_V_MSG(!ok, false, "Shader translation at stage " + String(RenderingDeviceCommons::SHADER_STAGE_NAMES[stage]) + " failed.");
