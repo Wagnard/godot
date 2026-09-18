@@ -224,8 +224,47 @@ public:
 	}
 
 	//these go through command queue if they are in another thread
-	FUNC3(texture_2d_update, RID, const Ref<Image> &, int)
-	FUNC2(texture_3d_update, RID, const Vector<Ref<Image>> &)
+
+	// When queued, these carry a snapshot of the image rather than the caller's object. The
+	// caller keeps mutating its Image after the call -- the text server rasterizes the next
+	// glyph into the same atlas through ptrw() -- and with a separate render thread the queued
+	// command would read that live object. ptrw() forks the copy-on-write buffer whenever the
+	// render thread holds a reference to it, and CowData sets its pointer to null while it
+	// copies, so the render thread could observe an empty image ("Condition
+	// 'p_image->is_empty()' is true", and that upload silently lost). Image::duplicate() only
+	// shares the buffer (a refcount increment, no copy); the caller's next ptrw() then forks
+	// *its* side and the snapshot stays immutable. Same as the theora path, which already
+	// builds a fresh Image per frame for exactly this reason.
+	virtual void texture_2d_update(RID p_texture, const Ref<Image> &p_image, int p_layer) override {
+		WRITE_ACTION
+		if (ASYNC_COND_PUSH) {
+			Ref<Image> snapshot = p_image;
+			if (snapshot.is_valid()) {
+				snapshot = snapshot->duplicate();
+			}
+			command_queue.push(server_name, &ServerName::texture_2d_update, p_texture, snapshot, p_layer);
+		} else {
+			command_queue.flush_if_pending();
+			server_name->texture_2d_update(p_texture, p_image, p_layer);
+		}
+	}
+	virtual void texture_3d_update(RID p_texture, const Vector<Ref<Image>> &p_data) override {
+		WRITE_ACTION
+		if (ASYNC_COND_PUSH) {
+			Vector<Ref<Image>> snapshot;
+			snapshot.resize(p_data.size());
+			for (int i = 0; i < p_data.size(); i++) {
+				snapshot.write[i] = p_data[i];
+				if (snapshot[i].is_valid()) {
+					snapshot.write[i] = snapshot[i]->duplicate();
+				}
+			}
+			command_queue.push(server_name, &ServerName::texture_3d_update, p_texture, snapshot);
+		} else {
+			command_queue.flush_if_pending();
+			server_name->texture_3d_update(p_texture, p_data);
+		}
+	}
 	FUNC4(texture_external_update, RID, int, int, uint64_t)
 	FUNC2(texture_proxy_update, RID, RID)
 
