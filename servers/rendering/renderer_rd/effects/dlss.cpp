@@ -155,6 +155,74 @@ static Vector<unsigned int> g_dlss_freeViewportIndices;
 static unsigned int g_dlss_viewportIndex = 1;
 
 DLSSContextInner::~DLSSContextInner() {
+	// Release the per-viewport resources Streamline allocated for this context.
+	//
+	// Without this, destroying a context only returned its viewport index to the free list
+	// below -- which hands the very same index to the NEXT context created. Streamline then
+	// reconfigured the feature on a viewport whose previous allocation was still live and
+	// still referenced by command lists that had not retired, so every scaling-mode or
+	// quality change both leaked and aliased GPU resources. Under D3D12 that eventually
+	// removed the device (0x887A0005, faulting module nvwgf2umx.dll).
+	//
+	// Compare FSR2Context::~FSR2Context, which calls ffxFsr2ContextDestroy -- FSR2 never
+	// exhibited the crash.
+	StreamlineContext &sl_ctx = StreamlineContext::get();
+
+	if (sl_ctx.slFreeResources != nullptr || sl_ctx.slSetTag != nullptr) {
+		// slFreeResources is documented as requiring any command list with a pending
+		// slEvaluateFeature to be flushed first, "to prevent invalid resource access on the
+		// GPU". Contexts are only destroyed when the render buffers are reconfigured -- a
+		// settings change, not a per-frame event -- so the stall is not on any hot path.
+		RD::get_singleton()->_flush_and_stall_for_all_frames();
+	}
+
+	if (sl_ctx.slSetTag != nullptr) {
+		// Every buffer this context tags is tagged eValidUntilPresent, and the Streamline
+		// programming guide requires such tags to be set to null before the resource is
+		// destroyed, "in order to release the reference held by SL". The render buffers are
+		// about to be rebuilt -- the scaling input, depth, motion vectors and the RR buffers
+		// change size with the quality mode -- so drop every reference now, before any of them
+		// is freed and its address recycled for something else. A null tag needs no command
+		// list. Untagging a type that was never tagged is a no-op.
+		const sl::BufferType tagged_types[] = {
+			sl::kBufferTypeScalingInputColor,
+			sl::kBufferTypeScalingOutputColor,
+			sl::kBufferTypeDepth,
+			sl::kBufferTypeMotionVectors,
+			sl::kBufferTypeAlbedo,
+			sl::kBufferTypeSpecularAlbedo,
+			sl::kBufferTypeNormalRoughness,
+			sl::kBufferTypeSpecularHitDistance,
+		};
+		constexpr uint32_t tagged_count = sizeof(tagged_types) / sizeof(tagged_types[0]);
+		sl::ResourceTag null_tags[tagged_count];
+		for (uint32_t i = 0; i < tagged_count; i++) {
+			null_tags[i] = sl::ResourceTag(nullptr, tagged_types[i], sl::ResourceLifecycle::eValidUntilPresent);
+		}
+		sl::Result result = sl_ctx.slSetTag(viewport, null_tags, tagged_count, nullptr);
+		if (result != sl::Result::eOk) {
+			WARN_PRINT("Streamline: failed to release resource tags on context destruction: " + String(StreamlineContext::result_to_string(result)));
+		}
+	}
+
+	if (sl_ctx.slFreeResources != nullptr) {
+		// DLSS-RR allocates under its own feature id, so releasing only kFeatureDLSS would
+		// leave it behind. last_parameters records what this context actually evaluated.
+		//
+		// DLSS-G is deliberately NOT freed here. Its resources belong to the mode, not to the
+		// context: DLSSGMode::eOff releases them itself, and slFreeResources(kFeatureDLSS_G)
+		// is only meant for integrations that set eRetainResourcesWhenOff (this one does
+		// not). Worse, at this point DLSS-G is still eOn on this viewport with its Present
+		// hook live -- the on/off transitions are driven per frame from _upscale_internal
+		// and the new context reuses this very viewport index -- so freeing under it crashed
+		// the process on D3D12 the moment the frame-generation multiplier changed (2x -> 4x).
+		if (last_parameters.dlss_rr) {
+			sl_ctx.slFreeResources(sl::kFeatureDLSS_RR, viewport);
+		}
+
+		sl_ctx.slFreeResources(sl::kFeatureDLSS, viewport);
+	}
+
 	g_dlss_freeViewportIndices.push_back((unsigned int)viewport);
 }
 

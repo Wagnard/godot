@@ -95,6 +95,14 @@ void RenderSceneBuffersRD::update_sizes(NamedTexture &p_named_texture) {
 	}
 }
 
+// Shared by ensure_upscaled() and the preservation check in configure(), so the two cannot
+// drift apart and silently start disagreeing about whether a target can be reused.
+static uint32_t upscaled_usage_bits(bool p_can_be_storage) {
+	uint32_t usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | (p_can_be_storage ? RD::TEXTURE_USAGE_STORAGE_BIT : 0) | RD::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT;
+	usage_bits |= RD::TEXTURE_USAGE_INPUT_ATTACHMENT_BIT;
+	return usage_bits;
+}
+
 void RenderSceneBuffersRD::free_named_texture(NamedTexture &p_named_texture) {
 	if (p_named_texture.texture.is_valid()) {
 		RD::get_singleton()->free_rid(p_named_texture.texture);
@@ -180,8 +188,44 @@ void RenderSceneBuffersRD::configure(const RenderSceneBuffersConfiguration *p_co
 
 	update_samplers();
 
+	// The upscaled target is handed to the upscaler as its output. Under Streamline it is
+	// tagged kBufferTypeScalingOutputColor and, unlike the scaling input, is passed without a
+	// clone -- Streamline caches driver data for it keyed on the ID3D12Resource pointer.
+	// Destroying and recreating it on every scaling change lets the D3D12 allocator hand the
+	// same address back for an unrelated resource (NGX's own history buffers were observed
+	// landing on it), after which a cache hit binds a stale descriptor and the GPU hangs:
+	// device removed, 0x887A0005, faulting module nvwgf2umx.dll.
+	//
+	// Nothing about this target depends on the scaling mode or quality -- upscaler output is
+	// always target_size -- so recreating it was never necessary. Keep it whenever every
+	// parameter that defines it is unchanged; a differing size, format or usage still falls
+	// through to the normal destroy-and-recreate path below.
+	const NTKey upscaled_key(RB_SCOPE_BUFFERS, RB_TEX_COLOR_UPSCALED);
+	NamedTexture preserved_upscaled;
+	bool preserve_upscaled = false;
+	if (named_textures.has(upscaled_key)) {
+		const NamedTexture &existing = named_textures[upscaled_key];
+		const RD::TextureFormat &fmt = existing.format;
+		if (existing.texture.is_valid() &&
+				fmt.format == get_base_data_format() &&
+				fmt.width == (uint32_t)target_size.x &&
+				fmt.height == (uint32_t)target_size.y &&
+				fmt.array_layers == view_count &&
+				fmt.mipmaps == 1 &&
+				fmt.samples == RD::TEXTURE_SAMPLES_1 &&
+				fmt.usage_bits == upscaled_usage_bits(can_be_storage)) {
+			preserved_upscaled = existing;
+			preserve_upscaled = true;
+			named_textures.erase(upscaled_key); // Keep cleanup() from freeing it.
+		}
+	}
+
 	// cleanout any old buffers we had.
 	cleanup();
+
+	if (preserve_upscaled) {
+		named_textures[upscaled_key] = preserved_upscaled;
+	}
 
 	// Create our color buffer.
 	const bool resolve_target = msaa_3d != RSE::VIEWPORT_MSAA_DISABLED;
@@ -723,9 +767,7 @@ RID RenderSceneBuffersRD::get_depth_msaa_subsampled() {
 
 void RenderSceneBuffersRD::ensure_upscaled() {
 	if (!has_upscaled_texture()) {
-		uint32_t usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | (can_be_storage ? RD::TEXTURE_USAGE_STORAGE_BIT : 0) | RD::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT;
-		usage_bits |= RD::TEXTURE_USAGE_INPUT_ATTACHMENT_BIT;
-		create_texture(RB_SCOPE_BUFFERS, RB_TEX_COLOR_UPSCALED, get_base_data_format(), usage_bits, RD::TEXTURE_SAMPLES_1, target_size);
+		create_texture(RB_SCOPE_BUFFERS, RB_TEX_COLOR_UPSCALED, get_base_data_format(), upscaled_usage_bits(can_be_storage), RD::TEXTURE_SAMPLES_1, target_size);
 	}
 }
 
