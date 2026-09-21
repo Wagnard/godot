@@ -3485,6 +3485,9 @@
 		<member name="rendering/streamline/dlss_ray_reconstruction_preset" type="String" setter="" getter="" default="&quot;?&quot;">
 			The default NVIDIA DLSS Ray Reconstruction preset to use.
 		</member>
+		<member name="rendering/streamline/dlss_sharpening" type="bool" setter="" getter="" default="false">
+			If [code]true[/code], runs the NVIDIA Image Scaling (NIS) sharpening pass on the DLSS output, with a strength derived from [member Viewport.fsr_sharpness]. Off by default: the pass is evaluated in place on the DLSS output and has crashed the D3D12 driver when the render buffers were reconfigured (scaling or frame generation changes).
+		</member>
 		<member name="rendering/streamline/reflex_frame_limit_us" type="int" setter="" getter="" default="0">
 			If not [code]0[/code], enables NVIDIA Reflex Frame Rate Limiter, which intelligently reduces framerate whilst keeping latency as low as possible. The expected value is in micro-seconds. Example: 60 FPS = 16667 us (1,000,000 us / 60 FPS)
 		</member>

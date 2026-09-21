@@ -116,6 +116,8 @@ public:
 	// it belongs to and cannot be renewed under the render thread's feet. Read by dlss.cpp.
 	sl::FrameToken *render_token = nullptr;
 	bool is_game = false;
+	// rendering/streamline/dlss_sharpening: run the NIS sharpening pass after DLSS. Off by default, see dlss.cpp.
+	bool dlss_sharpening = false;
 
 	sl::ViewportHandle dlssg_viewport;
 	int dlssg_delay = 0;

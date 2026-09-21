@@ -220,6 +220,12 @@ DLSSContextInner::~DLSSContextInner() {
 			sl_ctx.slFreeResources(sl::kFeatureDLSS_RR, viewport);
 		}
 
+		// The NIS guide: "If previously tagged resources are destroyed (whether they are
+		// volatile or not), slFreeResources must be called unless NIS is no longer used."
+		if (sl_ctx.dlss_sharpening && last_parameters.sharpness > 0.0f) {
+			sl_ctx.slFreeResources(sl::kFeatureNIS, viewport);
+		}
+
 		sl_ctx.slFreeResources(sl::kFeatureDLSS, viewport);
 	}
 
@@ -659,9 +665,17 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext
 		}
 	}
 
-	// NIS support
-	// **********
-	if (p_params.sharpness > 0.0f && StreamlineContext::get().slNISSetOptions != nullptr && StreamlineContext::get().streamline_capabilities.nis_available) {
+	// NIS sharpening
+	// **************
+	// Off unless rendering/streamline/dlss_sharpening is set. `sharpness` is derived from the
+	// viewport's fsr_sharpness, whose default of 0.2 maps to a NIS sharpness of 0.9: every DLSS
+	// user got a heavy sharpening pass they never asked for. Worse, NIS is evaluated in place on
+	// the DLSS output, with the same resource tagged as both its input and its output -- not the
+	// layout its programming guide shows -- and on D3D12 that pass crashed the driver (read of
+	// null in nvwgf2umx.dll, same offset every time, inside the NIS evaluation) whenever the
+	// render buffers had just been reconfigured: a quality or frame-generation change, a
+	// bilinear/DLSS toggle. Skipping the pass removed the crash on the reporter's game.
+	if (StreamlineContext::get().dlss_sharpening && p_params.sharpness > 0.0f && StreamlineContext::get().slNISSetOptions != nullptr && StreamlineContext::get().streamline_capabilities.nis_available) {
 		{ // Set NIS settings
 			sl::NISOptions options;
 			options.hdrMode = sl::NISHDR::eNone;

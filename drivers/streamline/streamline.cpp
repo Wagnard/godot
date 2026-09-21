@@ -66,6 +66,7 @@ void Streamline::register_singleton() {
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/streamline/reflex_frame_limit_us", PROPERTY_HINT_RANGE, "0,1000000,1"), 0);
 	GLOBAL_DEF(PropertyInfo(Variant::STRING, "rendering/streamline/dlss_preset", PROPERTY_HINT_ENUM, "?,F,G,H,I,J,K,L,M,N,O"), "?");
 	GLOBAL_DEF(PropertyInfo(Variant::STRING, "rendering/streamline/dlss_ray_reconstruction_preset", PROPERTY_HINT_ENUM, "?,D,E,F,G,H,I,J,K,L,M,N,O"), "?");
+	GLOBAL_DEF("rendering/streamline/dlss_sharpening", false);
 }
 
 Streamline *Streamline::get_singleton() {
@@ -82,6 +83,7 @@ Streamline::~Streamline() {
 
 void Streamline::update_project_settings() {
 #ifdef STREAMLINE_ENABLED
+	StreamlineContext::get().dlss_sharpening = bool(GLOBAL_GET("rendering/streamline/dlss_sharpening"));
 	set_parameter(STREAMLINE_PARAM_REFLEX_MODE, (double)GLOBAL_GET("rendering/streamline/reflex_mode"));
 	set_parameter(STREAMLINE_PARAM_REFLEX_FRAME_LIMIT_US, (double)GLOBAL_GET("rendering/streamline/reflex_frame_limit_us"));
 	set_parameter(STREAMLINE_PARAM_DLSS_PRESET, GLOBAL_GET("rendering/streamline/dlss_preset"));
