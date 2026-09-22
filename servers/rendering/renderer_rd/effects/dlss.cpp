@@ -168,6 +168,18 @@ DLSSContextInner::~DLSSContextInner() {
 	// exhibited the crash.
 	StreamlineContext &sl_ctx = StreamlineContext::get();
 
+	// DLSS-G first. The only code that turns it off lives in _upscale_internal, which stops
+	// running the moment this context is gone -- switching the viewport to bilinear or FSR2
+	// left frame generation on, consuming depth and motion vectors that configure() was about
+	// to destroy and recreate at the same size. The DLSS-G guide requires eOff before any
+	// resolution change; dlssg_disable() does that and arms the usual re-enable delay.
+	// Sixteen bilinear/DLSS toggles hung the GPU without this; the game only survived them
+	// because its settings code happened to resize the swap chain every time, which reaches
+	// dlssg_disable() through the swap-chain marker.
+	if (sl_ctx.dlssg_viewport == viewport) {
+		sl_ctx.dlssg_disable();
+	}
+
 	if (sl_ctx.slFreeResources != nullptr || sl_ctx.slSetTag != nullptr) {
 		// slFreeResources is documented as requiring any command list with a pending
 		// slEvaluateFeature to be flushed first, "to prevent invalid resource access on the
