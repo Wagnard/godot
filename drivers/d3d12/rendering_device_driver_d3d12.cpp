@@ -5750,6 +5750,24 @@ void *RenderingDeviceDriverD3D12::command_buffer_get_native_handle(CommandBuffer
 	return cmd_buf_info->cmd_list.Get();
 }
 
+void RenderingDeviceDriverD3D12::command_buffer_invalidate_state_cache(CommandBufferID p_cmd_buffer) {
+	// Everything command_bind_*_pipeline, command_bind_*_uniform_sets and
+	// _command_check_descriptor_sets use to skip a redundant bind. Streamline's NIS dispatch
+	// binds its own heaps, root signature and PSO and restores none of them; with this cache
+	// left alone, the next compute dispatch (SSIL's mipmap chain, any pass after a render
+	// buffer reconfiguration) ran on Streamline's heaps with Godot's descriptor tables and the
+	// NVIDIA driver dereferenced null. Vulkan binds unconditionally and never had the problem.
+	CommandBufferInfo *cmd_buf_info = (CommandBufferInfo *)p_cmd_buffer.id;
+	cmd_buf_info->graphics_pso = nullptr;
+	cmd_buf_info->compute_pso = nullptr;
+	cmd_buf_info->graphics_root_signature_crc = 0;
+	cmd_buf_info->compute_root_signature_crc = 0;
+	cmd_buf_info->nir_graphics_runtime_data_root_param_idx = UINT32_MAX;
+	cmd_buf_info->nir_compute_runtime_data_root_param_idx = UINT32_MAX;
+	cmd_buf_info->pending_dyn_params = true;
+	cmd_buf_info->descriptor_heaps_set = false;
+}
+
 /********************/
 /**** SUBMISSION ****/
 /********************/

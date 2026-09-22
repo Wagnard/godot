@@ -880,6 +880,12 @@ public:
 
 	/// Returns the underlying native command buffer handle (e.g. ID3D12GraphicsCommandList* or VkCommandBuffer).
 	virtual void *command_buffer_get_native_handle(CommandBufferID p_cmd_buffer) { return nullptr; }
+	// A driver callback records on the native command list directly and may leave its own
+	// pipeline, root signature or descriptor heaps bound (Streamline's generic dispatcher does,
+	// and slInit is told not to restore anything). A driver that remembers what it last bound
+	// in order to skip redundant binds must forget it here, or its next dispatch runs on the
+	// callback's state with the driver's descriptors.
+	virtual void command_buffer_invalidate_state_cache(CommandBufferID p_cmd_buffer) {}
 
 	/********************/
 	/**** SUBMISSION ****/
