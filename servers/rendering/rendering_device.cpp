@@ -1315,6 +1315,11 @@ String RenderingDevice::get_perf_report() const {
 	perf_report_text += " bytes:" + String::num_int64(copy_bytes_count);
 
 	perf_report_text += " lazily alloc:" + String::num_int64(driver->get_lazily_memory_used());
+
+	const String descriptor_report = driver->get_descriptor_report();
+	if (!descriptor_report.is_empty()) {
+		perf_report_text += String("\n") + descriptor_report;
+	}
 	return perf_report_text;
 }
 

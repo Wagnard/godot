@@ -5899,6 +5899,33 @@ uint64_t RenderingDeviceDriverD3D12::get_lazily_memory_used() {
 	return 0;
 }
 
+String RenderingDeviceDriverD3D12::get_descriptor_report() {
+	// Everything a uniform set binds takes a slot in this one fixed-size heap, so running out
+	// of it is a hard failure ("not enough room in the RESOURCES descriptor heap") with no
+	// warning beforehand. The allocator already keeps the numbers: D3D12MA::VirtualBlock is
+	// sized in descriptors here (see DescriptorHeap::initialize), and GetStatistics() only
+	// reads counters it maintains anyway -- no iteration, nothing to pay for when unused.
+	//
+	// Called from any thread (RenderingServer::get_rendering_device() hands out the singleton
+	// directly and get_perf_report() has no render-thread guard), so this races with
+	// uniform_set_create()/free() on the rendering thread. Harmless for GetStatistics, which
+	// only reads three scalars off the metadata -- worst case is a number one allocation stale.
+	// CalculateStatistics() would NOT be safe here: it walks the block.
+	if (resource_descriptor_heap.virtual_block == nullptr) {
+		return String();
+	}
+
+	D3D12MA::Statistics stats = {};
+	resource_descriptor_heap.virtual_block->GetStatistics(&stats);
+
+	const uint64_t used = stats.AllocationBytes;
+	const uint32_t capacity = resource_descriptor_heap_capacity;
+	const double percent = capacity > 0 ? (double)used * 100.0 / (double)capacity : 0.0;
+
+	return vformat("D3D12 RESOURCES heap: %d / %d descriptors (%.1f%%), %d allocations",
+			used, capacity, percent, stats.AllocationCount);
+}
+
 uint64_t RenderingDeviceDriverD3D12::limit_get(Limit p_limit) {
 	uint64_t safe_unbounded = ((uint64_t)1 << 30);
 	switch (p_limit) {
@@ -6460,6 +6487,7 @@ Error RenderingDeviceDriverD3D12::_initialize_frames(uint32_t p_frame_count) {
 
 	Error err = resource_descriptor_heap.initialize(device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, num_resource_descriptors, true);
 	ERR_FAIL_COND_V(err != OK, ERR_CANT_CREATE);
+	resource_descriptor_heap_capacity = num_resource_descriptors;
 
 	err = sampler_descriptor_heap.initialize(device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, num_sampler_descriptors, true);
 	ERR_FAIL_COND_V(err != OK, ERR_CANT_CREATE);

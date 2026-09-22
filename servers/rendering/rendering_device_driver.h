@@ -979,6 +979,10 @@ public:
 	virtual uint64_t get_resource_native_handle(DriverResource p_type, ID p_driver_id) = 0;
 	virtual uint64_t get_total_memory_used() = 0;
 	virtual uint64_t get_lazily_memory_used() = 0;
+	// Occupancy of the driver's shader-visible descriptor heap, when it has one with a fixed
+	// size. Empty on drivers that allocate descriptors on demand (Vulkan pools, Metal argument
+	// buffers), so a caller printing this must tolerate an empty string.
+	virtual String get_descriptor_report() { return String(); }
 	virtual uint64_t limit_get(Limit p_limit) = 0;
 	virtual uint64_t api_trait_get(ApiTrait p_trait);
 	virtual bool has_feature(Features p_feature) = 0;
