@@ -31,6 +31,7 @@
 #include "render_forward_clustered.h"
 
 #include "core/config/project_settings.h"
+#include "servers/rendering/renderer_rd/effects/camera_reprojection.h"
 #include "servers/rendering/renderer_rd/environment/fog.h"
 #include "servers/rendering/renderer_rd/framebuffer_cache_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
@@ -1538,7 +1539,8 @@ void RenderForwardClustered::_process_ssr(Ref<RenderSceneBuffersRD> p_render_buf
 		correction.set_depth_correction(true);
 
 		Projection projection = correction * p_projections[v];
-		reprojections[v] = rb_data->ss_effects_data.ssr_last_frame_projections[v] * Projection(rb_data->ss_effects_data.ssr_last_frame_transform.affine_inverse()) * Projection(p_transform) * projection.inverse();
+		// Relative camera motion first: see camera_reprojection.h (float32 phantom motion far from the origin).
+		reprojections[v] = rb_data->ss_effects_data.ssr_last_frame_projections[v] * Projection(RendererRD::camera_view_delta(rb_data->ss_effects_data.ssr_last_frame_transform, p_transform)) * projection.inverse();
 
 		rb_data->ss_effects_data.ssr_last_frame_projections[v] = projection;
 	}
@@ -1833,7 +1835,9 @@ void RenderForwardClustered::_render_3d_upscaling(const RenderDataRD *p_render_d
 			const Projection &cur_proj = p_render_data->scene_data->cam_projection;
 			const Transform3D &prev_transform = p_render_data->scene_data->prev_cam_transform;
 			const Transform3D &cur_transform = p_render_data->scene_data->cam_transform;
-			params.reprojection = (correction * prev_proj) * prev_transform.affine_inverse() * cur_transform * (correction * cur_proj).inverse();
+			// Relative camera motion first: see camera_reprojection.h. Every static pixel gets its
+			// motion vector from this matrix (the velocity buffer holds the (-1,-1) sentinel there).
+			params.reprojection = (correction * prev_proj) * Projection(RendererRD::camera_view_delta(prev_transform, cur_transform)) * (correction * cur_proj).inverse();
 
 			rb->set_upscaler_ready(true);
 			fsr2_effect->upscale(params);
@@ -1893,7 +1897,11 @@ void RenderForwardClustered::_render_3d_upscaling(const RenderDataRD *p_render_d
 			const Projection &cur_proj = p_render_data->scene_data->cam_projection;
 			const Transform3D &prev_transform = p_render_data->scene_data->prev_cam_transform;
 			const Transform3D &cur_transform = p_render_data->scene_data->cam_transform;
-			params.reprojection = (correction * prev_proj) * prev_transform.affine_inverse() * cur_transform * (correction * cur_proj).inverse();
+			// Relative camera motion first: see camera_reprojection.h. The mvec decode pass derives
+			// every static pixel's motion vector from this matrix; built from the absolute
+			// transforms it handed DLSS a constant 0.1-0.25 px drift for a still camera in the
+			// dungeons placed at (7000,0,-7000) / (-7000,0,0), which DLSS smeared into the floor.
+			params.reprojection = (correction * prev_proj) * Projection(RendererRD::camera_view_delta(prev_transform, cur_transform)) * (correction * cur_proj).inverse();
 			params.cam_projection = cur_proj;
 			params.cam_transform = cur_transform;
 			params.prev_cam_projection = prev_proj;

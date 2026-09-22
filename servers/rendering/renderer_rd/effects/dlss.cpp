@@ -36,6 +36,7 @@
 
 #ifdef ENABLE_DLSS
 #include "drivers/streamline/streamline_context.h"
+#include "servers/rendering/renderer_rd/effects/camera_reprojection.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
 
@@ -534,7 +535,9 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext
 		sl_corr.set_depth_correction(false, true, true);
 		Projection sl_proj = sl_corr * p_params.cam_projection;
 		Projection sl_prev_proj = sl_corr * p_params.prev_cam_projection;
-		Projection sl_reproj = sl_prev_proj * Projection(p_params.prev_cam_transform.affine_inverse()) * Projection(p_params.cam_transform) * sl_proj.inverse();
+		// Relative camera motion first (camera_reprojection.h): from the absolute transforms this
+		// was not the identity for a still camera a few km from the origin.
+		Projection sl_reproj = sl_prev_proj * Projection(camera_view_delta(p_params.prev_cam_transform, p_params.cam_transform)) * sl_proj.inverse();
 
 		context->constants.cameraViewToClip = sl_convert_matrix(sl_proj); // projection mtx (unjittered)
 		context->constants.clipToCameraView = sl_convert_matrix(sl_proj.inverse()); // projection mtx (unjittered, inverted)

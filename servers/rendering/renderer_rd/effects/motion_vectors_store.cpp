@@ -30,6 +30,7 @@
 
 #include "motion_vectors_store.h"
 
+#include "servers/rendering/renderer_rd/effects/camera_reprojection.h"
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
 
 namespace RendererRD {
@@ -67,7 +68,8 @@ void MotionVectorsStore::process(Ref<RenderSceneBuffersRD> p_render_buffers,
 
 		Projection correction;
 		correction.set_depth_correction(true, true, false);
-		Projection reprojection = (correction * p_previous_projection) * p_previous_transform.affine_inverse() * p_current_transform * (correction * p_current_projection).inverse();
+		// Relative camera motion first: see camera_reprojection.h.
+		Projection reprojection = (correction * p_previous_projection) * Projection(camera_view_delta(p_previous_transform, p_current_transform)) * (correction * p_current_projection).inverse();
 		RendererRD::MaterialStorage::store_camera(reprojection, push_constant.reprojection_matrix);
 	}
 
