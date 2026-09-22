@@ -38,16 +38,20 @@ namespace RendererRD {
 // from the current view space to the previous view space — the middle factor of every
 // `prev_proj * (...) * cur_proj.inverse()` reprojection.
 //
-// Built relative first on purpose. The usual `prev.affine_inverse() * cur` goes through two
-// transforms whose origins are the camera's WORLD position, and with real_t = float the
-// translation of the product is the difference of two large numbers: at a few kilometres from
-// the origin it is off by a float ulp of that position (~1e-3 at 10 km), which the projection
-// then turns into clip-space motion. A camera that did not move at all got a constant phantom
-// motion vector of up to 0.24 internal px on the floor in front of it at (7000, 0, -7000), and
-// 0.5 px at 15 km (measured with the engine's own Projection operators); static pixels must
-// read exactly [0, 0] (DLSS guide), and DLSS integrated the drift into a smear of every static
-// surface near the camera. Subtracting the origins first is exact for a still camera and keeps
-// full precision for a moving one.
+// Built relative first on purpose. The reprojections used to be written
+// `(corr * prev_proj) * prev.affine_inverse() * cur * (corr * cur_proj).inverse()`: Projection
+// only multiplies Projections, so both transforms were converted and the chain evaluated left to
+// right in float, folding the camera's WORLD translation into the projection before prev and cur
+// could cancel. A few kilometres from the origin that is no longer the identity for a camera that
+// did not move: a constant phantom motion vector of up to 0.24 internal px on the floor in front
+// of it at (7000, 0, -7000), 0.5 px at 15 km, depending on the view direction (measured with the
+// engine's own operators). Static pixels must read [0, 0] (DLSS guide); DLSS smeared the drift
+// into the floor under a moving light, FSR2 hid it (it treats >= 0.1 px as motion).
+//
+// Grouping the two transforms as a Transform3D product would fix the still case but still loses a
+// float ulp of the world position (~1e-3 m at 10 km) for a MOVING camera; subtracting the origins
+// first avoids both. The translation is exact for a still camera; what remains is ~2e-4 px of
+// rounding in the basis product and the projection inverse.
 _FORCE_INLINE_ Transform3D camera_view_delta(const Transform3D &p_previous, const Transform3D &p_current) {
 	const Basis previous_inverse = p_previous.basis.inverse();
 	return Transform3D(previous_inverse * p_current.basis, previous_inverse.xform(p_current.origin - p_previous.origin));
