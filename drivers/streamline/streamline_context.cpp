@@ -30,6 +30,10 @@
 
 #include "streamline_context.h"
 
+#include "core/os/os.h"
+
+#include "core/io/dir_access.h"
+
 #ifdef STREAMLINE_ENABLED
 #ifdef _WIN32
 #include <windows.h>
@@ -374,9 +378,20 @@ void StreamlineContext::initialize(bool d3d12) {
 	pref.applicationId = 0x90d07004;
 	pref.flags = sl::PreferenceFlags::eAllowOTA | sl::PreferenceFlags::eLoadDownloadedPlugins | sl::PreferenceFlags::eDisableCLStateTracking;
 
+	// Streamline only writes a log file when given a directory; left null, it logs to the console
+	// alone, and a crash takes the console with it. Kept in a static so the pointer stays valid.
+	static Char16String log_dir_w;
 	if (bool(GLOBAL_GET("rendering/streamline/streamline_log"))) {
 		pref.logLevel = sl::LogLevel::eVerbose;
 		pref.showConsole = true;
+		String log_dir = OS::get_singleton()->get_user_data_dir().path_join("streamline");
+		Ref<DirAccess> da = DirAccess::create(DirAccess::ACCESS_FILESYSTEM);
+		if (da.is_valid()) {
+			da->make_dir_recursive(log_dir);
+		}
+		log_dir_w = log_dir.replace("/", "\\").utf16();
+		pref.pathToLogsAndData = (const wchar_t *)log_dir_w.get_data();
+		print_line("Streamline: logging to " + log_dir);
 	} else {
 		pref.logLevel = sl::LogLevel::eOff;
 		pref.showConsole = false;
