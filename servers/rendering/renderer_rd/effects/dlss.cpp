@@ -301,12 +301,20 @@ static sl::float4x4 sl_make_identity_matrix() {
 	return ret;
 }
 
+// Streamline applies its matrices to row vectors, p' = p * M: sl_matrix_helpers.h composes
+// clipToPrevClip = clipToCameraView * viewToPrevView * viewToClipPrev (first transform on the
+// left) and keeps translations in row 3, and SL's own mvec.hlsl does mul(M, v) on a constant
+// buffer filled row by row, which under HLSL's default column_major packing is v * M.
+// Godot's Projection is the column-vector form (p' = M * p), so Streamline needs its transpose:
+// row i of the sl::float4x4 is column i of the Projection. The rows used to be copied as rows,
+// which handed Streamline M^T -- a camera translation then reprojected as almost no camera
+// motion, and a rotation with the wrong sign. Inverse pairs (clipToCameraView, prevClipToClip)
+// and a still camera (clipToPrevClip = identity) cannot tell the two layouts apart.
 static sl::float4x4 sl_convert_matrix(const Projection &mtx) {
 	sl::float4x4 ret;
-	ret.setRow(0, sl::float4(mtx.columns[0].x, mtx.columns[1].x, mtx.columns[2].x, mtx.columns[3].x));
-	ret.setRow(1, sl::float4(mtx.columns[0].y, mtx.columns[1].y, mtx.columns[2].y, mtx.columns[3].y));
-	ret.setRow(2, sl::float4(mtx.columns[0].z, mtx.columns[1].z, mtx.columns[2].z, mtx.columns[3].z));
-	ret.setRow(3, sl::float4(mtx.columns[0].w, mtx.columns[1].w, mtx.columns[2].w, mtx.columns[3].w));
+	for (int i = 0; i < 4; i++) {
+		ret.setRow(i, sl::float4(mtx.columns[i].x, mtx.columns[i].y, mtx.columns[i].z, mtx.columns[i].w));
+	}
 	return ret;
 }
 
