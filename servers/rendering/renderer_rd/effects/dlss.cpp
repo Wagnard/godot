@@ -57,6 +57,19 @@ using namespace RendererRD;
 // Texture layout/state constants (avoid including Vulkan/D3D12 headers here).
 static constexpr uint64_t DLSS_VK_IMAGE_LAYOUT_SHADER_READ_ONLY = 5;
 static constexpr uint64_t DLSS_D3D12_RESOURCE_STATE_NON_PIXEL_SR = 0x40;
+// The DLSS output is written by NGX, so the render graph holds it as a storage image around the
+// callback: TEXTURE_LAYOUT_STORAGE_OPTIMAL, i.e. VK_IMAGE_LAYOUT_GENERAL on Vulkan and the
+// UNORDERED_ACCESS layout on D3D12 (legacy state D3D12_RESOURCE_STATE_UNORDERED_ACCESS).
+static constexpr uint64_t DLSS_VK_IMAGE_LAYOUT_GENERAL = 1;
+static constexpr uint64_t DLSS_D3D12_RESOURCE_STATE_UNORDERED_ACCESS = 0x8;
+
+// Single source for "is the DLSS output declared as written": the graph usage in upscale() and
+// the state announced to Streamline in _upscale_internal() must agree, or Streamline issues its
+// barriers from a state the resource is not in. NGX writes the output as a UAV, so in practice
+// it always carries the storage bit; without it, keep the old read declaration.
+static bool dlss_output_is_storage(RID p_output) {
+	return p_output.is_valid() && (RD::get_singleton()->texture_get_format(p_output).usage_bits & RD::TEXTURE_USAGE_STORAGE_BIT);
+}
 static constexpr float DLSS_OPTIMAL_MODE_MAX_DISTANCE = 1000000.0f;
 namespace RendererRD {
 class DLSSContextInner : public DLSSContext {
@@ -388,6 +401,16 @@ void DLSSEffect::upscale(const DLSSContext::Parameters &p_params) {
 	for (int i = 0; i < num_resources; i++) {
 		res[i].usage = RD::CALLBACK_RESOURCE_USAGE_TEXTURE_SAMPLE;
 	}
+	// The output is WRITTEN by the callback (NGX, and NIS after it). Declared as a sample, the
+	// graph saw the callback as one more reader of that texture: nothing ordered the glow and
+	// tonemap passes, which also sample it, after the callback, and the graph's level reordering
+	// ran them first -- every frame displayed the previous frame's DLSS output. Measured in game:
+	// the 3D lagged the UI by exactly one frame of camera motion under DLSS only, and the lag
+	// vanished with --gpu-profile, whose timestamps serialize the graph. MetalFX declares its
+	// destination the same way (metal_fx.cpp).
+	if (dlss_output_is_storage(p_params.output)) {
+		res[1].usage = RD::CALLBACK_RESOURCE_USAGE_STORAGE_IMAGE_READ_WRITE; // res[1] is p_params.output.
+	}
 	RD::get_singleton()->driver_callback_add((RDD::DriverCallback)DLSSEffect::_upscale_internal_graph_callback, p_params.context, VectorView<RD::CallbackResource>(res, num_resources));
 }
 
@@ -397,7 +420,7 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext
 	void *nativeCmdlist = RD::get_singleton()->get_device_driver()->command_buffer_get_native_handle(cmdid);
 
 	// Helper function for tagging resources.
-	auto assignResource = [context](sl::Resource *resources, sl::ResourceTag *resourceTags, int &numResources, RID textureRID, sl::BufferType bufferType, sl::ResourceLifecycle lifecycle) {
+	auto assignResource = [context](sl::Resource *resources, sl::ResourceTag *resourceTags, int &numResources, RID textureRID, sl::BufferType bufferType, sl::ResourceLifecycle lifecycle, bool p_storage = false) {
 		if (!textureRID.is_valid() || textureRID.is_null()) {
 			return;
 		}
@@ -406,9 +429,11 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext
 		uint64_t texture_image = RD::get_singleton()->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_TEXTURE, textureRID);
 		uint64_t texture_view = RD::get_singleton()->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_TEXTURE_VIEW, textureRID);
 		uint64_t texture_device_memory = RD::get_singleton()->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_TEXTURE_DEVICE_MEMORY, textureRID);
-		uint64_t texture_state = DLSS_VK_IMAGE_LAYOUT_SHADER_READ_ONLY;
+		// The state the render graph actually put the resource in; Streamline tracks nothing
+		// itself (eDisableCLStateTracking) and issues its barriers from this.
+		uint64_t texture_state = p_storage ? DLSS_VK_IMAGE_LAYOUT_GENERAL : DLSS_VK_IMAGE_LAYOUT_SHADER_READ_ONLY;
 		if (context->is_d3d12) {
-			texture_state = DLSS_D3D12_RESOURCE_STATE_NON_PIXEL_SR;
+			texture_state = p_storage ? DLSS_D3D12_RESOURCE_STATE_UNORDERED_ACCESS : DLSS_D3D12_RESOURCE_STATE_NON_PIXEL_SR;
 		}
 		uint64_t texture_vkformat = RD::get_singleton()->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_TEXTURE_DATA_FORMAT, textureRID);
 		uint64_t texture_usage_flags = RD::get_singleton()->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_TEXTURE_USAGE_FLAGS, textureRID);
@@ -580,7 +605,7 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext
 		int numResources = 0;
 
 		assignResource(resources, resourceTags, numResources, p_params.color, sl::kBufferTypeScalingInputColor, sl::ResourceLifecycle::eValidUntilPresent);
-		assignResource(resources, resourceTags, numResources, p_params.output, sl::kBufferTypeScalingOutputColor, sl::ResourceLifecycle::eValidUntilPresent);
+		assignResource(resources, resourceTags, numResources, p_params.output, sl::kBufferTypeScalingOutputColor, sl::ResourceLifecycle::eValidUntilPresent, dlss_output_is_storage(p_params.output));
 		assignResource(resources, resourceTags, numResources, p_params.depth, sl::kBufferTypeDepth, sl::ResourceLifecycle::eValidUntilPresent);
 		assignResource(resources, resourceTags, numResources, p_params.velocity, sl::kBufferTypeMotionVectors, sl::ResourceLifecycle::eValidUntilPresent);
 
@@ -704,8 +729,10 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext
 			sl::ResourceTag resourceTags[3];
 			int numResources = 0;
 
-			assignResource(resources, resourceTags, numResources, p_params.output, sl::kBufferTypeScalingInputColor, sl::ResourceLifecycle::eOnlyValidNow);
-			assignResource(resources, resourceTags, numResources, p_params.output, sl::kBufferTypeScalingOutputColor, sl::ResourceLifecycle::eValidUntilPresent);
+			// Still the DLSS output, in the same storage state the graph set for the whole callback.
+			const bool output_storage = dlss_output_is_storage(p_params.output);
+			assignResource(resources, resourceTags, numResources, p_params.output, sl::kBufferTypeScalingInputColor, sl::ResourceLifecycle::eOnlyValidNow, output_storage);
+			assignResource(resources, resourceTags, numResources, p_params.output, sl::kBufferTypeScalingOutputColor, sl::ResourceLifecycle::eValidUntilPresent, output_storage);
 
 			sl::Result result = StreamlineContext::get().slSetTag(context->viewport, resourceTags, numResources, nativeCmdlist);
 			if (result != sl::Result::eOk) {
