@@ -187,8 +187,28 @@ void Streamline::emit_marker(StreamlineMarkerType marker) {
 			return;
 	}
 
-	if (sl_context.last_token && sl_marker != sl::PCLMarker::eMaximum) {
-		sl_context.pcl_marker(sl_context.last_token, sl_marker);
+	// Render-submit and present markers come from the thread that executes the draw -- the render
+	// thread with thread_model = 2 -- by which time the main thread may already have renewed
+	// last_token for the next frame (measured: every present marker tagged one frame ahead). They
+	// carry the token of the frame being drawn, as the DLSS constants do (sl_frame_token() in
+	// dlss.cpp): the DLSS-G guide requires the present markers' frame index to match the constants.
+	// In the Safe model the draw runs before the renewal, render_token equals last_token, and
+	// nothing changes. render_token is null until the first draw (boot splash), hence the fallback.
+	sl::FrameToken *token = sl_context.last_token;
+	switch (marker) {
+		case StreamlineMarkerType::STREAMLINE_MARKER_BEGIN_RENDER:
+		case StreamlineMarkerType::STREAMLINE_MARKER_END_RENDER:
+		case StreamlineMarkerType::STREAMLINE_MARKER_BEGIN_PRESENT:
+		case StreamlineMarkerType::STREAMLINE_MARKER_END_PRESENT:
+			if (sl_context.render_token != nullptr) {
+				token = sl_context.render_token;
+			}
+			break;
+		default:
+			break;
+	}
+	if (token && sl_marker != sl::PCLMarker::eMaximum) {
+		sl_context.pcl_marker(token, sl_marker);
 	}
 #endif
 }
