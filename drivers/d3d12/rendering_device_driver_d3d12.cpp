@@ -2545,6 +2545,12 @@ Error RenderingDeviceDriverD3D12::command_queue_execute_and_present(CommandQueue
 		}
 	}
 
+	// Most calls only submit command lists. Reflex must see present markers around real presents
+	// only, as on Vulkan; without this guard every submission sent it a present pair.
+	if (p_swap_chains.size() == 0) {
+		return OK;
+	}
+
 	Streamline::get_singleton()->emit_marker(STREAMLINE_MARKER_BEGIN_PRESENT);
 
 	HRESULT res;
