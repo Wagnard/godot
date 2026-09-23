@@ -5084,16 +5084,41 @@ RenderGeometryInstance *RenderForwardClustered::geometry_instance_create(RID p_b
 }
 
 void RenderForwardClustered::GeometryInstanceForwardClustered::set_transform(const Transform3D &p_transform, const AABB &p_aabb, const AABB &p_transformed_aabb) {
-	uint64_t frame = RSG::rasterizer->get_frame_number();
+	// Stamp the frame that will draw this transform. RendererSceneCull applies pending instance
+	// updates inside the draw, but also earlier, from the command queue, before begin_frame() has
+	// advanced the counter (freeing any instance does it; get_pending_frame_number() lists the other
+	// calls). Stamped with get_frame_number(), those updates looked one frame old, so age_out_motion()
+	// either dropped their motion before it was drawn or, with a +1 margin, kept a stopped object's
+	// motion one frame too long and doubled it when two consecutive frames took different paths.
+	uint64_t frame = RSG::rasterizer->get_pending_frame_number();
+	if (unlikely(created_frame == 0)) {
+		created_frame = frame;
+	}
 	if (frame != prev_transform_change_frame) {
 		prev_transform = transform;
 		prev_transform_change_frame = frame;
 		transform_status = TransformStatus::MOVED;
 	} else if (unlikely(transform_status == TransformStatus::TELEPORTED)) {
-		prev_transform = transform;
+		// Moved again after a teleport, before any draw: still no motion to show.
+		prev_transform = p_transform;
 	}
 
 	RenderGeometryInstanceBase::set_transform(p_transform, p_aabb, p_transformed_aabb);
+
+	if (unlikely(frame == created_frame)) {
+		// A new instance has no motion yet. instance_set_base() creates the geometry instance and sets
+		// its transform at once, and the queued update sets it again for the same frame: prev_transform
+		// would otherwise keep its identity default, and the first frame would show motion from the
+		// world origin (a spawn whose base is set before its transform). A geometry instance that
+		// replaces another one inherits its history instead (set_motion_history()).
+		prev_transform = transform;
+	}
+
+	// The path tracer reuses a surface's cached TLAS transform while the instance is NONE. A transform
+	// set while the instance was outside the RT lists would otherwise survive to the frame it re-enters.
+	for (GeometryInstanceSurfaceDataCache *surf = surface_caches; surf; surf = surf->next) {
+		surf->cached_final_transform_valid = false;
+	}
 }
 
 void RenderForwardClustered::GeometryInstanceForwardClustered::reset_motion_vectors() {
@@ -5101,12 +5126,35 @@ void RenderForwardClustered::GeometryInstanceForwardClustered::reset_motion_vect
 	transform_status = TransformStatus::TELEPORTED;
 }
 
+bool RenderForwardClustered::GeometryInstanceForwardClustered::get_motion_history(MotionHistory &r_history) const {
+	r_history.transform = transform;
+	r_history.prev_transform = prev_transform;
+	r_history.change_frame = prev_transform_change_frame;
+	r_history.created_frame = created_frame;
+	r_history.last_aged_frame = last_aged_frame;
+	r_history.status = transform_status;
+	return true;
+}
+
+void RenderForwardClustered::GeometryInstanceForwardClustered::set_motion_history(const MotionHistory &p_history) {
+	// Continue where the replaced geometry instance left off: its transform is the one last drawn,
+	// so the set_transform() that follows computes the motion from it, not from the identity default.
+	transform = p_history.transform;
+	prev_transform = p_history.prev_transform;
+	prev_transform_change_frame = p_history.change_frame;
+	created_frame = p_history.created_frame;
+	last_aged_frame = p_history.last_aged_frame;
+	transform_status = TransformStatus(p_history.status);
+}
+
 void RenderForwardClustered::GeometryInstanceForwardClustered::age_out_motion(uint64_t p_frame) {
 	if (last_aged_frame == p_frame) {
 		return; // Already processed this frame (e.g. appears in both raster and RT lists).
 	}
 	last_aged_frame = p_frame;
-	if (transform_status != TransformStatus::NONE && p_frame > prev_transform_change_frame + 1 && prev_transform_change_frame) {
+	// The stamp is the frame that first draws the new transform (see set_transform()), so the motion
+	// is shown in exactly that frame and dropped in the next.
+	if (transform_status != TransformStatus::NONE && p_frame > prev_transform_change_frame && prev_transform_change_frame) {
 		prev_transform = transform;
 		transform_status = TransformStatus::NONE;
 	}

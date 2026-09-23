@@ -86,6 +86,16 @@ public:
 	virtual void end_frame(bool p_present) = 0;
 	virtual void finalize() = 0;
 	virtual uint64_t get_frame_number() const = 0;
+	// The frame a change made now is first drawn in: get_frame_number() while a frame is being drawn
+	// (between begin_frame() and end_frame()), get_frame_number() + 1 otherwise. For stamping state on
+	// the rendering server thread that the same update can reach either inside the draw or earlier from
+	// the command queue -- RendererSceneCull applies pending instance updates in the draw, but also when
+	// an instance is freed, on instances_cull_*(), instance_geometry_get_shader_parameter_list() and
+	// instance_set_blend_shape_weight(), and instance_set_base() sets a transform directly. Code that
+	// compares a stamp while drawing keeps using get_frame_number(). An update flushed in the middle of
+	// a draw (by a CompositorEffect callback, or in the Safe model when commands queued by other
+	// threads are flushed during the draw) counts as the current frame.
+	virtual uint64_t get_pending_frame_number() const = 0;
 	virtual double get_frame_delta_time() const = 0;
 	virtual double get_total_time() const = 0;
 	virtual bool can_create_resources_async() const = 0;

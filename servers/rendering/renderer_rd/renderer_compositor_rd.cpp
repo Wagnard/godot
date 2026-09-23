@@ -123,6 +123,7 @@ void RendererCompositorRD::blit_render_targets_to_screen(DisplayServerEnums::Win
 
 void RendererCompositorRD::begin_frame(double frame_step) {
 	frame++;
+	frame_draw_depth++;
 	delta = frame_step;
 	time += frame_step;
 
@@ -136,6 +137,7 @@ void RendererCompositorRD::begin_frame(double frame_step) {
 }
 
 void RendererCompositorRD::end_frame(bool p_present) {
+	frame_draw_depth--;
 	Streamline::get_singleton()->emit_marker(STREAMLINE_MARKER_END_RENDER);
 	RD::get_singleton()->swap_buffers(p_present);
 }

@@ -584,6 +584,10 @@ void RendererSceneCull::instance_set_base(RID p_instance, RID p_base) {
 
 	Scenario *scenario = instance->scenario;
 
+	// Motion state of the geometry instance being replaced, handed to the new one below.
+	RenderGeometryInstance::MotionHistory motion_history;
+	bool has_motion_history = false;
+
 	if (instance->base_type != RSE::INSTANCE_NONE) {
 		//free anything related to that base
 
@@ -602,6 +606,7 @@ void RendererSceneCull::instance_set_base(RID p_instance, RID p_base) {
 			case RSE::INSTANCE_MULTIMESH:
 			case RSE::INSTANCE_PARTICLES: {
 				InstanceGeometryData *geom = static_cast<InstanceGeometryData *>(instance->base_data);
+				has_motion_history = geom->geometry_instance->get_motion_history(motion_history);
 				scene_render->geometry_instance_free(geom->geometry_instance);
 			} break;
 			case RSE::INSTANCE_LIGHT: {
@@ -725,6 +730,9 @@ void RendererSceneCull::instance_set_base(RID p_instance, RID p_base) {
 
 				ERR_FAIL_NULL(geom->geometry_instance);
 
+				if (has_motion_history) {
+					geom->geometry_instance->set_motion_history(motion_history);
+				}
 				geom->geometry_instance->set_skeleton(instance->skeleton);
 				geom->geometry_instance->set_material_override(instance->material_override);
 				geom->geometry_instance->set_material_overlay(instance->material_overlay);

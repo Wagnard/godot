@@ -43,6 +43,7 @@
 #include "servers/rendering/dummy/storage/utilities.h"
 
 void RasterizerDummy::end_frame(bool p_present) {
+	frame_draw_depth--;
 	if (p_present) {
 		DisplayServer::get_singleton()->swap_buffers();
 	}

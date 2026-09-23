@@ -596,6 +596,7 @@ protected:
 		//used during setup
 		uint64_t prev_transform_change_frame = 0xFFFFFFFF;
 		uint64_t last_aged_frame = 0;
+		uint64_t created_frame = 0; // Pending frame of the first set_transform(): no motion history before it.
 		enum TransformStatus {
 			NONE,
 			MOVED,
@@ -613,6 +614,8 @@ protected:
 
 		virtual void set_transform(const Transform3D &p_transform, const AABB &p_aabb, const AABB &p_transformed_aabb) override;
 		virtual void reset_motion_vectors() override;
+		virtual bool get_motion_history(MotionHistory &r_history) const override;
+		virtual void set_motion_history(const MotionHistory &p_history) override;
 		virtual void set_use_lightmap(RID p_lightmap_instance, const Rect2 &p_lightmap_uv_scale, int p_lightmap_slice_index) override;
 		virtual void set_lightmap_capture(const Color *p_sh9) override;
 
