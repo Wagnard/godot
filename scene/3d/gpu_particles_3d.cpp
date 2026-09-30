@@ -609,7 +609,11 @@ void GPUParticles3D::_notification(int p_what) {
 
 		case NOTIFICATION_VISIBILITY_CHANGED: {
 			// Make sure particles are updated before rendering occurs if they were active before.
-			if (is_visible_in_tree() && !RS::get_singleton()->particles_is_inactive(particles)) {
+			// Not gated on particles_is_inactive(): that getter is synchronous, so with a separate
+			// render thread it made the main thread wait for the frame being drawn every time a
+			// node reappeared (4-12 ms measured). The request alone is enough -- the storage skips
+			// a system that is inactive and not emitting before doing any work.
+			if (is_visible_in_tree()) {
 				RS::get_singleton()->particles_request_process(particles);
 			}
 		} break;
