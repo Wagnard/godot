@@ -552,6 +552,9 @@ private:
 		TightLocalVector<FramebufferID> framebuffers;
 		RDD::DataFormat data_format = DATA_FORMAT_MAX;
 		RDD::ColorSpace color_space = COLOR_SPACE_MAX;
+		// Streamline::get_swap_chain_serial() at creation: a different serial means frame generation
+		// needs another kind of swap chain and this one is recreated.
+		uint32_t frame_generation_serial = 0;
 	};
 
 	void _swap_chain_release(SwapChain *p_swap_chain);

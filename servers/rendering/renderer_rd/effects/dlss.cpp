@@ -35,6 +35,7 @@
 #endif
 
 #ifdef ENABLE_DLSS
+#include "drivers/streamline/streamline.h"
 #include "drivers/streamline/streamline_context.h"
 #include "servers/rendering/renderer_rd/effects/camera_reprojection.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
@@ -71,6 +72,11 @@ void RendererRD::DLSSEffect::set_frame_generation_hudless(RID p_hudless, RID p_u
 using namespace RendererRD;
 
 #ifdef ENABLE_DLSS
+// DLSS-G can be asked for: a game, on hardware that supports it.
+static bool dlssg_available() {
+	const StreamlineContext &sl = StreamlineContext::get();
+	return sl.is_game && sl.streamline_capabilities.dlss_g_available;
+}
 
 // Texture layout/state constants (avoid including Vulkan/D3D12 headers here).
 static constexpr uint64_t DLSS_VK_IMAGE_LAYOUT_SHADER_READ_ONLY = 5;
@@ -666,7 +672,7 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext
 		// With it, the UI alpha (1 where the canvas changed the frame), which lets DLSS-G interpolate
 		// the scene and the UI separately and recompose them (enableUserInterfaceRecomposition, set
 		// below): the HUD-less color alone only attenuates HUD distortion.
-		const bool dlssg_requested = p_params.dlss_g && StreamlineContext::get().is_game && StreamlineContext::get().streamline_capabilities.dlss_g_available;
+		const bool dlssg_requested = p_params.dlss_g && dlssg_available();
 		frame_generation_dlssg_requested = dlssg_requested;
 		if ((dlssg_requested || StreamlineContext::get().dlssg_viewport == context->viewport) && frame_generation_hudless.is_valid() && frame_generation_ui_alpha.is_valid()) {
 			assignResource(resources, resourceTags, numResources, frame_generation_hudless, sl::kBufferTypeHUDLessColor, sl::ResourceLifecycle::eValidUntilPresent);
@@ -684,8 +690,10 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext
 		}
 	}
 
-	// Toggle DLSS Frame Generation (only enabled in game mode)
-	if (StreamlineContext::get().slDLSSGSetOptions != nullptr && StreamlineContext::get().is_game && StreamlineContext::get().streamline_capabilities.dlss_g_available) {
+	// Toggle DLSS Frame Generation (only enabled in game mode). On D3D12, sl.dlss_g is only loaded
+	// while frame generation is wanted (see the end of this block): until the swap chain has been
+	// recreated with it, slDLSSGSetOptions is null and this waits.
+	if (StreamlineContext::get().slDLSSGSetOptions != nullptr && dlssg_available() && StreamlineContext::get().dlssg_loaded) {
 		sl::DLSSGOptions dlssGOptions{};
 		bool wantActivateDLSSG = p_params.dlss_g;
 		bool canActivateDLSSG = StreamlineContext::get().dlssg_delay == 0;
@@ -771,6 +779,23 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext
 			StreamlineContext::get().dlssg_ui_recomposition = wantUiRecomposition;
 		}
 	}
+
+#ifdef D3D12_ENABLED
+	// DLSS-G guide, section 18: the swap chain is torn down and recreated every time DLSS-G is
+	// switched on or off, with sl.dlss_g loaded only while it is on; loaded but off, it renders
+	// off-screen and copies every frame. Asked here, done by the D3D12 driver before its next
+	// Present (Streamline::get_swap_chain_serial(), STREAMLINE_MARKER_BEFORE_SWAPCHAIN_CREATION).
+	if (context->is_d3d12 && dlssg_available()) {
+		StreamlineContext &sl = StreamlineContext::get();
+		if (p_params.dlss_g && !sl.dlssg_wanted) {
+			sl.dlssg_wanted = true;
+			Streamline::get_singleton()->bump_swap_chain_serial();
+		} else if (!p_params.dlss_g && sl.dlssg_wanted && sl.dlssg_viewport == sl::ViewportHandle(-1)) {
+			sl.dlssg_wanted = false;
+			Streamline::get_singleton()->bump_swap_chain_serial();
+		}
+	}
+#endif
 
 	// Evaluate DLSS Super Resolution or DLSS Ray Reconstruction
 	if (context->currentDlssOptions.mode != sl::DLSSMode::eOff) {

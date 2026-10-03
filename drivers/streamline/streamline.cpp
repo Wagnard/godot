@@ -123,6 +123,12 @@ void Streamline::emit_marker(StreamlineMarkerType marker) {
 			// load initial project settings
 			update_project_settings();
 			return;
+		case StreamlineMarkerType::STREAMLINE_MARKER_BEFORE_SWAPCHAIN_CREATION:
+			sl_context.apply_frame_generation_features();
+			return;
+		case StreamlineMarkerType::STREAMLINE_MARKER_MODIFY_SWAPCHAIN:
+			sl_context.dlssg_disable();
+			return;
 		case StreamlineMarkerType::STREAMLINE_MARKER_BEFORE_DEVICE_DESTROY:
 			if (sl_context.slShutdown) {
 				sl_context.slShutdown();
@@ -143,9 +149,6 @@ void Streamline::emit_marker(StreamlineMarkerType marker) {
 
 	sl::PCLMarker sl_marker = sl::PCLMarker::eMaximum;
 	switch (marker) {
-		case StreamlineMarkerType::STREAMLINE_MARKER_MODIFY_SWAPCHAIN:
-			sl_context.dlssg_disable();
-			return;
 		case StreamlineMarkerType::STREAMLINE_MARKER_BEFORE_MESSAGE_LOOP:
 			if (sl_context.dlssg_delay > 0) {
 				--sl_context.dlssg_delay;

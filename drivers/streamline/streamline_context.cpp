@@ -176,6 +176,32 @@ void StreamlineContext::init_device_d3d12(void *d3d12_device) {
 	if (!is_game) \
 		return;
 
+void StreamlineContext::apply_frame_generation_features() {
+	STREAMLINE_GAME_ONLY;
+	if (!is_d3d12 || !slSetFeatureLoaded) {
+		return;
+	}
+	const bool want_dlssg = dlssg_wanted && streamline_capabilities.dlss_g_available;
+	if (want_dlssg == dlssg_loaded) {
+		return;
+	}
+	// Streamline: the pipeline is flushed (RenderingDevice stalls before resizing a swap chain) and
+	// no other DXGI/D3D call runs meanwhile (render thread).
+	if (!want_dlssg && (uint32_t)dlssg_viewport != UINT_MAX) {
+		dlssg_disable();
+	}
+	slSetFeatureLoaded(sl::kFeatureDLSS_G, want_dlssg);
+	dlssg_loaded = want_dlssg;
+	// Unloaded, a feature is unhooked and its functions unusable; loaded again, they are fetched anew.
+	slDLSSGGetState = nullptr;
+	slDLSSGSetOptions = nullptr;
+	if (dlssg_loaded && slGetFeatureFunction) {
+		slGetFeatureFunction(sl::kFeatureDLSS_G, "slDLSSGGetState", (void *&)this->slDLSSGGetState);
+		slGetFeatureFunction(sl::kFeatureDLSS_G, "slDLSSGSetOptions", (void *&)this->slDLSSGSetOptions);
+	}
+	print_line(vformat("Streamline: DLSS-G %s for the next swap chain.", dlssg_loaded ? "loaded" : "unloaded"));
+}
+
 void StreamlineContext::dlssg_disable() {
 	STREAMLINE_GAME_ONLY; // Disable DLSS-G for editor or project settings.
 
@@ -358,7 +384,10 @@ void StreamlineContext::initialize(bool d3d12) {
 
 	Vector<sl::Feature> featuresToLoad;
 
+	StreamlineContext::get().is_d3d12 = d3d12;
 	if (StreamlineContext::get().is_game) {
+		// Always requested: a feature not requested here can never be loaded later. On D3D12,
+		// sl.dlss_g is then only loaded while frame generation is on (apply_frame_generation_features()).
 		featuresToLoad.push_back(sl::kFeaturePCL);
 		featuresToLoad.push_back(sl::kFeatureReflex);
 		featuresToLoad.push_back(sl::kFeatureDLSS_G);

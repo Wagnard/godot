@@ -2656,6 +2656,10 @@ Error RenderingDeviceDriverD3D12::command_queue_execute_and_present(CommandQueue
 	bool any_present_failed = false;
 	for (uint32_t i = 0; i < p_swap_chains.size(); i++) {
 		SwapChain *swap_chain = (SwapChain *)(p_swap_chains[i].id);
+		if (swap_chain->frame_generation_serial != Streamline::get_singleton()->get_swap_chain_serial()) {
+			// Recreated by the next frame's swap_chain_resize(), after RenderingDevice's stall.
+			context_driver->surface_set_needs_resize(swap_chain->surface, true);
+		}
 		res = swap_chain->d3d_swap_chain->Present(swap_chain->sync_interval, swap_chain->present_flags);
 		if (!SUCCEEDED(res)) {
 			print_verbose(vformat("D3D12: Presenting swapchain failed with error 0x%08ux.", (uint64_t)res));
@@ -2939,8 +2943,9 @@ Error RenderingDeviceDriverD3D12::swap_chain_resize(CommandQueueID p_cmd_queue, 
 	RDD::ColorSpace new_color_space;
 	_determine_swap_chain_format(swap_chain, new_data_format, new_color_space);
 
-	if (swap_chain->d3d_swap_chain != nullptr && (creation_flags != swap_chain->creation_flags || new_data_format != swap_chain->data_format)) {
-		// The swap chain must be recreated if the creation flags or data format are different.
+	if (swap_chain->d3d_swap_chain != nullptr && (creation_flags != swap_chain->creation_flags || new_data_format != swap_chain->data_format || swap_chain->frame_generation_serial != Streamline::get_singleton()->get_swap_chain_serial())) {
+		// The swap chain must be recreated if the creation flags or data format are different, or
+		// when frame generation needs another kind of swap chain (DLSS-G loaded or unloaded).
 		_swap_chain_release(swap_chain);
 	}
 
@@ -2985,6 +2990,10 @@ Error RenderingDeviceDriverD3D12::swap_chain_resize(CommandQueueID p_cmd_queue, 
 		}
 		swap_chain_desc.Width = surface->width;
 		swap_chain_desc.Height = surface->height;
+
+		// Streamline loads or unloads DLSS-G for this swap chain (DLSS-G guide, section 18).
+		swap_chain->frame_generation_serial = Streamline::get_singleton()->get_swap_chain_serial();
+		Streamline::get_singleton()->emit_marker(STREAMLINE_MARKER_BEFORE_SWAPCHAIN_CREATION);
 
 		ComPtr<IDXGISwapChain1> swap_chain_1;
 		if (create_for_composition) {

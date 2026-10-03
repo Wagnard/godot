@@ -103,6 +103,12 @@ public:
 
 	void dlssg_disable();
 
+	// D3D12, right before a swap chain is created: loads or unloads DLSS-G for it
+	// (slSetFeatureLoaded), loaded only while frame generation is wanted. DLSS-G guide, section 18: a
+	// swap chain created with DLSS-G unloaded is the native one, without its off-screen copy and
+	// extra queue.
+	void apply_frame_generation_features();
+
 	static void initialize(bool d3d12);
 
 	static StreamlineContext &get();
@@ -127,6 +133,10 @@ public:
 	bool dlssg_ui_recomposition = false;
 	// Frames DLSS-G's enabling has waited for the HUD-less color and UI alpha to be tagged.
 	int dlssg_hudless_wait = 0;
+	// DLSS-G loaded for the current swap chain, and wanted for the next one (dlss.cpp, D3D12).
+	bool dlssg_loaded = true;
+	bool dlssg_wanted = false;
+	bool is_d3d12 = false;
 
 #if STREAMLINE_ENABLED_VULKAN
 	StreamlineCapabilities enumerate_support_vulkan(void *vk_physical_device);

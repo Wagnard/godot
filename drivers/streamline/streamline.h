@@ -33,6 +33,7 @@
 #include "core/object/class_db.h" // IWYU pragma: keep
 #include "core/object/object.h"
 #include "core/os/thread_safe.h"
+#include "core/templates/safe_refcount.h"
 #include "core/variant/binder_common.h" // IWYU pragma: keep
 #include "core/variant/variant.h"
 #include "drivers/streamline/streamline_data.h"
@@ -43,6 +44,7 @@ class Streamline : public Object {
 protected:
 	static void _bind_methods();
 	static Streamline *singleton;
+	SafeNumeric<uint32_t> swap_chain_serial;
 
 public:
 	static Streamline *get_singleton();
@@ -56,6 +58,12 @@ public:
 	void *get_internal_parameter(StreamlineInternalParameterType p_internal_parameter_type);
 
 	void update_project_settings();
+
+	// D3D12: the kind of swap chain frame generation needs changed (DLSS-G to be loaded or
+	// unloaded, DLSS-G guide section 18). The D3D12 driver recreates a swap chain whose creation
+	// serial differs. Any thread.
+	uint32_t get_swap_chain_serial() const { return swap_chain_serial.get(); }
+	void bump_swap_chain_serial() { swap_chain_serial.increment(); }
 
 	Streamline();
 	virtual ~Streamline();
