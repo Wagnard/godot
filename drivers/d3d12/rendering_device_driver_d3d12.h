@@ -243,6 +243,7 @@ private:
 
 	void _resource_transition_batch(CommandBufferInfo *p_command_buffer, ResourceInfo *p_resource, uint32_t p_subresource, uint32_t p_num_planes, D3D12_RESOURCE_STATES p_new_state);
 	void _resource_transitions_flush(CommandBufferInfo *p_command_buffer);
+	bool _texture_copy_promotes_implicitly(CommandBufferInfo *p_command_buffer, ResourceInfo *p_texture, uint32_t p_subresource) const;
 
 	/*****************/
 	/**** BUFFERS ****/
@@ -496,6 +497,7 @@ private:
 
 		Microsoft::WRL::ComPtr<ID3D12CommandAllocator> cmd_allocator;
 		Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> cmd_list;
+		D3D12_COMMAND_LIST_TYPE list_type = D3D12_COMMAND_LIST_TYPE_DIRECT;
 		Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList1> cmd_list_1;
 		Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList5> cmd_list_5;
 		Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList7> cmd_list_7;

@@ -719,6 +719,22 @@ void RenderingDeviceDriverD3D12::_resource_transition_batch(CommandBufferInfo *p
 	}
 }
 
+// Legacy barriers only. On a COPY command list a texture may only be in COMMON: the copy implicitly
+// promotes it to COPY_DEST or COPY_SOURCE, and it decays back to COMMON when the command list has
+// executed. An explicit transition there is invalid (debug layer: "does not match expected layout
+// (D3D12_BARRIER_LAYOUT_COMMON) using D3D12_COMMAND_LIST_TYPE_COPY command list ... in
+// CopyTextureRegion", #1334, once per texture uploaded by the transfer workers), and recording the
+// promoted state would leave the tracker out of step with the decay. So leave a COMMON texture alone
+// and keep tracking it as COMMON.
+bool RenderingDeviceDriverD3D12::_texture_copy_promotes_implicitly(CommandBufferInfo *p_command_buffer, ResourceInfo *p_texture, uint32_t p_subresource) const {
+	if (p_command_buffer->list_type != D3D12_COMMAND_LIST_TYPE_COPY) {
+		return false;
+	}
+	const TightLocalVector<D3D12_RESOURCE_STATES> &states = p_texture->states_ptr->subresource_states;
+	// Planes are tracked together: a plane slice maps back onto its mip/layer entry.
+	return states[p_subresource % states.size()] == D3D12_RESOURCE_STATE_COMMON;
+}
+
 void RenderingDeviceDriverD3D12::_resource_transitions_flush(CommandBufferInfo *p_command_buffer) {
 	for (const KeyValue<ResourceInfo::States *, BarrierRequest> &E : p_command_buffer->res_barriers_requests) {
 		ResourceInfo::States *res_states = E.key;
@@ -1397,14 +1413,18 @@ RDD::TextureID RenderingDeviceDriverD3D12::texture_create(const TextureFormat &p
 					IID_PPV_ARGS(main_texture.GetAddressOf()));
 			initial_state = D3D12_RESOURCE_STATE_COMMON;
 		} else {
+			// COMMON, not COPY_DEST: the transfer workers upload new textures on a COPY queue, which
+			// only accepts textures in COMMON and promotes them implicitly
+			// (_texture_copy_promotes_implicitly()). Created in COPY_DEST, every texture they uploaded
+			// failed validation (#1334). A direct-queue upload just transitions COMMON -> COPY_DEST once.
 			res = allocator->CreateResource(
 					&allocation_desc,
 					(D3D12_RESOURCE_DESC *)&resource_desc,
-					D3D12_RESOURCE_STATE_COPY_DEST,
+					D3D12_RESOURCE_STATE_COMMON,
 					clear_value_ptr,
 					allocation.GetAddressOf(),
 					IID_PPV_ARGS(main_texture.GetAddressOf()));
-			initial_state = D3D12_RESOURCE_STATE_COPY_DEST;
+			initial_state = D3D12_RESOURCE_STATE_COMMON;
 		}
 		if (!SUCCEEDED(res)) {
 			_report_device_removed("texture_create");
@@ -2666,6 +2686,7 @@ RDD::CommandBufferID RenderingDeviceDriverD3D12::command_buffer_create(CommandPo
 	CommandBufferInfo *cmd_buf_info = VersatileResource::allocate<CommandBufferInfo>(resources_allocator);
 	cmd_buf_info->cmd_allocator = cmd_allocator;
 	cmd_buf_info->cmd_list = cmd_list;
+	cmd_buf_info->list_type = list_type;
 
 	cmd_list->QueryInterface(cmd_buf_info->cmd_list_1.GetAddressOf());
 	cmd_list->QueryInterface(cmd_buf_info->cmd_list_5.GetAddressOf());
@@ -3958,8 +3979,12 @@ void RenderingDeviceDriverD3D12::command_copy_texture(CommandBufferID p_cmd_buff
 			for (uint32_t j = 0; j < layer_count; j++) {
 				UINT src_subresource = _compute_subresource_from_layers(src_tex_info, p_regions[i].src_subresources, j);
 				UINT dst_subresource = _compute_subresource_from_layers(dst_tex_info, p_regions[i].dst_subresources, j);
-				_resource_transition_batch(cmd_buf_info, src_tex_info, src_subresource, 1, D3D12_RESOURCE_STATE_COPY_SOURCE);
-				_resource_transition_batch(cmd_buf_info, dst_tex_info, dst_subresource, 1, D3D12_RESOURCE_STATE_COPY_DEST);
+				if (!_texture_copy_promotes_implicitly(cmd_buf_info, src_tex_info, src_subresource)) {
+					_resource_transition_batch(cmd_buf_info, src_tex_info, src_subresource, 1, D3D12_RESOURCE_STATE_COPY_SOURCE);
+				}
+				if (!_texture_copy_promotes_implicitly(cmd_buf_info, dst_tex_info, dst_subresource)) {
+					_resource_transition_batch(cmd_buf_info, dst_tex_info, dst_subresource, 1, D3D12_RESOURCE_STATE_COPY_DEST);
+				}
 			}
 		}
 
@@ -4167,7 +4192,7 @@ void RenderingDeviceDriverD3D12::command_copy_buffer_to_texture(CommandBufferID 
 				tex_info->desc.MipLevels,
 				tex_info->desc.ArraySize());
 
-		if (!barrier_capabilities.enhanced_barriers_supported) {
+		if (!barrier_capabilities.enhanced_barriers_supported && !_texture_copy_promotes_implicitly(cmd_buf_info, tex_info, dst_subresource)) {
 			_resource_transition_batch(cmd_buf_info, tex_info, dst_subresource, 1, D3D12_RESOURCE_STATE_COPY_DEST);
 			_resource_transitions_flush(cmd_buf_info);
 		}
@@ -4207,7 +4232,7 @@ void RenderingDeviceDriverD3D12::command_copy_texture_to_buffer(CommandBufferID 
 				tex_info->desc.MipLevels,
 				tex_info->desc.ArraySize());
 
-		if (!barrier_capabilities.enhanced_barriers_supported) {
+		if (!barrier_capabilities.enhanced_barriers_supported && !_texture_copy_promotes_implicitly(cmd_buf_info, tex_info, src_subresource)) {
 			_resource_transition_batch(cmd_buf_info, tex_info, src_subresource, 1, D3D12_RESOURCE_STATE_COPY_SOURCE);
 			_resource_transitions_flush(cmd_buf_info);
 		}
