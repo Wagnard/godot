@@ -80,6 +80,9 @@ public:
 	virtual void begin_frame(double frame_step) = 0;
 
 	virtual void blit_render_targets_to_screen(DisplayServerEnums::WindowID p_screen, const RenderingServerTypes::BlitToScreen *p_render_targets, int p_amount) = 0;
+	// Frame generation: called right after a viewport's 3D pass, before any canvas is drawn on its
+	// render target. A renderer that feeds a frame generator a HUD-less image copies it here.
+	virtual void capture_hudless(RID p_render_target, DisplayServerEnums::WindowID p_screen) {}
 
 	virtual bool is_opengl() = 0;
 	virtual void gl_end_frame(bool p_swap_buffers) = 0;

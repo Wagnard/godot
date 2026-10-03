@@ -85,6 +85,12 @@ layout(binding = 0) uniform sampler2DArray src_rt;
 layout(binding = 0) uniform sampler2D src_rt;
 #endif
 
+#ifdef UI_ALPHA
+// Frame generation's UI alpha (DLSS-G): src_rt is the render target with its canvas, pre_ui_rt the
+// same render target captured before it.
+layout(binding = 1) uniform sampler2D pre_ui_rt;
+#endif
+
 // Keep in sync with `RenderingDeviceCommons::ColorSpace`.
 #define COLOR_SPACE_REC709_LINEAR 0
 #define COLOR_SPACE_REC709_NONLINEAR_SRGB 1
@@ -116,6 +122,15 @@ vec3 screen_space_dither(vec2 frag_coord) {
 }
 
 void main() {
+#ifdef UI_ALPHA
+	// 1 wherever the canvas changed the pixel, 0 elsewhere. The two texels come from the same format
+	// through the same sampler and coordinates, so equal means untouched. With the UI color taken
+	// as the final color there, Final = UI + (1 - alpha) * HUD-less holds exactly, as DLSS-G
+	// requires; behind a translucent UI the scene is simply treated as UI.
+	color = vec4(any(notEqual(texture(src_rt, uv).rgb, texture(pre_ui_rt, uv).rgb)) ? 1.0 : 0.0);
+	return;
+#endif
+
 #ifdef APPLY_LENS_DISTORTION
 	vec2 coords = uv * 2.0 - 1.0;
 	vec2 offset = coords - data.eye_center;

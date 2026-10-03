@@ -95,6 +95,13 @@ public:
 	void upscale(const DLSSContext::Parameters &p_params);
 	bool is_ready(DLSSContext *context);
 
+	// Frame generation's HUD-less color (RendererCompositorRD::capture_hudless()): whether a
+	// frame generator (DLSS-G) runs and wants one, and the back-buffer-sized
+	// copy the compositor keeps for it, null when there is none. Render thread only; the compositor
+	// asks once per frame, after the 3D pass (it consumes the DLSS pass's request).
+	static bool frame_generation_wants_hudless();
+	static void set_frame_generation_hudless(RID p_hudless, RID p_ui_alpha);
+
 private:
 	void _upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext::Parameters &p_params);
 	static void _upscale_internal_graph_callback(RenderingDeviceDriver *p_driver, RDD::CommandBufferID p_command_buffer, void *p_userdata);

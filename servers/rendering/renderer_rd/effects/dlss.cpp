@@ -40,6 +40,12 @@
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
 
+// kBufferTypeUIAlpha and DLSSGOptions::enableUserInterfaceRecomposition exist since Streamline 2.12;
+// the headers in thirdparty/ are 2.10, where the option is the same field of the same struct
+// version (kStructVersion4) under the name bReserved16. The runtimes that load (2.12 in bin/, the
+// OTA DLSS-G plugin, 2.14.1 in exports) know both.
+static constexpr sl::BufferType DLSS_BUFFER_TYPE_UI_ALPHA = 69; // sl::kBufferTypeUIAlpha
+
 // The token of the frame being drawn: the one the draw command carried onto the render
 // thread, or the main-thread token when no draw command set it — the very first frame, or a
 // direct draw. See RenderingServerDefault::draw for why the main-thread token alone was not
@@ -49,6 +55,18 @@ static sl::FrameToken *sl_frame_token() {
 	return sl.render_token != nullptr ? sl.render_token : sl.last_token;
 }
 #endif
+
+// The compositor's back-buffer-sized HUD-less copy and UI alpha, see
+// DLSSEffect::set_frame_generation_hudless().
+static RID frame_generation_hudless;
+static RID frame_generation_ui_alpha;
+// DLSS-G asked for by the last frame drawn (Viewport.frame_generation), enabled or not yet.
+static bool frame_generation_dlssg_requested = false;
+
+void RendererRD::DLSSEffect::set_frame_generation_hudless(RID p_hudless, RID p_ui_alpha) {
+	frame_generation_hudless = p_hudless;
+	frame_generation_ui_alpha = p_ui_alpha;
+}
 
 using namespace RendererRD;
 
@@ -81,6 +99,7 @@ public:
 	sl::DLSSOptions currentDlssOptions;
 	sl::DLSSOptimalSettings currentOptimalSettings;
 	sl::DLSSDOptions currentDlssDOptions; // DLSS Ray Reconstruction options
+	bool hudless_tagged = false; // kBufferTypeHUDLessColor currently tagged on this viewport.
 
 	DLSSContextInner();
 	virtual ~DLSSContextInner();
@@ -221,6 +240,8 @@ DLSSContextInner::~DLSSContextInner() {
 			sl::kBufferTypeSpecularAlbedo,
 			sl::kBufferTypeNormalRoughness,
 			sl::kBufferTypeSpecularHitDistance,
+			sl::kBufferTypeHUDLessColor,
+			DLSS_BUFFER_TYPE_UI_ALPHA,
 		};
 		constexpr uint32_t tagged_count = sizeof(tagged_types) / sizeof(tagged_types[0]);
 		sl::ResourceTag null_tags[tagged_count];
@@ -635,6 +656,28 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext
 			assignResource(resources, resourceTags, numResources, p_params.dlss_rr_specular_hit_dist, sl::kBufferTypeSpecularHitDistance, sl::ResourceLifecycle::eValidUntilPresent);
 		}
 
+		// DLSS-G's HUD-less color: the scene before any canvas, back-buffer-sized, in the back
+		// buffer's color space (RendererCompositorRD::capture_hudless()). Its content is written
+		// later in this frame, after the canvas; that is allowed for eValidUntilPresent, whose
+		// content and state only have to be right at Present. The compositor ends the frame with
+		// the texture in the state assignResource() declares (on D3D12, GENERAL: COMMON).
+		// Without one -- DLSS-G off, a frame where nothing was captured -- the tag is nulled, as
+		// the guide requires before the resource can go away.
+		// With it, the UI alpha (1 where the canvas changed the frame), which lets DLSS-G interpolate
+		// the scene and the UI separately and recompose them (enableUserInterfaceRecomposition, set
+		// below): the HUD-less color alone only attenuates HUD distortion.
+		const bool dlssg_requested = p_params.dlss_g && StreamlineContext::get().is_game && StreamlineContext::get().streamline_capabilities.dlss_g_available;
+		frame_generation_dlssg_requested = dlssg_requested;
+		if ((dlssg_requested || StreamlineContext::get().dlssg_viewport == context->viewport) && frame_generation_hudless.is_valid() && frame_generation_ui_alpha.is_valid()) {
+			assignResource(resources, resourceTags, numResources, frame_generation_hudless, sl::kBufferTypeHUDLessColor, sl::ResourceLifecycle::eValidUntilPresent);
+			assignResource(resources, resourceTags, numResources, frame_generation_ui_alpha, DLSS_BUFFER_TYPE_UI_ALPHA, sl::ResourceLifecycle::eValidUntilPresent);
+			context->hudless_tagged = true;
+		} else if (context->hudless_tagged) {
+			resourceTags[numResources++] = sl::ResourceTag(nullptr, sl::kBufferTypeHUDLessColor, sl::ResourceLifecycle::eValidUntilPresent);
+			resourceTags[numResources++] = sl::ResourceTag(nullptr, DLSS_BUFFER_TYPE_UI_ALPHA, sl::ResourceLifecycle::eValidUntilPresent);
+			context->hudless_tagged = false;
+		}
+
 		sl::Result result = StreamlineContext::get().slSetTag(context->viewport, resourceTags, numResources, nativeCmdlist);
 		if (result != sl::Result::eOk) {
 			ERR_FAIL_MSG("Failed to call streamline slSetTag. Result: " + String(StreamlineContext::result_to_string(result)));
@@ -661,16 +704,32 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext
 			}
 		}
 
+		// UI recomposition needs the HUD-less color and the UI alpha tagged (DLSS-G guide 6.6); it
+		// follows their availability, re-setting the options when that changes.
+		const bool wantUiRecomposition = context->hudless_tagged;
+
+		// UI recomposition is decided when DLSS-G is enabled. Changing it on a running DLSS-G makes NGX
+		// recreate the feature, and the previous one's resources were never released (67 references
+		// left on the device at Streamline shutdown, 143 live D3D12 objects at exit). Turn DLSS-G off
+		// instead -- DLSSGMode::eOff releases its resources -- and let the usual path re-enable it.
+		if (wantActivateDLSSG && StreamlineContext::get().dlssg_viewport == context->viewport && StreamlineContext::get().dlssg_ui_recomposition != wantUiRecomposition) {
+			WARN_PRINT(String("DLSS-G: UI recomposition ") + (wantUiRecomposition ? "available" : "unavailable") + ", restarting frame generation.");
+			StreamlineContext::get().dlssg_disable();
+			canActivateDLSSG = false; // Re-enabled after dlssg_disable()'s delay, not in this frame.
+		}
+
 		// A multiplier change while DLSS-G is on re-sets the options on the same viewport.
 		if (wantActivateDLSSG && StreamlineContext::get().dlssg_viewport == context->viewport && StreamlineContext::get().dlssg_frames != wantFrames) {
 			WARN_PRINT("DLSS-G on viewport " + itos((unsigned int)context->viewport) + ": " + itos(wantFrames + 1) + "x");
 			dlssGOptions.mode = sl::DLSSGMode::eOn;
 			dlssGOptions.numFramesToGenerate = wantFrames;
+			dlssGOptions.bReserved16 = wantUiRecomposition ? sl::Boolean::eTrue : sl::Boolean::eFalse; // enableUserInterfaceRecomposition
 			sl::Result result = StreamlineContext::get().slDLSSGSetOptions(context->viewport, dlssGOptions);
 			if (result != sl::Result::eOk) {
 				ERR_FAIL_MSG("Failed to call streamline slDLSSGSetOptions. Result: " + String(StreamlineContext::result_to_string(result)));
 			}
 			StreamlineContext::get().dlssg_frames = wantFrames;
+			StreamlineContext::get().dlssg_ui_recomposition = wantUiRecomposition;
 		}
 
 		// Disable previous DLSS-G context if needed
@@ -685,12 +744,23 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext
 			StreamlineContext::get().dlssg_viewport = sl::ViewportHandle(-1);
 		}
 
-		// Enable new DLSS-G context if needed
-		if (canActivateDLSSG && wantActivateDLSSG && StreamlineContext::get().dlssg_viewport != context->viewport) {
-			WARN_PRINT("Enabling DLSS-G on viewport: " + itos((unsigned int)context->viewport) + " at " + itos(wantFrames + 1) + "x");
+		// Enable new DLSS-G context if needed. Wait a few frames for the HUD-less color and UI alpha
+		// (captured from the request on), so DLSS-G starts with UI recomposition rather than being
+		// restarted for it; without them by then (2D MSAA, several viewports on the window), start
+		// without.
+		static constexpr int DLSSG_HUDLESS_WAIT_FRAMES = 5;
+		bool waitForHudless = false;
+		if (canActivateDLSSG && wantActivateDLSSG && StreamlineContext::get().dlssg_viewport != context->viewport && !wantUiRecomposition && StreamlineContext::get().dlssg_hudless_wait < DLSSG_HUDLESS_WAIT_FRAMES) {
+			StreamlineContext::get().dlssg_hudless_wait++;
+			waitForHudless = true;
+		}
+		if (canActivateDLSSG && wantActivateDLSSG && !waitForHudless && StreamlineContext::get().dlssg_viewport != context->viewport) {
+			StreamlineContext::get().dlssg_hudless_wait = 0;
+			WARN_PRINT("Enabling DLSS-G on viewport: " + itos((unsigned int)context->viewport) + " at " + itos(wantFrames + 1) + "x, UI recomposition " + (wantUiRecomposition ? "on" : "off"));
 
 			dlssGOptions.mode = sl::DLSSGMode::eOn;
 			dlssGOptions.numFramesToGenerate = wantFrames;
+			dlssGOptions.bReserved16 = wantUiRecomposition ? sl::Boolean::eTrue : sl::Boolean::eFalse; // enableUserInterfaceRecomposition
 			sl::Result result = StreamlineContext::get().slDLSSGSetOptions(context->viewport, dlssGOptions);
 			if (result != sl::Result::eOk) {
 				ERR_FAIL_MSG("Failed to call streamline slDLSSGSetOptions. Result: " + String(StreamlineContext::result_to_string(result)));
@@ -698,6 +768,7 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext
 
 			StreamlineContext::get().dlssg_viewport = context->viewport;
 			StreamlineContext::get().dlssg_frames = wantFrames;
+			StreamlineContext::get().dlssg_ui_recomposition = wantUiRecomposition;
 		}
 	}
 
@@ -771,6 +842,19 @@ void RendererRD::DLSSEffect::_upscale_internal_graph_callback(RenderingDeviceDri
 	self->last_effect->_upscale_internal(p_command_buffer, self->last_parameters);
 }
 
+bool DLSSEffect::frame_generation_wants_hudless() {
+	// From the request on, not only once DLSS-G runs: it is enabled after a delay of several frames
+	// (dlssg_delay), by which time the HUD-less color and UI alpha are tagged and DLSS-G can start
+	// with UI recomposition. Turning recomposition on afterwards makes NGX recreate the feature, and
+	// the previous one was never released: its resources still held 67 references on the device
+	// when Streamline shut down (D3D12 debug layer: 143 live objects at exit).
+	// Consumed: the DLSS pass sets it again every frame it runs with DLSS-G asked for, so switching to
+	// another scaler (no DLSS pass any more) does not leave the capture running.
+	const bool requested = frame_generation_dlssg_requested;
+	frame_generation_dlssg_requested = false;
+	return requested || StreamlineContext::get().dlssg_viewport != sl::ViewportHandle(-1);
+}
+
 bool DLSSEffect::is_ready(DLSSContext *p_context) {
 	DLSSContextInner *context = (DLSSContextInner *)p_context;
 	if (context->currentDlssOptions.mode == sl::DLSSMode::eOff) {
@@ -784,6 +868,9 @@ bool DLSSEffect::is_ready(DLSSContext *p_context) {
 #else
 DLSSEffect::DLSSEffect() {}
 DLSSEffect::~DLSSEffect() {}
+bool DLSSEffect::frame_generation_wants_hudless() {
+	return false;
+}
 DLSSContext *DLSSEffect::create_context(Size2i p_internal_size, Size2i p_target_size) {
 	return nullptr;
 }

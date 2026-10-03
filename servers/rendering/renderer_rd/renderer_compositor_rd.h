@@ -66,6 +66,7 @@ protected:
 		BLIT_MODE_USE_LAYER,
 		BLIT_MODE_LENS,
 		BLIT_MODE_NORMAL_ALPHA,
+		BLIT_MODE_UI_ALPHA, // Frame generation's UI alpha, see _blit_hudless().
 		BLIT_MODE_MAX
 	};
 
@@ -108,6 +109,25 @@ protected:
 
 	HashMap<RID, RID> render_target_descriptors;
 
+	// Frame generation's HUD-less color, see capture_hudless(). One for the main window: DLSS-G
+	// only generates frames there.
+	struct Hudless {
+		RID render_target; // The render target captured this frame.
+		uint64_t captured_frame = UINT64_MAX;
+		RID pre_ui; // Copy of that render target before its canvas: its size and format.
+		RID pre_ui_uniform_set;
+		RID screen; // pre_ui blitted exactly like the back buffer: its size, format, color space.
+		RID screen_framebuffer;
+		RID ui_alpha; // Back-buffer-sized R16F: 1 where the canvas changed the frame (DLSS-G's UI alpha).
+		RID ui_alpha_framebuffer;
+		RID ui_alpha_uniform_set; // (render target with canvas, pre_ui).
+		RID ui_alpha_source; // The render target texture ui_alpha_uniform_set reads.
+	} hudless;
+
+	void _free_hudless();
+	void _blit_hudless(DisplayServerEnums::WindowID p_screen, BlitMode p_mode);
+	static void _hudless_ready_callback(RenderingDeviceDriver *, RDD::CommandBufferID, void *) {}
+
 	double time = 0.0;
 	double delta = 0.0;
 
@@ -125,6 +145,7 @@ public:
 	virtual RendererMeshStorage *get_mesh_storage() override { return mesh_storage; }
 	virtual RendererParticlesStorage *get_particles_storage() override { return particles_storage; }
 	virtual RendererTextureStorage *get_texture_storage() override { return texture_storage; }
+	virtual void capture_hudless(RID p_render_target, DisplayServerEnums::WindowID p_screen) override;
 	virtual RendererGI *get_gi() override {
 		ERR_FAIL_NULL_V(scene, nullptr);
 		return scene->get_gi();

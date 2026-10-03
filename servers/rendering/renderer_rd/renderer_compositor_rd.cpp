@@ -36,6 +36,7 @@
 #include "core/os/os.h"
 #include "drivers/streamline/streamline.h"
 #include "servers/display/display_server.h"
+#include "servers/rendering/renderer_rd/effects/dlss.h"
 #include "servers/rendering/renderer_rd/forward_clustered/render_forward_clustered_pt.h"
 #include "servers/rendering/renderer_rd/forward_mobile/render_forward_mobile.h"
 #include "servers/rendering/rendering_server_types.h"
@@ -119,6 +120,212 @@ void RendererCompositorRD::blit_render_targets_to_screen(DisplayServerEnums::Win
 	}
 
 	RD::get_singleton()->draw_list_end();
+
+	// Frame generation's HUD-less color: the render target captured before its canvas goes through
+	// the very blit the back buffer just got, so both share size, format, color space and
+	// post-processing, as DLSS-G requires. Only a single, plain blit has a HUD-less
+	// counterpart; anything else hands out none this frame.
+	if (p_screen == DisplayServerEnums::MAIN_WINDOW_ID && hudless.pre_ui.is_valid()) {
+		const bool plain_blit = p_amount == 1 && !p_render_targets[0].lens_distortion.apply && !p_render_targets[0].multi_view.use_layer;
+		if (plain_blit && hudless.captured_frame == frame && p_render_targets[0].render_target == hudless.render_target) {
+			_blit_hudless(p_screen, BLIT_MODE_NORMAL);
+		} else {
+			RendererRD::DLSSEffect::set_frame_generation_hudless(RID(), RID());
+		}
+	}
+}
+
+void RendererCompositorRD::capture_hudless(RID p_render_target, DisplayServerEnums::WindowID p_screen) {
+	if (p_screen != DisplayServerEnums::MAIN_WINDOW_ID) {
+		return;
+	}
+	if (!RendererRD::DLSSEffect::frame_generation_wants_hudless()) {
+		if (hudless.pre_ui.is_valid() || hudless.screen.is_valid()) {
+			_free_hudless();
+		}
+		return;
+	}
+	// With 2D MSAA the render target is a resolve buffer, written after the canvas.
+	if (texture_storage->render_target_get_msaa(p_render_target) != RSE::VIEWPORT_MSAA_DISABLED) {
+		return;
+	}
+	RID color = texture_storage->render_target_get_rd_texture(p_render_target);
+	if (color.is_null()) {
+		return;
+	}
+	const RD::TextureFormat color_format = RD::get_singleton()->texture_get_format(color);
+	if (color_format.texture_type != RD::TEXTURE_TYPE_2D || color_format.array_layers != 1) {
+		return;
+	}
+
+	if (hudless.pre_ui.is_valid()) {
+		const RD::TextureFormat pre_ui_format = RD::get_singleton()->texture_get_format(hudless.pre_ui);
+		if (pre_ui_format.format != color_format.format || pre_ui_format.width != color_format.width || pre_ui_format.height != color_format.height) {
+			RD::get_singleton()->free_rid(hudless.pre_ui); // Its uniform set goes with it.
+			hudless.pre_ui = RID();
+			hudless.pre_ui_uniform_set = RID();
+		}
+	}
+	if (hudless.pre_ui.is_null()) {
+		RD::TextureFormat tf;
+		tf.format = color_format.format;
+		tf.width = color_format.width;
+		tf.height = color_format.height;
+		tf.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
+		hudless.pre_ui = RD::get_singleton()->texture_create(tf, RD::TextureView());
+		ERR_FAIL_COND(hudless.pre_ui.is_null());
+		RD::get_singleton()->set_resource_name(hudless.pre_ui, "Frame generation HUD-less (render target)");
+
+		Vector<RD::Uniform> uniforms;
+		RD::Uniform u;
+		u.uniform_type = RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE;
+		u.binding = 0;
+		u.append_id(blit.sampler);
+		u.append_id(hudless.pre_ui);
+		uniforms.push_back(u);
+		hudless.pre_ui_uniform_set = RD::get_singleton()->uniform_set_create(uniforms, blit.shader.version_get_shader(blit.shader_version, BLIT_MODE_NORMAL), 0);
+	}
+
+	// The render graph orders this copy after the 3D pass that wrote the render target and before
+	// the canvas that writes it next.
+	RD::get_singleton()->texture_copy(color, hudless.pre_ui, Vector3(), Vector3(), Vector3(color_format.width, color_format.height, 1), 0, 0, 0, 0);
+	hudless.render_target = p_render_target;
+	hudless.captured_frame = frame;
+}
+
+void RendererCompositorRD::_blit_hudless(DisplayServerEnums::WindowID p_screen, BlitMode p_mode) {
+	const RD::DataFormat screen_format = RD::get_singleton()->screen_get_data_format(p_screen);
+	ERR_FAIL_COND(screen_format == RD::DATA_FORMAT_MAX);
+	const uint32_t screen_width = RD::get_singleton()->screen_get_width(p_screen);
+	const uint32_t screen_height = RD::get_singleton()->screen_get_height(p_screen);
+
+	if (hudless.screen.is_valid()) {
+		const RD::TextureFormat screen_texture_format = RD::get_singleton()->texture_get_format(hudless.screen);
+		if (screen_texture_format.format != screen_format || screen_texture_format.width != screen_width || screen_texture_format.height != screen_height) {
+			// Recreated at the back buffer's new size or format (a resize also turns DLSS-G off).
+			// The next DLSS pass nulls the old tag; RenderingDevice defers the actual release.
+			RendererRD::DLSSEffect::set_frame_generation_hudless(RID(), RID());
+			RD::get_singleton()->free_rid(hudless.screen); // Its framebuffer goes with it.
+			hudless.screen = RID();
+			hudless.screen_framebuffer = RID();
+			RD::get_singleton()->free_rid(hudless.ui_alpha);
+			hudless.ui_alpha = RID();
+			hudless.ui_alpha_framebuffer = RID();
+		}
+	}
+	if (hudless.screen.is_null()) {
+		RD::TextureFormat tf;
+		tf.format = screen_format;
+		tf.width = screen_width;
+		tf.height = screen_height;
+		tf.usage_bits = RD::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT;
+		hudless.screen = RD::get_singleton()->texture_create(tf, RD::TextureView());
+		ERR_FAIL_COND(hudless.screen.is_null());
+		RD::get_singleton()->set_resource_name(hudless.screen, "Frame generation HUD-less (back buffer)");
+		Vector<RID> attachments;
+		attachments.push_back(hudless.screen);
+		hudless.screen_framebuffer = RD::get_singleton()->framebuffer_create(attachments);
+
+		// DLSS-G's UI alpha: single channel, back-buffer-sized, 0 where there is no UI (Streamline's
+		// "UI Alpha", preferred over "UI Color and Alpha"). Not R8: RenderingDevice creates D3D12
+		// resources in the typeless family and Streamline types its views from the resource's own
+		// format, with a table that has R16_TYPELESS but no R8_TYPELESS. An R8 UI alpha got an
+		// R8_TYPELESS SRV and the device was removed (DXGI_ERROR_INVALID_CALL) as soon as UI
+		// recomposition turned on.
+		tf.format = RD::DATA_FORMAT_R16_SFLOAT;
+		hudless.ui_alpha = RD::get_singleton()->texture_create(tf, RD::TextureView());
+		ERR_FAIL_COND(hudless.ui_alpha.is_null());
+		RD::get_singleton()->set_resource_name(hudless.ui_alpha, "Frame generation UI alpha (back buffer)");
+		attachments.clear();
+		attachments.push_back(hudless.ui_alpha);
+		hudless.ui_alpha_framebuffer = RD::get_singleton()->framebuffer_create(attachments);
+	}
+
+	const BlitPipelines pipelines = _get_blit_pipelines_for_format(RD::get_singleton()->framebuffer_get_format(hudless.screen_framebuffer));
+	// Cleared like draw_list_begin_for_screen() clears the back buffer, for whatever the blit
+	// leaves uncovered (letterboxing).
+	const Color clear_color[1] = { Color() };
+	RD::DrawListID draw_list = RD::get_singleton()->draw_list_begin(hudless.screen_framebuffer, RD::DRAW_CLEAR_COLOR_0, VectorView<Color>(clear_color, 1));
+	ERR_FAIL_COND(draw_list == RD::INVALID_ID);
+	RD::get_singleton()->draw_list_bind_render_pipeline(draw_list, pipelines.pipelines[p_mode]);
+	RD::get_singleton()->draw_list_bind_index_array(draw_list, blit.array);
+	RD::get_singleton()->draw_list_bind_uniform_set(draw_list, hudless.pre_ui_uniform_set, 0);
+	// blit.push_constant still holds what the back buffer's blit of this same render target used.
+	RD::get_singleton()->draw_list_set_push_constant(draw_list, &blit.push_constant, sizeof(BlitPushConstant));
+	RD::get_singleton()->draw_list_draw(draw_list, true);
+	RD::get_singleton()->draw_list_end();
+
+	// The UI alpha, through the same coordinates: the render target with its canvas against pre_ui.
+	const RID final_texture = texture_storage->render_target_get_rd_texture(hudless.render_target);
+	if (hudless.ui_alpha_source != final_texture || !RD::get_singleton()->uniform_set_is_valid(hudless.ui_alpha_uniform_set)) {
+		Vector<RD::Uniform> uniforms;
+		RD::Uniform u;
+		u.uniform_type = RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE;
+		u.binding = 0;
+		u.append_id(blit.sampler);
+		u.append_id(final_texture);
+		uniforms.push_back(u);
+		RD::Uniform u_pre_ui;
+		u_pre_ui.uniform_type = RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE;
+		u_pre_ui.binding = 1;
+		u_pre_ui.append_id(blit.sampler);
+		u_pre_ui.append_id(hudless.pre_ui);
+		uniforms.push_back(u_pre_ui);
+		hudless.ui_alpha_uniform_set = RD::get_singleton()->uniform_set_create(uniforms, blit.shader.version_get_shader(blit.shader_version, BLIT_MODE_UI_ALPHA), 0);
+		hudless.ui_alpha_source = final_texture;
+	}
+	const BlitPipelines ui_alpha_pipelines = _get_blit_pipelines_for_format(RD::get_singleton()->framebuffer_get_format(hudless.ui_alpha_framebuffer));
+	const Color no_ui[1] = { Color(0, 0, 0, 0) };
+	draw_list = RD::get_singleton()->draw_list_begin(hudless.ui_alpha_framebuffer, RD::DRAW_CLEAR_COLOR_0, VectorView<Color>(no_ui, 1));
+	ERR_FAIL_COND(draw_list == RD::INVALID_ID);
+	RD::get_singleton()->draw_list_bind_render_pipeline(draw_list, ui_alpha_pipelines.pipelines[BLIT_MODE_UI_ALPHA]);
+	RD::get_singleton()->draw_list_bind_index_array(draw_list, blit.array);
+	RD::get_singleton()->draw_list_bind_uniform_set(draw_list, hudless.ui_alpha_uniform_set, 0);
+	RD::get_singleton()->draw_list_set_push_constant(draw_list, &blit.push_constant, sizeof(BlitPushConstant));
+	RD::get_singleton()->draw_list_draw(draw_list, true);
+	RD::get_singleton()->draw_list_end();
+
+	// DLSS-G reads these textures at Present, after everything recorded here, in the state it was
+	// told (dlss.cpp). Make the render graph's last use of them this frame that state, so they are
+	// left in it: a shader read on Vulkan, GENERAL (D3D12_BARRIER_LAYOUT_COMMON) on D3D12.
+	RD::CallbackResource ready[2];
+	ready[0].rid = hudless.screen;
+	ready[0].usage = RD::CALLBACK_RESOURCE_USAGE_TEXTURE_SAMPLE;
+	ready[1].rid = hudless.ui_alpha;
+	ready[1].usage = RD::CALLBACK_RESOURCE_USAGE_TEXTURE_SAMPLE;
+	if (RD::get_singleton()->get_device_api_name() == "D3D12") {
+		// Streamline's legacy barriers may only meet Godot's enhanced ones in COMMON.
+		ready[0].usage = RD::CALLBACK_RESOURCE_USAGE_GENERAL;
+		ready[1].usage = RD::CALLBACK_RESOURCE_USAGE_GENERAL;
+	}
+	RD::get_singleton()->driver_callback_add(_hudless_ready_callback, nullptr, VectorView<RD::CallbackResource>(ready, 2));
+
+	RendererRD::DLSSEffect::set_frame_generation_hudless(hudless.screen, hudless.ui_alpha);
+}
+
+void RendererCompositorRD::_free_hudless() {
+	// Stop handing the texture out first: the next DLSS pass then nulls its Streamline tag, before
+	// RenderingDevice's deferred free can release the resource.
+	RendererRD::DLSSEffect::set_frame_generation_hudless(RID(), RID());
+	if (hudless.screen.is_valid()) {
+		RD::get_singleton()->free_rid(hudless.screen);
+		hudless.screen = RID();
+		hudless.screen_framebuffer = RID();
+	}
+	if (hudless.ui_alpha.is_valid()) {
+		RD::get_singleton()->free_rid(hudless.ui_alpha);
+		hudless.ui_alpha = RID();
+		hudless.ui_alpha_framebuffer = RID();
+	}
+	hudless.ui_alpha_uniform_set = RID();
+	hudless.ui_alpha_source = RID();
+	if (hudless.pre_ui.is_valid()) {
+		RD::get_singleton()->free_rid(hudless.pre_ui);
+		hudless.pre_ui = RID();
+		hudless.pre_ui_uniform_set = RID();
+	}
+	hudless.render_target = RID();
+	hudless.captured_frame = UINT64_MAX;
 }
 
 void RendererCompositorRD::begin_frame(double frame_step) {
@@ -150,6 +357,7 @@ void RendererCompositorRD::initialize() {
 		blit_modes.push_back("\n#define USE_LAYER\n");
 		blit_modes.push_back("\n#define USE_LAYER\n#define APPLY_LENS_DISTORTION\n");
 		blit_modes.push_back("\n");
+		blit_modes.push_back("\n#define UI_ALPHA\n");
 
 		blit.shader.initialize(blit_modes);
 		blit.shader_version = blit.shader.version_create();
@@ -177,6 +385,7 @@ void RendererCompositorRD::initialize() {
 uint64_t RendererCompositorRD::frame = 1;
 
 void RendererCompositorRD::finalize() {
+	_free_hudless();
 	texture_storage->_tex_blit_shader_free();
 	memdelete(scene);
 	memdelete(canvas);

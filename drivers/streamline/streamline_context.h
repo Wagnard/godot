@@ -123,6 +123,10 @@ public:
 	int dlssg_delay = 0;
 	// Generated frames the active DLSS-G context was set up with; a change re-sets the options.
 	uint32_t dlssg_frames = 0;
+	// Whether its options enable UI recomposition (HUD-less color and UI alpha tagged).
+	bool dlssg_ui_recomposition = false;
+	// Frames DLSS-G's enabling has waited for the HUD-less color and UI alpha to be tagged.
+	int dlssg_hudless_wait = 0;
 
 #if STREAMLINE_ENABLED_VULKAN
 	StreamlineCapabilities enumerate_support_vulkan(void *vk_physical_device);

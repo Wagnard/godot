@@ -339,6 +339,12 @@ void RendererViewport::_draw_3d(Viewport *p_viewport) {
 	float screen_mesh_lod_threshold = p_viewport->mesh_lod_threshold / float(p_viewport->size.width);
 	RSG::scene->render_camera(p_viewport->render_buffers, p_viewport->camera, p_viewport->scenario, p_viewport->self, p_viewport->internal_size, p_viewport->jitter_phase_count, screen_mesh_lod_threshold, p_viewport->shadow_atlas, xr_interface, p_viewport->window_output_max_value, &p_viewport->render_info);
 
+	// The render target holds the finished 3D image and no canvas yet: what a frame generator
+	// calls the HUD-less color. Only a viewport shown on a window can be the one it generates.
+	if (p_viewport->viewport_to_screen != DisplayServerEnums::INVALID_WINDOW_ID && p_viewport->view_count == 1 && xr_interface.is_null()) {
+		RSG::rasterizer->capture_hudless(p_viewport->render_target, p_viewport->viewport_to_screen);
+	}
+
 	RENDER_TIMESTAMP("< Render 3D Scene");
 #endif // _3D_DISABLED
 }
