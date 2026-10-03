@@ -850,6 +850,19 @@ public:
 
 	typedef void (*DriverCallback)(RenderingDeviceDriver *p_driver, CommandBufferID p_command_buffer, void *p_userdata);
 
+	// A texture a driver callback declared, with the layout its declared usage implies.
+	struct CallbackTexture {
+		TextureID texture;
+		TextureLayout layout = TEXTURE_LAYOUT_UNDEFINED;
+	};
+
+	// Called right before a driver callback runs. The render graph's barriers already put these
+	// textures in those layouts, unless the driver does not follow them: D3D12 without enhanced
+	// barriers tracks states itself and only transitions on its own commands. Such a driver must
+	// put them exactly in the state of that layout here, because callbacks hand them to third-party
+	// code (Streamline, FidelityFX) together with that state.
+	virtual void command_prepare_callback_textures(CommandBufferID p_cmd_buffer, VectorView<CallbackTexture> p_textures) {}
+
 	/*****************/
 	/**** QUERIES ****/
 	/*****************/

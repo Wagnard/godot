@@ -2294,6 +2294,85 @@ static D3D12_BARRIER_LAYOUT _rd_texture_layout_to_d3d12_barrier_layout(RDD::Text
 	}
 }
 
+static D3D12_RESOURCE_STATES _callback_layout_to_legacy_state(RDD::TextureLayout p_layout) {
+	switch (p_layout) {
+		case RDD::TEXTURE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+			return D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+		case RDD::TEXTURE_LAYOUT_STORAGE_OPTIMAL:
+			return D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+		case RDD::TEXTURE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+			return D3D12_RESOURCE_STATE_RENDER_TARGET;
+		case RDD::TEXTURE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
+			return D3D12_RESOURCE_STATE_DEPTH_WRITE;
+		case RDD::TEXTURE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:
+			return D3D12_RESOURCE_STATE_DEPTH_READ;
+		case RDD::TEXTURE_LAYOUT_COPY_SRC_OPTIMAL:
+			return D3D12_RESOURCE_STATE_COPY_SOURCE;
+		case RDD::TEXTURE_LAYOUT_COPY_DST_OPTIMAL:
+			return D3D12_RESOURCE_STATE_COPY_DEST;
+		case RDD::TEXTURE_LAYOUT_RESOLVE_SRC_OPTIMAL:
+			return D3D12_RESOURCE_STATE_RESOLVE_SOURCE;
+		case RDD::TEXTURE_LAYOUT_RESOLVE_DST_OPTIMAL:
+			return D3D12_RESOURCE_STATE_RESOLVE_DEST;
+		case RDD::TEXTURE_LAYOUT_GENERAL:
+			// Textures handed to Streamline, announced in COMMON (see _check_capabilities()).
+			return D3D12_RESOURCE_STATE_COMMON;
+		default:
+			return (D3D12_RESOURCE_STATES)-1;
+	}
+}
+
+void RenderingDeviceDriverD3D12::command_prepare_callback_textures(CommandBufferID p_cmd_buffer, VectorView<CallbackTexture> p_textures) {
+	if (barrier_capabilities.enhanced_barriers_supported) {
+		return; // The render graph's barriers already did it.
+	}
+
+	CommandBufferInfo *cmd_buf_info = (CommandBufferInfo *)p_cmd_buffer.id;
+
+	// The legacy model only transitions on Godot's own commands, and a driver callback is not one:
+	// its textures would arrive in whatever state the last command left them, while the callback's
+	// code (Streamline) was told another. The batched transitions are lazy and may merge states (a
+	// texture already in ALL_SHADER_RESOURCE counts as being in NON_PIXEL_SHADER_RESOURCE), so
+	// settle the pending batch, then transition explicitly to the exact state announced and record
+	// it, which the callback's code restores before it returns.
+	_resource_transitions_flush(cmd_buf_info);
+
+	thread_local LocalVector<D3D12_RESOURCE_BARRIER> barriers;
+	barriers.clear();
+	for (uint32_t i = 0; i < p_textures.size(); i++) {
+		const D3D12_RESOURCE_STATES wanted_state = _callback_layout_to_legacy_state(p_textures[i].layout);
+		if (wanted_state == (D3D12_RESOURCE_STATES)-1) {
+			continue;
+		}
+		TextureInfo *tex_info = (TextureInfo *)p_textures[i].texture.id;
+		ResourceInfo::States *res_states = tex_info->states_ptr;
+		const uint32_t num_subresources = res_states->subresource_states.size();
+		uint32_t planes = 1;
+		if ((tex_info->desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)) {
+			planes = format_get_plane_count(tex_info->format);
+		}
+		for (uint32_t layer = 0; layer < tex_info->layers; layer++) {
+			for (uint32_t mip = 0; mip < tex_info->mipmaps; mip++) {
+				const uint32_t subresource = D3D12CalcSubresource(tex_info->base_mip + mip, tex_info->base_layer + layer, 0, tex_info->desc.MipLevels, tex_info->desc.ArraySize());
+				D3D12_RESOURCE_STATES &curr_state = res_states->subresource_states[subresource];
+				if (curr_state == wanted_state) {
+					if (wanted_state == D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
+						barriers.push_back(CD3DX12_RESOURCE_BARRIER::UAV(tex_info->resource));
+					}
+					continue;
+				}
+				for (uint32_t plane = 0; plane < planes; plane++) {
+					barriers.push_back(CD3DX12_RESOURCE_BARRIER::Transition(tex_info->resource, curr_state, wanted_state, subresource + plane * num_subresources));
+				}
+				curr_state = wanted_state;
+			}
+		}
+	}
+	if (!barriers.is_empty()) {
+		cmd_buf_info->cmd_list->ResourceBarrier(barriers.size(), barriers.ptr());
+	}
+}
+
 void RenderingDeviceDriverD3D12::command_pipeline_barrier(CommandBufferID p_cmd_buffer,
 		BitField<PipelineStageBits> p_src_stages,
 		BitField<PipelineStageBits> p_dst_stages,
@@ -6390,6 +6469,13 @@ Error RenderingDeviceDriverD3D12::_check_capabilities() {
 		format_capabilities.relaxed_casting_supported = options12.RelaxedFormatCastingSupported;
 		barrier_capabilities.enhanced_barriers_supported = options12.EnhancedBarriersSupported;
 	}
+
+	// Streamline (DLSS, DLSS-RR, NIS, DLSS-G) is handed textures with a legacy D3D12_RESOURCE_STATES
+	// and transitions them with ResourceBarrier. D3D12 only allows mixing that with enhanced barriers
+	// on a resource in the COMMON layout: the textures handed to it are declared
+	// CALLBACK_RESOURCE_USAGE_GENERAL (RDD::TEXTURE_LAYOUT_GENERAL, D3D12_BARRIER_LAYOUT_COMMON) and
+	// announced in D3D12_RESOURCE_STATE_COMMON (effects/dlss.cpp). Enhanced barriers stay on: the
+	// legacy model's per-command state tracking costs the render thread measurably more CPU.
 
 	D3D12_FEATURE_DATA_D3D12_OPTIONS19 options19 = {};
 	res = device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS19, &options19, sizeof(options19));

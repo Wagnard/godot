@@ -390,6 +390,15 @@ private:
 	struct RecordedDriverCallbackCommand : RecordedCommand {
 		RDD::DriverCallback callback;
 		void *userdata = nullptr;
+		uint32_t textures_count = 0;
+
+		_FORCE_INLINE_ RDD::CallbackTexture *textures() {
+			return reinterpret_cast<RDD::CallbackTexture *>(&this[1]);
+		}
+
+		_FORCE_INLINE_ const RDD::CallbackTexture *textures() const {
+			return reinterpret_cast<const RDD::CallbackTexture *>(&this[1]);
+		}
 	};
 
 	struct RecordedRaytracingListCommand : RecordedCommand {

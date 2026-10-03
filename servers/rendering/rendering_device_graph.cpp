@@ -1114,6 +1114,9 @@ void RenderingDeviceGraph::_run_render_commands(int32_t p_level, const RecordedC
 			} break;
 			case RecordedCommand::TYPE_DRIVER_CALLBACK: {
 				const RecordedDriverCallbackCommand *driver_callback_command = reinterpret_cast<const RecordedDriverCallbackCommand *>(command);
+				if (driver_callback_command->textures_count > 0) {
+					driver->command_prepare_callback_textures(r_command_buffer, VectorView<RDD::CallbackTexture>(driver_callback_command->textures(), driver_callback_command->textures_count));
+				}
 				driver_callback_command->callback(driver, r_command_buffer, driver_callback_command->userdata);
 				driver->command_buffer_invalidate_state_cache(r_command_buffer);
 			} break;
@@ -1953,11 +1956,33 @@ void RenderingDeviceGraph::add_buffer_update(RDD::BufferID p_dst, ResourceTracke
 void RenderingDeviceGraph::add_driver_callback(RDD::DriverCallback p_callback, void *p_userdata, VectorView<ResourceTracker *> p_trackers, VectorView<RenderingDeviceGraph::ResourceUsage> p_usages) {
 	DEV_ASSERT(p_trackers.size() == p_usages.size());
 
+	uint32_t textures_count = 0;
+	for (uint32_t i = 0; i < p_trackers.size(); i++) {
+		if (p_trackers[i]->texture_driver_id.id != 0) {
+			textures_count++;
+		}
+	}
+
 	int32_t command_index;
-	RecordedDriverCallbackCommand *command = static_cast<RecordedDriverCallbackCommand *>(_allocate_command(sizeof(RecordedDriverCallbackCommand), command_index));
+	uint64_t command_size = sizeof(RecordedDriverCallbackCommand) + textures_count * sizeof(RDD::CallbackTexture);
+	RecordedDriverCallbackCommand *command = static_cast<RecordedDriverCallbackCommand *>(_allocate_command(command_size, command_index));
 	command->type = RecordedCommand::TYPE_DRIVER_CALLBACK;
 	command->callback = p_callback;
 	command->userdata = p_userdata;
+	command->textures_count = textures_count;
+
+	// The layout each texture's declared usage puts it in, for the drivers that do not follow the
+	// graph's barriers (RenderingDeviceDriver::command_prepare_callback_textures()).
+	RDD::CallbackTexture *textures = command->textures();
+	for (uint32_t i = 0; i < p_trackers.size(); i++) {
+		if (p_trackers[i]->texture_driver_id.id != 0) {
+			*textures = RDD::CallbackTexture();
+			textures->texture = p_trackers[i]->texture_driver_id;
+			textures->layout = _usage_to_image_layout(p_usages[i]);
+			textures++;
+		}
+	}
+
 	_add_command_to_graph((ResourceTracker **)p_trackers.ptr(), (ResourceUsage *)p_usages.ptr(), p_trackers.size(), command_index, command);
 }
 

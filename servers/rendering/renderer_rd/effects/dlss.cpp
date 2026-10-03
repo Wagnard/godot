@@ -56,12 +56,14 @@ using namespace RendererRD;
 
 // Texture layout/state constants (avoid including Vulkan/D3D12 headers here).
 static constexpr uint64_t DLSS_VK_IMAGE_LAYOUT_SHADER_READ_ONLY = 5;
-static constexpr uint64_t DLSS_D3D12_RESOURCE_STATE_NON_PIXEL_SR = 0x40;
-// The DLSS output is written by NGX, so the render graph holds it as a storage image around the
-// callback: TEXTURE_LAYOUT_STORAGE_OPTIMAL, i.e. VK_IMAGE_LAYOUT_GENERAL on Vulkan and the
-// UNORDERED_ACCESS layout on D3D12 (legacy state D3D12_RESOURCE_STATE_UNORDERED_ACCESS).
+// Vulkan: the DLSS output is written by NGX, so the render graph holds it as a storage image around
+// the callback: TEXTURE_LAYOUT_STORAGE_OPTIMAL, i.e. VK_IMAGE_LAYOUT_GENERAL.
 static constexpr uint64_t DLSS_VK_IMAGE_LAYOUT_GENERAL = 1;
-static constexpr uint64_t DLSS_D3D12_RESOURCE_STATE_UNORDERED_ACCESS = 0x8;
+// D3D12: every texture handed to Streamline is held by the render graph in the GENERAL layout
+// (D3D12_BARRIER_LAYOUT_COMMON) and announced as D3D12_RESOURCE_STATE_COMMON. Streamline transitions
+// with legacy ResourceBarrier; mixed with Godot's enhanced barriers that is only valid through
+// COMMON (debug layer error #1350 otherwise, from NVIDIA's original integration on).
+static constexpr uint64_t DLSS_D3D12_RESOURCE_STATE_COMMON = 0x0;
 
 // Single source for "is the DLSS output declared as written": the graph usage in upscale() and
 // the state announced to Streamline in _upscale_internal() must agree, or Streamline issues its
@@ -419,6 +421,12 @@ void DLSSEffect::upscale(const DLSSContext::Parameters &p_params) {
 	if (dlss_output_is_storage(p_params.output)) {
 		res[1].usage = RD::CALLBACK_RESOURCE_USAGE_STORAGE_IMAGE_READ_WRITE; // res[1] is p_params.output.
 	}
+	if (p_params.context->is_d3d12) {
+		// GENERAL is a write usage for the graph: the output stays ordered before its readers.
+		for (int i = 0; i < num_resources; i++) {
+			res[i].usage = RD::CALLBACK_RESOURCE_USAGE_GENERAL;
+		}
+	}
 	RD::get_singleton()->driver_callback_add((RDD::DriverCallback)DLSSEffect::_upscale_internal_graph_callback, p_params.context, VectorView<RD::CallbackResource>(res, num_resources));
 }
 
@@ -441,7 +449,7 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext
 		// itself (eDisableCLStateTracking) and issues its barriers from this.
 		uint64_t texture_state = p_storage ? DLSS_VK_IMAGE_LAYOUT_GENERAL : DLSS_VK_IMAGE_LAYOUT_SHADER_READ_ONLY;
 		if (context->is_d3d12) {
-			texture_state = p_storage ? DLSS_D3D12_RESOURCE_STATE_UNORDERED_ACCESS : DLSS_D3D12_RESOURCE_STATE_NON_PIXEL_SR;
+			texture_state = DLSS_D3D12_RESOURCE_STATE_COMMON;
 		}
 		uint64_t texture_vkformat = RD::get_singleton()->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_TEXTURE_DATA_FORMAT, textureRID);
 		uint64_t texture_usage_flags = RD::get_singleton()->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_TEXTURE_USAGE_FLAGS, textureRID);
