@@ -8012,6 +8012,12 @@ void RenderingDevice::swap_buffers(bool p_present) {
 	GodotProfileZoneGroupedFirst(_profile_zone, "_end_frame");
 	_end_frame();
 
+	if (submit_after_previous_frame) {
+		// The CPU has recorded this frame while the GPU rendered the previous one; submit it only once that one
+		// has finished, so the GPU queue drains between frames (see vsync/submit_after_previous_frame).
+		_stall_for_frame((frame + frames.size() - 1) % frames.size());
+	}
+
 	GodotProfileZoneGrouped(_profile_zone, "_execute_frame");
 	_execute_frame(p_present);
 
@@ -8677,6 +8683,8 @@ Error RenderingDevice::initialize(RenderingContextDriver *p_context, DisplayServ
 		// Reset all queries in a query pool before doing any operations with them..
 		driver->command_timestamp_query_pool_reset(frames[0].command_buffer, frames[i].timestamp_pool, max_timestamp_query_elements);
 	}
+
+	submit_after_previous_frame = main_surface != 0 && frames.size() > 1 && bool(GLOBAL_GET("rendering/rendering_device/vsync/submit_after_previous_frame"));
 
 	// Convert block size from KB.
 	upload_staging_buffers.block_size = GLOBAL_GET("rendering/rendering_device/staging_buffer/block_size_kb");
