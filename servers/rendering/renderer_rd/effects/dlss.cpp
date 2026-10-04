@@ -61,8 +61,6 @@ static sl::FrameToken *sl_frame_token() {
 // DLSSEffect::set_frame_generation_hudless().
 static RID frame_generation_hudless;
 static RID frame_generation_ui_alpha;
-// DLSS-G asked for by the last frame drawn (Viewport.frame_generation), enabled or not yet.
-static bool frame_generation_dlssg_requested = false;
 
 void RendererRD::DLSSEffect::set_frame_generation_hudless(RID p_hudless, RID p_ui_alpha) {
 	frame_generation_hudless = p_hudless;
@@ -72,6 +70,9 @@ void RendererRD::DLSSEffect::set_frame_generation_hudless(RID p_hudless, RID p_u
 using namespace RendererRD;
 
 #ifdef ENABLE_DLSS
+// DLSS-G asked for by the last frame drawn (Viewport.frame_generation), enabled or not yet.
+static bool frame_generation_dlssg_requested = false;
+
 // DLSS-G can be asked for: a game, on hardware that supports it.
 static bool dlssg_available() {
 	const StreamlineContext &sl = StreamlineContext::get();
