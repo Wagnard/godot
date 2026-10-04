@@ -473,7 +473,7 @@ void RenderingServerDefault::draw(bool p_present, double frame_step) {
 	// everything else the render thread does for it.
 	uint64_t frame_token = 0;
 #ifdef STREAMLINE_ENABLED
-	frame_token = (uint64_t)StreamlineContext::get().last_token;
+	frame_token = (uint64_t)StreamlineContext::get().get_frame_token_for_draw();
 #endif
 	if (create_thread) {
 		command_queue.push(this, &RenderingServerDefault::_draw, p_present, frame_step, frame_token);

@@ -273,8 +273,24 @@ sl::FrameToken *StreamlineContext::get_new_frame_token() {
 	// other half of the same refusal is which token the render thread reads: see
 	// RenderingServerDefault::draw.
 	++frame_index;
+	last_token_drawn = false;
 	sl::Result result = this->slGetNewFrameToken ? this->slGetNewFrameToken(last_token, &frame_index) : sl::Result::eOk;
 	ERR_FAIL_COND_V_MSG(result != sl::Result::eOk, nullptr, StreamlineContext::result_to_string(result));
+	return last_token;
+}
+
+sl::FrameToken *StreamlineContext::get_frame_token_for_draw() {
+	// Streamline wants one token per frame. The main loop asks for it at the start of each
+	// iteration, before simulation, as Reflex requires; but RenderingServer::draw() is also called
+	// outside the main loop: RenderingServer.force_draw(), the editor's forced redraws of a game
+	// paused from the debugger (repeated for as long as the scene keeps changing, e.g. any
+	// material animated by TIME), resource previews. Each of those reused a token a previous draw
+	// had already sent, and slSetConstants refused the second set of constants on it
+	// (eErrorDuplicatedConstants), so that frame was not upscaled.
+	if (last_token_drawn && slGetNewFrameToken) {
+		get_new_frame_token();
+	}
+	last_token_drawn = true;
 	return last_token;
 }
 

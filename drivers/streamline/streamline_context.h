@@ -100,6 +100,9 @@ public:
 	void pcl_set_options(const sl::PCLOptions &opts);
 	void pcl_marker(sl::FrameToken *frameToken, sl::PCLMarker marker);
 	sl::FrameToken *get_new_frame_token();
+	// The token RenderingServerDefault::draw() sends with its frame: last_token, or a new one if a
+	// previous draw already used it.
+	sl::FrameToken *get_frame_token_for_draw();
 
 	void dlssg_disable();
 
@@ -116,6 +119,8 @@ public:
 	sl::FrameToken *last_token = nullptr;
 	// Our own frame index, handed to slGetNewFrameToken. See get_new_frame_token().
 	uint32_t frame_index = 0;
+	// last_token has been sent with a draw. See get_frame_token_for_draw().
+	bool last_token_drawn = false;
 
 	// The token of the frame the render thread is drawing. Set by the draw command itself
 	// (RenderingServerDefault::_draw), so it travels through the command queue with the frame
