@@ -3425,6 +3425,7 @@
 		</member>
 		<member name="rendering/rendering_device/vsync/frame_queue_size" type="int" setter="" getter="" default="2">
 			The number of frames to track on the CPU side before stalling to wait for the GPU.
+			With [code]1[/code], the CPU only starts recording a frame once the GPU has finished the previous one. This gives the lowest latency, but the CPU and the GPU no longer work in parallel, which usually lowers the frame rate.
 			Try the [url=https://darksylinc.github.io/vsync_simulator/]V-Sync Simulator[/url], an interactive interface that simulates presentation to better understand how it is affected by different variables under various conditions.
 			[b]Note:[/b] This property is only read when the project starts. There is currently no way to change this value at run-time.
 		</member>
