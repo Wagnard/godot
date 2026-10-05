@@ -8506,10 +8506,7 @@ Error RenderingDevice::initialize(RenderingContextDriver *p_context, DisplayServ
 
 	uint32_t frame_count = 1;
 	if (main_surface != 0) {
-		// One frame in flight is valid with a swap chain too: every per-frame resource is reused only
-		// after _begin_frame() has waited for that frame's fence, and swap chain semaphores are not
-		// tied to the frame count. It trades CPU/GPU overlap for latency.
-		frame_count = MAX(1U, uint32_t(GLOBAL_GET("rendering/rendering_device/vsync/frame_queue_size")));
+		frame_count = MAX(2U, uint32_t(GLOBAL_GET("rendering/rendering_device/vsync/frame_queue_size")));
 	}
 
 	frame = 0;

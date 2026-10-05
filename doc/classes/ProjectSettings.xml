@@ -3425,13 +3425,12 @@
 		</member>
 		<member name="rendering/rendering_device/vsync/frame_queue_size" type="int" setter="" getter="" default="2">
 			The number of frames to track on the CPU side before stalling to wait for the GPU.
-			With [code]1[/code], the CPU only starts recording a frame once the GPU has finished the previous one. This gives the lowest latency, but the CPU and the GPU no longer work in parallel, which usually lowers the frame rate.
 			Try the [url=https://darksylinc.github.io/vsync_simulator/]V-Sync Simulator[/url], an interactive interface that simulates presentation to better understand how it is affected by different variables under various conditions.
 			[b]Note:[/b] This property is only read when the project starts. There is currently no way to change this value at run-time.
 		</member>
 		<member name="rendering/rendering_device/vsync/submit_after_previous_frame" type="bool" setter="" getter="" default="false">
 			If [code]true[/code], each frame is submitted to the GPU only once the previous frame has finished rendering. The CPU still prepares frames ahead (see [member rendering/rendering_device/vsync/frame_queue_size]), but the GPU queue drains briefly between frames instead of always holding the next one.
-			This trades a small amount of throughput for a GPU that is never fed back-to-back. It has removed occasional stutters seen with Vulkan on NVIDIA under Windows with hardware-accelerated GPU scheduling when the GPU was fully loaded. It has no effect with a [member rendering/rendering_device/vsync/frame_queue_size] of [code]1[/code].
+			This trades a small amount of throughput for a GPU that is never fed back-to-back. It has removed occasional stutters seen with Vulkan on NVIDIA under Windows with hardware-accelerated GPU scheduling when the GPU was fully loaded.
 			[b]Note:[/b] Only applies to the Vulkan rendering driver. Other drivers ignore it.
 			[b]Note:[/b] This property is only read when the project starts. There is currently no way to change this value at run-time.
 		</member>
