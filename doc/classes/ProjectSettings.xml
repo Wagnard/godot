@@ -3432,6 +3432,7 @@
 		<member name="rendering/rendering_device/vsync/submit_after_previous_frame" type="bool" setter="" getter="" default="false">
 			If [code]true[/code], each frame is submitted to the GPU only once the previous frame has finished rendering. The CPU still prepares frames ahead (see [member rendering/rendering_device/vsync/frame_queue_size]), but the GPU queue drains briefly between frames instead of always holding the next one.
 			This trades a small amount of throughput for a GPU that is never fed back-to-back. It has removed occasional stutters seen with Vulkan on NVIDIA under Windows with hardware-accelerated GPU scheduling when the GPU was fully loaded. It has no effect with a [member rendering/rendering_device/vsync/frame_queue_size] of [code]1[/code].
+			[b]Note:[/b] Only applies to the Vulkan rendering driver. Other drivers ignore it.
 			[b]Note:[/b] This property is only read when the project starts. There is currently no way to change this value at run-time.
 		</member>
 		<member name="rendering/rendering_device/vsync/swapchain_image_count" type="int" setter="" getter="" default="3">

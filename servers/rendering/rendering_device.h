@@ -88,7 +88,7 @@ private:
 
 	bool local_device_processing = false;
 	bool is_main_instance = false;
-	// rendering/rendering_device/vsync/submit_after_previous_frame, with a swap chain and more than one frame in flight.
+	// rendering/rendering_device/vsync/submit_after_previous_frame, on Vulkan, with a swap chain and more than one frame in flight.
 	bool submit_after_previous_frame = false;
 
 protected:

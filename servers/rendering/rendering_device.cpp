@@ -8684,7 +8684,8 @@ Error RenderingDevice::initialize(RenderingContextDriver *p_context, DisplayServ
 		driver->command_timestamp_query_pool_reset(frames[0].command_buffer, frames[i].timestamp_pool, max_timestamp_query_elements);
 	}
 
-	submit_after_previous_frame = main_surface != 0 && frames.size() > 1 && bool(GLOBAL_GET("rendering/rendering_device/vsync/submit_after_previous_frame"));
+	// Vulkan only: the hiccups it removes were seen with Vulkan presentation; D3D12 did not need it.
+	submit_after_previous_frame = main_surface != 0 && frames.size() > 1 && driver->get_api_name() == "Vulkan" && bool(GLOBAL_GET("rendering/rendering_device/vsync/submit_after_previous_frame"));
 
 	// Convert block size from KB.
 	upload_staging_buffers.block_size = GLOBAL_GET("rendering/rendering_device/staging_buffer/block_size_kb");
