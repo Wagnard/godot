@@ -55,9 +55,19 @@ uint64_t RenderingDeviceDriver::api_trait_get(ApiTrait p_trait) {
 			return false;
 		case API_TRAIT_TEXTURE_OUTPUTS_REQUIRE_CLEARS:
 			return false;
+		case API_TRAIT_RESUMABLE_RENDER_PASSES:
+			return false;
 		default:
 			ERR_FAIL_V(0);
 	}
+}
+
+void RenderingDeviceDriver::command_suspend_render_pass(CommandBufferID p_cmd_buffer) {
+	ERR_FAIL_MSG("Resumable render passes are not supported by this driver.");
+}
+
+void RenderingDeviceDriver::command_resume_render_pass(CommandBufferID p_cmd_buffer, RenderPassID p_render_pass, FramebufferID p_framebuffer, const Rect2i &p_rect) {
+	ERR_FAIL_MSG("Resumable render passes are not supported by this driver.");
 }
 
 /******************/

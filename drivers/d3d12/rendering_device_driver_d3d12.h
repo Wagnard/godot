@@ -786,9 +786,12 @@ public:
 private:
 	void _render_pass_enhanced_barriers_flush(CommandBufferID p_cmd_buffer);
 	void _end_render_pass(CommandBufferID p_cmd_buffer);
+	void _render_pass_begin_subpass(CommandBufferID p_cmd_buffer, bool p_resumed);
 
 public:
 	virtual void command_end_render_pass(CommandBufferID p_cmd_buffer) override final;
+	virtual void command_suspend_render_pass(CommandBufferID p_cmd_buffer) override final;
+	virtual void command_resume_render_pass(CommandBufferID p_cmd_buffer, RenderPassID p_render_pass, FramebufferID p_framebuffer, const Rect2i &p_rect) override final;
 	virtual void command_next_render_subpass(CommandBufferID p_cmd_buffer, CommandBufferType p_cmd_buffer_type) override final;
 	virtual void command_render_set_viewport(CommandBufferID p_cmd_buffer, VectorView<Rect2i> p_viewports) override final;
 	virtual void command_render_set_scissor(CommandBufferID p_cmd_buffer, VectorView<Rect2i> p_scissors) override final;

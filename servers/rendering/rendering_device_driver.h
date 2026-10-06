@@ -681,6 +681,11 @@ public:
 
 	virtual void command_begin_render_pass(CommandBufferID p_cmd_buffer, RenderPassID p_render_pass, FramebufferID p_framebuffer, CommandBufferType p_cmd_buffer_type, const Rect2i &p_rect, VectorView<RenderPassClearValue> p_clear_values) = 0;
 	virtual void command_end_render_pass(CommandBufferID p_cmd_buffer) = 0;
+	// Render passes recorded across several command buffers submitted in order (API_TRAIT_RESUMABLE_RENDER_PASSES): the
+	// pass begun in one is suspended at its end and resumed in the next one, as a single pass. Suspending skips the store
+	// and the final layouts; resuming binds the same attachments in subpass 0, without load ops or layout changes.
+	virtual void command_suspend_render_pass(CommandBufferID p_cmd_buffer);
+	virtual void command_resume_render_pass(CommandBufferID p_cmd_buffer, RenderPassID p_render_pass, FramebufferID p_framebuffer, const Rect2i &p_rect);
 	virtual void command_next_render_subpass(CommandBufferID p_cmd_buffer, CommandBufferType p_cmd_buffer_type) = 0;
 	virtual void command_render_set_viewport(CommandBufferID p_cmd_buffer, VectorView<Rect2i> p_viewports) = 0;
 	virtual void command_render_set_scissor(CommandBufferID p_cmd_buffer, VectorView<Rect2i> p_scissors) = 0;
@@ -964,6 +969,7 @@ public:
 		API_TRAIT_SHADER_GROUP_HANDLE_SIZE,
 		API_TRAIT_SHADER_GROUP_BASE_ALIGNMENT,
 		API_TRAIT_SHADER_GROUP_HANDLE_ALIGNMENT,
+		API_TRAIT_RESUMABLE_RENDER_PASSES,
 	};
 
 	enum ShaderChangeInvalidation {

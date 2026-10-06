@@ -5815,7 +5815,10 @@ void RenderingDevice::draw_list_bind_render_pipeline(DrawListID p_list, RID p_re
 
 	draw_list.state.pipeline = p_render_pipeline;
 
-	draw_graph.add_draw_list_bind_pipeline(pipeline->driver_id, pipeline->stage_bits);
+	// The first set this pipeline leaves unbound and whether it drops the push constants (a new pipeline layout), for
+	// the graph to know which earlier bindings still apply.
+	uint32_t first_unbound_set = UINT32_MAX;
+	bool layout_reset = false;
 
 	if (draw_list.state.pipeline_shader != pipeline->shader) {
 		// Shader changed, so descriptor sets may become incompatible.
@@ -5871,7 +5874,12 @@ void RenderingDevice::draw_list_bind_render_pipeline(DrawListID p_list, RID p_re
 		draw_list.state.pipeline_shader = pipeline->shader;
 		draw_list.state.pipeline_shader_driver_id = pipeline->shader_driver_id;
 		draw_list.state.pipeline_shader_layout_hash = pipeline->shader_layout_hash;
+
+		first_unbound_set = MIN(first_invalid_set, pcount);
+		layout_reset = first_invalid_set == 0;
 	}
+
+	draw_graph.add_draw_list_bind_pipeline(pipeline->driver_id, pipeline->stage_bits, first_unbound_set, layout_reset);
 
 #ifdef DEBUG_ENABLED
 	// Update render pass pipeline info.

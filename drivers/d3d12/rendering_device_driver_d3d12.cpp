@@ -4813,6 +4813,59 @@ void RenderingDeviceDriverD3D12::command_end_render_pass(CommandBufferID p_cmd_b
 	cmd_buf_info->render_pass_state.current_subpass = UINT32_MAX;
 }
 
+void RenderingDeviceDriverD3D12::command_suspend_render_pass(CommandBufferID p_cmd_buffer) {
+	CommandBufferInfo *cmd_buf_info = (CommandBufferInfo *)p_cmd_buffer.id;
+	DEV_ASSERT(cmd_buf_info->render_pass_state.current_subpass != UINT32_MAX);
+
+	const FramebufferInfo *fb_info = cmd_buf_info->render_pass_state.fb_info;
+	if (fb_info->vrs_attachment && fsr_capabilities.attachment_supported) {
+		cmd_buf_info->cmd_list_5->RSSetShadingRateImage(nullptr);
+	}
+
+	// The attachments stay in the subpass layouts for the command buffer that resumes the pass.
+	cmd_buf_info->render_pass_state.current_subpass = UINT32_MAX;
+}
+
+void RenderingDeviceDriverD3D12::command_resume_render_pass(CommandBufferID p_cmd_buffer, RenderPassID p_render_pass, FramebufferID p_framebuffer, const Rect2i &p_rect) {
+	CommandBufferInfo *cmd_buf_info = (CommandBufferInfo *)p_cmd_buffer.id;
+	const RenderPassInfo *pass_info = (const RenderPassInfo *)p_render_pass.id;
+	const FramebufferInfo *fb_info = (const FramebufferInfo *)p_framebuffer.id;
+
+	DEV_ASSERT(cmd_buf_info->render_pass_state.current_subpass == UINT32_MAX);
+	DEV_ASSERT(!fb_info->is_screen && "Screen framebuffers transition on the CPU-tracked path and can't be resumed.");
+
+	cmd_buf_info->render_pass_state.region_rect = CD3DX12_RECT(
+			p_rect.position.x,
+			p_rect.position.y,
+			p_rect.position.x + p_rect.size.x,
+			p_rect.position.y + p_rect.size.y);
+	cmd_buf_info->render_pass_state.region_is_all = (cmd_buf_info->render_pass_state.region_rect.left == 0 &&
+			cmd_buf_info->render_pass_state.region_rect.top == 0 &&
+			cmd_buf_info->render_pass_state.region_rect.right == fb_info->size.x &&
+			cmd_buf_info->render_pass_state.region_rect.bottom == fb_info->size.y);
+
+	cmd_buf_info->render_pass_state.attachment_layouts.resize(pass_info->attachments.size());
+	for (uint32_t i = 0; i < pass_info->attachments.size(); i++) {
+		for (RenderPassState::AttachmentLayout::AspectLayout &aspect_layout : cmd_buf_info->render_pass_state.attachment_layouts[i].aspect_layouts) {
+			aspect_layout.cur_layout = pass_info->attachments[i].initial_layout;
+			aspect_layout.expected_layout = pass_info->attachments[i].initial_layout;
+		}
+	}
+
+	if (fb_info->vrs_attachment && fsr_capabilities.attachment_supported) {
+		static const D3D12_SHADING_RATE_COMBINER COMBINERS[D3D12_RS_SET_SHADING_RATE_COMBINER_COUNT] = {
+			D3D12_SHADING_RATE_COMBINER_PASSTHROUGH,
+			D3D12_SHADING_RATE_COMBINER_OVERRIDE,
+		};
+		cmd_buf_info->cmd_list_5->RSSetShadingRate(D3D12_SHADING_RATE_1X1, COMBINERS);
+	}
+
+	cmd_buf_info->render_pass_state.current_subpass = 0;
+	cmd_buf_info->render_pass_state.fb_info = fb_info;
+	cmd_buf_info->render_pass_state.pass_info = pass_info;
+	_render_pass_begin_subpass(p_cmd_buffer, true);
+}
+
 void RenderingDeviceDriverD3D12::command_next_render_subpass(CommandBufferID p_cmd_buffer, CommandBufferType p_cmd_buffer_type) {
 	CommandBufferInfo *cmd_buf_info = (CommandBufferInfo *)p_cmd_buffer.id;
 
@@ -4823,6 +4876,11 @@ void RenderingDeviceDriverD3D12::command_next_render_subpass(CommandBufferID p_c
 		cmd_buf_info->render_pass_state.current_subpass++;
 	}
 
+	_render_pass_begin_subpass(p_cmd_buffer, false);
+}
+
+void RenderingDeviceDriverD3D12::_render_pass_begin_subpass(CommandBufferID p_cmd_buffer, bool p_resumed) {
+	CommandBufferInfo *cmd_buf_info = (CommandBufferInfo *)p_cmd_buffer.id;
 	const FramebufferInfo *fb_info = cmd_buf_info->render_pass_state.fb_info;
 	const RenderPassInfo *pass_info = cmd_buf_info->render_pass_state.pass_info;
 	const Subpass &subpass = pass_info->subpasses[cmd_buf_info->render_pass_state.current_subpass];
@@ -4880,7 +4938,16 @@ void RenderingDeviceDriverD3D12::command_next_render_subpass(CommandBufferID p_c
 		}
 	}
 
-	_render_pass_enhanced_barriers_flush(p_cmd_buffer);
+	if (p_resumed) {
+		// The command buffer that suspended the pass already moved the attachments to these layouts.
+		for (RenderPassState::AttachmentLayout &attachment_layout : cmd_buf_info->render_pass_state.attachment_layouts) {
+			for (RenderPassState::AttachmentLayout::AspectLayout &aspect_layout : attachment_layout.aspect_layouts) {
+				aspect_layout.cur_layout = aspect_layout.expected_layout;
+			}
+		}
+	} else {
+		_render_pass_enhanced_barriers_flush(p_cmd_buffer);
+	}
 
 	cmd_buf_info->cmd_list->OMSetRenderTargets(subpass.color_references.size(), rtv_handles, false, dsv_handle.ptr ? &dsv_handle : nullptr);
 }
@@ -6106,6 +6173,9 @@ uint64_t RenderingDeviceDriverD3D12::limit_get(Limit p_limit) {
 uint64_t RenderingDeviceDriverD3D12::api_trait_get(ApiTrait p_trait) {
 	switch (p_trait) {
 		case API_TRAIT_HONORS_PIPELINE_BARRIERS:
+			return barrier_capabilities.enhanced_barriers_supported;
+		case API_TRAIT_RESUMABLE_RENDER_PASSES:
+			// The legacy path tracks resource states on the CPU in recording order.
 			return barrier_capabilities.enhanced_barriers_supported;
 		case API_TRAIT_SHADER_CHANGE_INVALIDATION:
 			return (uint64_t)SHADER_CHANGE_INVALIDATION_ALL_OR_NONE_ACCORDING_TO_LAYOUT_HASH;
