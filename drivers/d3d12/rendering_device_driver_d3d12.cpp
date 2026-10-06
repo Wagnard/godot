@@ -3974,6 +3974,7 @@ void RenderingDeviceDriverD3D12::_command_check_descriptor_sets(CommandBufferID 
 /******************/
 
 RenderingDeviceDriverD3D12::DescriptorHeap::Allocation RenderingDeviceDriverD3D12::_command_allocate_per_frame_descriptor() {
+	MutexLock lock(per_frame_descriptor_mutex);
 	FrameInfo &f = frames[frame_idx];
 	if (f.descriptor_allocation_count < f.descriptor_allocations.size()) {
 		uint32_t allocation_index = f.descriptor_allocation_count;

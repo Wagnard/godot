@@ -30,6 +30,8 @@
 
 #include "rendering_device_graph.h"
 
+#include "core/os/os.h"
+
 #define PRINT_RENDER_GRAPH 0
 #define FORCE_FULL_ACCESS_BITS 0
 #define PRINT_RESOURCE_TRACKER_TOTAL 0
@@ -1360,14 +1362,14 @@ void RenderingDeviceGraph::_boost_priority_for_render_commands(RecordedCommandSo
 	}
 }
 
-void RenderingDeviceGraph::_group_barriers_for_render_commands(RDD::CommandBufferID p_command_buffer, const RecordedCommandSort *p_sorted_commands, uint32_t p_sorted_commands_count, bool p_full_memory_barrier) {
+void RenderingDeviceGraph::_group_barriers_for_render_commands(BarrierGroup &r_barrier_group, RDD::CommandBufferID p_command_buffer, const RecordedCommandSort *p_sorted_commands, uint32_t p_sorted_commands_count, bool p_full_memory_barrier) {
 	if (!driver_honors_barriers) {
 		return;
 	}
 
-	barrier_group.clear();
-	barrier_group.src_stages = RDD::PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-	barrier_group.dst_stages = RDD::PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+	r_barrier_group.clear();
+	r_barrier_group.src_stages = RDD::PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+	r_barrier_group.dst_stages = RDD::PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
 
 	for (uint32_t i = 0; i < p_sorted_commands_count; i++) {
 		const uint32_t command_index = p_sorted_commands[i].index;
@@ -1379,27 +1381,27 @@ void RenderingDeviceGraph::_group_barriers_for_render_commands(RDD::CommandBuffe
 #endif
 
 		// Merge command's stage bits with the barrier group.
-		barrier_group.src_stages = barrier_group.src_stages | command->previous_stages;
-		barrier_group.dst_stages = barrier_group.dst_stages | command->next_stages;
+		r_barrier_group.src_stages = r_barrier_group.src_stages | command->previous_stages;
+		r_barrier_group.dst_stages = r_barrier_group.dst_stages | command->next_stages;
 
 		// Merge command's memory barrier bits with the barrier group.
-		barrier_group.memory_barrier.src_access = barrier_group.memory_barrier.src_access | command->memory_barrier.src_access;
-		barrier_group.memory_barrier.dst_access = barrier_group.memory_barrier.dst_access | command->memory_barrier.dst_access;
+		r_barrier_group.memory_barrier.src_access = r_barrier_group.memory_barrier.src_access | command->memory_barrier.src_access;
+		r_barrier_group.memory_barrier.dst_access = r_barrier_group.memory_barrier.dst_access | command->memory_barrier.dst_access;
 
 		// Gather texture barriers.
 		for (int32_t j = 0; j < command->normalization_barrier_count; j++) {
 			const RDD::TextureBarrier &recorded_barrier = command_normalization_barriers[command->normalization_barrier_index + j];
-			barrier_group.normalization_barriers.push_back(recorded_barrier);
+			r_barrier_group.normalization_barriers.push_back(recorded_barrier);
 #if PRINT_COMMAND_RECORDING
-			print_line(vformat("Normalization Barrier #%d", barrier_group.normalization_barriers.size() - 1));
+			print_line(vformat("Normalization Barrier #%d", r_barrier_group.normalization_barriers.size() - 1));
 #endif
 		}
 
 		for (int32_t j = 0; j < command->transition_barrier_count; j++) {
 			const RDD::TextureBarrier &recorded_barrier = command_transition_barriers[command->transition_barrier_index + j];
-			barrier_group.transition_barriers.push_back(recorded_barrier);
+			r_barrier_group.transition_barriers.push_back(recorded_barrier);
 #if PRINT_COMMAND_RECORDING
-			print_line(vformat("Transition Barrier #%d", barrier_group.transition_barriers.size() - 1));
+			print_line(vformat("Transition Barrier #%d", r_barrier_group.transition_barriers.size() - 1));
 #endif
 		}
 
@@ -1407,51 +1409,257 @@ void RenderingDeviceGraph::_group_barriers_for_render_commands(RDD::CommandBuffe
 		// Gather buffer barriers.
 		for (int32_t j = 0; j < command->buffer_barrier_count; j++) {
 			const RDD::BufferBarrier &recorded_barrier = command_buffer_barriers[command->buffer_barrier_index + j];
-			barrier_group.buffer_barriers.push_back(recorded_barrier);
+			r_barrier_group.buffer_barriers.push_back(recorded_barrier);
 		}
 #endif
 
 		// Gather acceleration structure barriers.
 		for (int32_t j = 0; j < command->acceleration_structure_barrier_count; j++) {
 			const RDD::AccelerationStructureBarrier &recorded_barrier = command_acceleration_structure_barriers[command->acceleration_structure_barrier_index + j];
-			barrier_group.acceleration_structure_barriers.push_back(recorded_barrier);
+			r_barrier_group.acceleration_structure_barriers.push_back(recorded_barrier);
 		}
 	}
 
 	if (p_full_memory_barrier) {
-		barrier_group.src_stages = RDD::PIPELINE_STAGE_ALL_COMMANDS_BIT;
-		barrier_group.dst_stages = RDD::PIPELINE_STAGE_ALL_COMMANDS_BIT;
-		barrier_group.memory_barrier.src_access = RDD::BARRIER_ACCESS_MEMORY_READ_BIT | RDD::BARRIER_ACCESS_MEMORY_WRITE_BIT;
-		barrier_group.memory_barrier.dst_access = RDD::BARRIER_ACCESS_MEMORY_READ_BIT | RDD::BARRIER_ACCESS_MEMORY_WRITE_BIT;
+		r_barrier_group.src_stages = RDD::PIPELINE_STAGE_ALL_COMMANDS_BIT;
+		r_barrier_group.dst_stages = RDD::PIPELINE_STAGE_ALL_COMMANDS_BIT;
+		r_barrier_group.memory_barrier.src_access = RDD::BARRIER_ACCESS_MEMORY_READ_BIT | RDD::BARRIER_ACCESS_MEMORY_WRITE_BIT;
+		r_barrier_group.memory_barrier.dst_access = RDD::BARRIER_ACCESS_MEMORY_READ_BIT | RDD::BARRIER_ACCESS_MEMORY_WRITE_BIT;
 	}
 
-	const bool is_memory_barrier_empty = barrier_group.memory_barrier.src_access.is_empty() && barrier_group.memory_barrier.dst_access.is_empty();
-	const bool are_texture_barriers_empty = barrier_group.normalization_barriers.is_empty() && barrier_group.transition_barriers.is_empty();
+	const bool is_memory_barrier_empty = r_barrier_group.memory_barrier.src_access.is_empty() && r_barrier_group.memory_barrier.dst_access.is_empty();
+	const bool are_texture_barriers_empty = r_barrier_group.normalization_barriers.is_empty() && r_barrier_group.transition_barriers.is_empty();
 #if USE_BUFFER_BARRIERS
-	const bool are_buffer_barriers_empty = barrier_group.buffer_barriers.is_empty();
+	const bool are_buffer_barriers_empty = r_barrier_group.buffer_barriers.is_empty();
 #else
 	const bool are_buffer_barriers_empty = true;
 #endif
-	const bool are_acceleration_structure_barriers_empty = barrier_group.acceleration_structure_barriers.is_empty();
+	const bool are_acceleration_structure_barriers_empty = r_barrier_group.acceleration_structure_barriers.is_empty();
 	if (is_memory_barrier_empty && are_texture_barriers_empty && are_buffer_barriers_empty && are_acceleration_structure_barriers_empty) {
 		// Commands don't require synchronization.
 		return;
 	}
 
-	const VectorView<RDD::MemoryAccessBarrier> memory_barriers = !is_memory_barrier_empty ? barrier_group.memory_barrier : VectorView<RDD::MemoryAccessBarrier>();
-	const VectorView<RDD::TextureBarrier> texture_barriers = barrier_group.normalization_barriers.is_empty() ? barrier_group.transition_barriers : barrier_group.normalization_barriers;
+	const VectorView<RDD::MemoryAccessBarrier> memory_barriers = !is_memory_barrier_empty ? r_barrier_group.memory_barrier : VectorView<RDD::MemoryAccessBarrier>();
+	const VectorView<RDD::TextureBarrier> texture_barriers = r_barrier_group.normalization_barriers.is_empty() ? r_barrier_group.transition_barriers : r_barrier_group.normalization_barriers;
 #if USE_BUFFER_BARRIERS
-	const VectorView<RDD::BufferBarrier> buffer_barriers = !are_buffer_barriers_empty ? barrier_group.buffer_barriers : VectorView<RDD::BufferBarrier>();
+	const VectorView<RDD::BufferBarrier> buffer_barriers = !are_buffer_barriers_empty ? r_barrier_group.buffer_barriers : VectorView<RDD::BufferBarrier>();
 #else
 	const VectorView<RDD::BufferBarrier> buffer_barriers = VectorView<RDD::BufferBarrier>();
 #endif
-	const VectorView<RDD::AccelerationStructureBarrier> acceleration_structure_barriers = !are_acceleration_structure_barriers_empty ? barrier_group.acceleration_structure_barriers : VectorView<RDD::AccelerationStructureBarrier>();
+	const VectorView<RDD::AccelerationStructureBarrier> acceleration_structure_barriers = !are_acceleration_structure_barriers_empty ? r_barrier_group.acceleration_structure_barriers : VectorView<RDD::AccelerationStructureBarrier>();
 
-	driver->command_pipeline_barrier(p_command_buffer, barrier_group.src_stages, barrier_group.dst_stages, memory_barriers, buffer_barriers, texture_barriers, acceleration_structure_barriers);
+	driver->command_pipeline_barrier(p_command_buffer, r_barrier_group.src_stages, r_barrier_group.dst_stages, memory_barriers, buffer_barriers, texture_barriers, acceleration_structure_barriers);
 
-	bool separate_texture_barriers = !barrier_group.normalization_barriers.is_empty() && !barrier_group.transition_barriers.is_empty();
+	bool separate_texture_barriers = !r_barrier_group.normalization_barriers.is_empty() && !r_barrier_group.transition_barriers.is_empty();
 	if (separate_texture_barriers) {
-		driver->command_pipeline_barrier(p_command_buffer, barrier_group.src_stages, barrier_group.dst_stages, VectorView<RDD::MemoryAccessBarrier>(), VectorView<RDD::BufferBarrier>(), barrier_group.transition_barriers, VectorView<RDD::AccelerationStructureBarrier>());
+		driver->command_pipeline_barrier(p_command_buffer, r_barrier_group.src_stages, r_barrier_group.dst_stages, VectorView<RDD::MemoryAccessBarrier>(), VectorView<RDD::BufferBarrier>(), r_barrier_group.transition_barriers, VectorView<RDD::AccelerationStructureBarrier>());
+	}
+}
+
+uint32_t RenderingDeviceGraph::_plan_parallel_slices(const RecordedCommandSort *p_sorted_commands, uint32_t p_sorted_commands_count, CommandBufferPool &r_command_buffer_pool) {
+	// Estimate the recording cost of every command from the size of its instructions. Recording stops being parallel at
+	// the first draw list that splits the command buffer (the swap chain blit): from there on it switches command
+	// buffers, which only the serial path does.
+	thread_local LocalVector<uint32_t> command_costs;
+	command_costs.resize(p_sorted_commands_count);
+
+	uint32_t parallel_end = p_sorted_commands_count;
+	uint64_t total_cost = 0;
+	for (uint32_t i = 0; i < p_sorted_commands_count; i++) {
+		const RecordedCommand *command = reinterpret_cast<const RecordedCommand *>(&command_data[command_data_offsets[p_sorted_commands[i].index]]);
+		uint32_t cost = 64;
+		switch (command->type) {
+			case RecordedCommand::TYPE_DRAW_LIST: {
+				const RecordedDrawListCommand *draw_list_command = reinterpret_cast<const RecordedDrawListCommand *>(command);
+				if (draw_list_command->split_cmd_buffer) {
+					parallel_end = i;
+				}
+				cost += draw_list_command->instruction_data_size;
+			} break;
+			case RecordedCommand::TYPE_COMPUTE_LIST: {
+				cost += reinterpret_cast<const RecordedComputeListCommand *>(command)->instruction_data_size;
+			} break;
+			case RecordedCommand::TYPE_RAYTRACING_LIST: {
+				cost += reinterpret_cast<const RecordedRaytracingListCommand *>(command)->instruction_data_size;
+			} break;
+			default: {
+			} break;
+		}
+
+		if (parallel_end != p_sorted_commands_count) {
+			break;
+		}
+
+		command_costs[i] = cost;
+		total_cost += cost;
+	}
+
+	if (parallel_stats) {
+		parallel_stats_data.size += total_cost;
+	}
+
+	if (total_cost < parallel_min_size || parallel_end < 2) {
+		return 0;
+	}
+
+	// Cut the commands into contiguous slices of about the same cost. Every command list costs the driver something at
+	// submission, so a slice much smaller than the others joins the one before it. A driver callback (Streamline) starts
+	// a slice that the thread ending the graph records first, in order, as callbacks always were; the commands after the
+	// callback fill that slice up to the next cut.
+	const uint64_t slice_cost = total_cost / parallel_slice_count;
+	uint32_t slice_count = 0;
+	uint32_t slice_start = 0;
+	uint32_t balanced_cuts = 0;
+	uint64_t accumulated_cost = 0;
+	uint64_t slice_start_cost = 0;
+	bool slice_has_callback = false;
+	auto close_slice = [&](uint32_t p_end) {
+		if (p_end > slice_start) {
+			const uint64_t cost = accumulated_cost - slice_start_cost;
+			ParallelSlice *previous = slice_count > 0 ? &parallel_slices[slice_count - 1] : nullptr;
+			if (previous != nullptr && cost * 4 < slice_cost && (!slice_has_callback || previous->pinned_to_calling_thread)) {
+				previous->end = p_end;
+				previous->cost += cost;
+			} else {
+				if (parallel_slices.size() <= slice_count) {
+					parallel_slices.resize(slice_count + 1);
+				}
+				ParallelSlice &slice = parallel_slices[slice_count];
+				slice.start = slice_start;
+				slice.end = p_end;
+				slice.cost = cost;
+				slice.pinned_to_calling_thread = slice_has_callback;
+				slice_count++;
+			}
+		}
+		slice_start = p_end;
+		slice_start_cost = accumulated_cost;
+		slice_has_callback = false;
+	};
+
+	for (uint32_t i = 0; i < parallel_end; i++) {
+		const RecordedCommand *command = reinterpret_cast<const RecordedCommand *>(&command_data[command_data_offsets[p_sorted_commands[i].index]]);
+		if (command->type == RecordedCommand::TYPE_DRIVER_CALLBACK && !slice_has_callback) {
+			close_slice(i);
+			slice_has_callback = true;
+		}
+
+		accumulated_cost += command_costs[i];
+		if (accumulated_cost >= slice_cost * (balanced_cuts + 1) && balanced_cuts + 1 < parallel_slice_count) {
+			close_slice(i + 1);
+			balanced_cuts++;
+		}
+	}
+
+	close_slice(parallel_end);
+
+	if (slice_count < 2) {
+		return 0;
+	}
+
+	parallel_slices.resize(slice_count);
+
+	// The first slice continues the frame's main command buffer; the others get their own, each from its own pool. The
+	// last one stays open: the serial commands that follow the slices continue it, since it is submitted last.
+	while (r_command_buffer_pool.parallel_buffers.size() < slice_count - 1) {
+		RDD::CommandPoolID command_pool = driver->command_pool_create(command_queue_family, RDD::COMMAND_BUFFER_TYPE_PRIMARY);
+		ERR_FAIL_COND_V(!command_pool, 0);
+		RDD::CommandBufferID command_buffer = driver->command_buffer_create(command_pool);
+		ERR_FAIL_COND_V(!command_buffer, 0);
+		r_command_buffer_pool.parallel_pools.push_back(command_pool);
+		r_command_buffer_pool.parallel_buffers.push_back(command_buffer);
+	}
+
+	r_command_buffer_pool.parallel_buffers_used = slice_count - 1;
+
+	for (uint32_t i = 0; i < slice_count; i++) {
+		ParallelSlice &slice = parallel_slices[i];
+		slice.command_buffer = i > 0 ? r_command_buffer_pool.parallel_buffers[i - 1] : RDD::CommandBufferID();
+		slice.begin_command_buffer = i > 0;
+		slice.end_command_buffer = (i + 1) < slice_count;
+		slice.recorded_on_calling_thread = false;
+
+		for (uint32_t j = slice.start; j < slice.end; j++) {
+			const RecordedCommand *command = reinterpret_cast<const RecordedCommand *>(&command_data[command_data_offsets[p_sorted_commands[j].index]]);
+			if (command->type == RecordedCommand::TYPE_DRAW_LIST) {
+				const RecordedDrawListCommand *draw_list_command = reinterpret_cast<const RecordedDrawListCommand *>(command);
+				if (draw_list_command->framebuffer_cache != nullptr) {
+					// Create the render pass and the framebuffer now if they don't exist yet, so the slices only look
+					// them up.
+					RDD::RenderPassID render_pass;
+					RDD::FramebufferID framebuffer;
+					_get_draw_list_render_pass_and_framebuffer(draw_list_command, render_pass, framebuffer);
+				}
+			}
+		}
+	}
+
+	return parallel_end;
+}
+
+void RenderingDeviceGraph::_run_parallel_slice(ParallelSlice &p_slice) {
+	if (parallel_stats) {
+		p_slice.begin_usec = OS::get_singleton()->get_ticks_usec();
+	}
+
+	RDD::CommandBufferID command_buffer = p_slice.command_buffer;
+	if (p_slice.begin_command_buffer) {
+		driver->command_buffer_begin(command_buffer);
+	}
+
+	// Slices never contain the commands that switch command buffers, and labels are not recorded in parallel.
+	CommandBufferPool unused_command_buffer_pool;
+	int32_t current_label_index = -1;
+	int32_t current_label_level = -1;
+
+	const RecordedCommandSort *sorted_commands = parallel_commands_sorted;
+	uint32_t i = p_slice.start;
+	while (i < p_slice.end) {
+		const uint32_t level = sorted_commands[i].level;
+		uint32_t run_end = i + 1;
+		while (run_end < p_slice.end && sorted_commands[run_end].level == level) {
+			run_end++;
+		}
+
+		if (i == 0 || sorted_commands[i - 1].level != level) {
+			// The slice holds the start of the level: it records the level's barriers. Command buffers execute in
+			// submission order, so they also cover the part of the level recorded by the next slices.
+			uint32_t level_end = run_end;
+			while (level_end < parallel_commands_count && sorted_commands[level_end].level == level) {
+				level_end++;
+			}
+
+			_group_barriers_for_render_commands(p_slice.barrier_group, command_buffer, &sorted_commands[i], level_end - i, parallel_full_barriers);
+		}
+
+		_run_render_commands(level, &sorted_commands[i], run_end - i, command_buffer, unused_command_buffer_pool, current_label_index, current_label_level);
+		i = run_end;
+	}
+
+	DEV_ASSERT(command_buffer == p_slice.command_buffer);
+
+	if (p_slice.end_command_buffer) {
+		driver->command_buffer_end(command_buffer);
+	}
+
+	if (parallel_stats) {
+		p_slice.end_usec = OS::get_singleton()->get_ticks_usec();
+	}
+}
+
+void RenderingDeviceGraph::_run_parallel_slice_task(uint32_t p_index, void *p_userdata) {
+	_run_claimed_parallel_slices(false);
+}
+
+void RenderingDeviceGraph::_run_claimed_parallel_slices(bool p_calling_thread) {
+	// The slices that any thread may record go to whichever thread is free first.
+	uint32_t claim = parallel_next_claim.postincrement();
+	while (claim < parallel_claimable_slices.size()) {
+		ParallelSlice &slice = parallel_slices[parallel_claimable_slices[claim]];
+		slice.recorded_on_calling_thread = p_calling_thread;
+		_run_parallel_slice(slice);
+		claim = parallel_next_claim.postincrement();
 	}
 }
 
@@ -1744,6 +1952,19 @@ void RenderingDeviceGraph::initialize(RDD *p_driver, RenderPassCreationFunction 
 	driver_honors_barriers = driver->api_trait_get(RDD::API_TRAIT_HONORS_PIPELINE_BARRIERS);
 	driver_clears_with_copy_engine = driver->api_trait_get(RDD::API_TRAIT_CLEARS_WITH_COPY_ENGINE);
 	driver_buffers_require_transitions = driver->api_trait_get(RDD::API_TRAIT_BUFFERS_REQUIRE_TRANSITIONS);
+
+	// Prototype: GODOT_PARALLEL_RECORDING=N records the frame's commands in up to N command buffers at once (D3D12 with
+	// enhanced barriers only, Adreno workaround off). GODOT_PARALLEL_RECORDING_MIN is the smallest frame worth splitting,
+	// in bytes of commands. GODOT_PARALLEL_RECORDING_STATS=1 prints the cost of end() every 240 frames.
+	command_queue_family = p_secondary_command_queue_family;
+	const String parallel_env = OS::get_singleton()->get_environment("GODOT_PARALLEL_RECORDING");
+	if (!parallel_env.is_empty() && driver->get_api_name() == "D3D12" && driver_honors_barriers && !driver_workarounds.avoid_compute_after_draw) {
+		parallel_slice_count = CLAMP(parallel_env.to_int(), 0, 16);
+	}
+	const String parallel_min_env = OS::get_singleton()->get_environment("GODOT_PARALLEL_RECORDING_MIN");
+	parallel_min_size = parallel_min_env.is_empty() ? 16384 : uint32_t(MAX(parallel_min_env.to_int(), 0));
+	parallel_stats = OS::get_singleton()->get_environment("GODOT_PARALLEL_RECORDING_STATS") == "1";
+	print_verbose(vformat("RenderingDeviceGraph: parallel recording in up to %d command buffers.", parallel_slice_count));
 }
 
 void RenderingDeviceGraph::finalize() {
@@ -2642,6 +2863,13 @@ void RenderingDeviceGraph::end(bool p_reorder_commands, bool p_full_barriers, RD
 		return;
 	}
 
+	const uint64_t stats_begin_usec = parallel_stats ? OS::get_singleton()->get_ticks_usec() : 0;
+	uint64_t stats_prepare_end_usec = 0;
+	uint64_t stats_calling_usec = 0;
+	uint64_t stats_wait_usec = 0;
+	uint64_t stats_serial_usec = 0;
+	bool stats_split = false;
+
 	thread_local LocalVector<RecordedCommandSort> commands_sorted;
 	if (p_reorder_commands) {
 		thread_local LocalVector<int64_t> command_stack;
@@ -2786,33 +3014,131 @@ void RenderingDeviceGraph::end(bool p_reorder_commands, bool p_full_barriers, RD
 			print_line(vformat("Recording %d commands", command_count));
 #endif
 
-			uint32_t boosted_priority = 0;
-			uint32_t current_level = commands_sorted[0].level;
-			uint32_t current_level_start = 0;
-			for (uint32_t i = 0; i < command_count; i++) {
-				if (current_level != commands_sorted[i].level) {
-					RecordedCommandSort *level_command_ptr = &commands_sorted[current_level_start];
-					uint32_t level_command_count = i - current_level_start;
-					_boost_priority_for_render_commands(level_command_ptr, level_command_count, boosted_priority);
-					_group_barriers_for_render_commands(r_command_buffer, level_command_ptr, level_command_count, p_full_barriers);
-					_run_render_commands(current_level, level_command_ptr, level_command_count, r_command_buffer, r_command_buffer_pool, current_label_index, current_label_level);
-					current_level = commands_sorted[i].level;
-					current_level_start = i;
+			if (parallel_slice_count > 1 && command_label_count == 0) {
+				// Boost the priorities of every level first. A level's boost only depends on the levels before it, so
+				// this gives the order the serial loop records in.
+				uint32_t boosted_priority = 0;
+				uint32_t level_start = 0;
+				for (uint32_t i = 1; i <= command_count; i++) {
+					if (i == command_count || commands_sorted[i].level != commands_sorted[level_start].level) {
+						_boost_priority_for_render_commands(&commands_sorted[level_start], i - level_start, boosted_priority);
+						level_start = i;
+					}
 				}
-			}
 
-			RecordedCommandSort *level_command_ptr = &commands_sorted[current_level_start];
-			uint32_t level_command_count = command_count - current_level_start;
-			_boost_priority_for_render_commands(level_command_ptr, level_command_count, boosted_priority);
-			_group_barriers_for_render_commands(r_command_buffer, level_command_ptr, level_command_count, p_full_barriers);
-			_run_render_commands(current_level, level_command_ptr, level_command_count, r_command_buffer, r_command_buffer_pool, current_label_index, current_label_level);
+				const uint32_t serial_start = _plan_parallel_slices(commands_sorted.ptr(), command_count, r_command_buffer_pool);
+				if (parallel_stats) {
+					stats_prepare_end_usec = OS::get_singleton()->get_ticks_usec();
+				}
+
+				if (serial_start > 0) {
+					stats_split = true;
+					parallel_slices[0].command_buffer = r_command_buffer;
+					parallel_commands_sorted = commands_sorted.ptr();
+					parallel_commands_count = command_count;
+					parallel_full_barriers = p_full_barriers;
+					parallel_claimable_slices.clear();
+					for (uint32_t i = 0; i < parallel_slices.size(); i++) {
+						if (!parallel_slices[i].pinned_to_calling_thread) {
+							parallel_claimable_slices.push_back(i);
+						}
+					}
+
+					// Up to N - 1 workers; this thread is the N-th once its driver callbacks are recorded.
+					parallel_next_claim.set(0);
+					const uint32_t worker_count = MIN(parallel_claimable_slices.size(), parallel_slice_count - 1);
+					WorkerThreadPool::GroupID group_id = 0;
+					const bool use_workers = worker_count > 0;
+					if (parallel_stats) {
+						parallel_launch_usec = OS::get_singleton()->get_ticks_usec();
+					}
+					if (use_workers) {
+						group_id = WorkerThreadPool::get_singleton()->add_template_group_task(this, &RenderingDeviceGraph::_run_parallel_slice_task, (void *)nullptr, worker_count, worker_count, true, "RenderingDeviceGraph parallel recording");
+					}
+
+					const uint64_t calling_begin_usec = parallel_stats ? OS::get_singleton()->get_ticks_usec() : 0;
+					for (ParallelSlice &slice : parallel_slices) {
+						if (slice.pinned_to_calling_thread) {
+							slice.recorded_on_calling_thread = true;
+							_run_parallel_slice(slice);
+						}
+					}
+
+					_run_claimed_parallel_slices(true);
+
+					const uint64_t wait_begin_usec = parallel_stats ? OS::get_singleton()->get_ticks_usec() : 0;
+					if (use_workers) {
+						WorkerThreadPool::get_singleton()->wait_for_group_task_completion(group_id);
+					}
+
+					if (parallel_stats) {
+						const uint64_t wait_end_usec = OS::get_singleton()->get_ticks_usec();
+						stats_calling_usec = wait_begin_usec - calling_begin_usec;
+						stats_wait_usec = wait_end_usec - wait_begin_usec;
+					}
+
+					parallel_commands_sorted = nullptr;
+
+					// The serial commands continue the last slice's command buffer, the last one submitted.
+					r_command_buffer = parallel_slices[parallel_slices.size() - 1].command_buffer;
+				}
+
+				// Serial recording: all the commands when the frame is too small to split, otherwise the ones from the
+				// swap chain blit on. A level that began in a slice already has its barriers.
+				const uint64_t serial_begin_usec = parallel_stats ? OS::get_singleton()->get_ticks_usec() : 0;
+				for (uint32_t i = serial_start; i < command_count;) {
+					const uint32_t level = commands_sorted[i].level;
+					uint32_t level_end = i + 1;
+					while (level_end < command_count && commands_sorted[level_end].level == level) {
+						level_end++;
+					}
+
+					if (i == 0 || commands_sorted[i - 1].level != level) {
+						_group_barriers_for_render_commands(barrier_group, r_command_buffer, &commands_sorted[i], level_end - i, p_full_barriers);
+					}
+
+					_run_render_commands(level, &commands_sorted[i], level_end - i, r_command_buffer, r_command_buffer_pool, current_label_index, current_label_level);
+					i = level_end;
+				}
+
+				if (parallel_stats) {
+					stats_serial_usec = OS::get_singleton()->get_ticks_usec() - serial_begin_usec;
+				}
+			} else {
+				const uint64_t serial_begin_usec = parallel_stats ? OS::get_singleton()->get_ticks_usec() : 0;
+				stats_prepare_end_usec = serial_begin_usec;
+				uint32_t boosted_priority = 0;
+				uint32_t current_level = commands_sorted[0].level;
+				uint32_t current_level_start = 0;
+				for (uint32_t i = 0; i < command_count; i++) {
+					if (current_level != commands_sorted[i].level) {
+						RecordedCommandSort *level_command_ptr = &commands_sorted[current_level_start];
+						uint32_t level_command_count = i - current_level_start;
+						_boost_priority_for_render_commands(level_command_ptr, level_command_count, boosted_priority);
+						_group_barriers_for_render_commands(barrier_group, r_command_buffer, level_command_ptr, level_command_count, p_full_barriers);
+						_run_render_commands(current_level, level_command_ptr, level_command_count, r_command_buffer, r_command_buffer_pool, current_label_index, current_label_level);
+						current_level = commands_sorted[i].level;
+						current_level_start = i;
+					}
+				}
+
+				RecordedCommandSort *level_command_ptr = &commands_sorted[current_level_start];
+				uint32_t level_command_count = command_count - current_level_start;
+				_boost_priority_for_render_commands(level_command_ptr, level_command_count, boosted_priority);
+				_group_barriers_for_render_commands(barrier_group, r_command_buffer, level_command_ptr, level_command_count, p_full_barriers);
+				_run_render_commands(current_level, level_command_ptr, level_command_count, r_command_buffer, r_command_buffer_pool, current_label_index, current_label_level);
 
 #if PRINT_RENDER_GRAPH
-			print_line("COMMANDS", command_count, "LEVELS", current_level + 1);
+				print_line("COMMANDS", command_count, "LEVELS", current_level + 1);
 #endif
+
+				if (parallel_stats) {
+					stats_serial_usec = OS::get_singleton()->get_ticks_usec() - serial_begin_usec;
+				}
+			}
 		} else {
 			for (uint32_t i = 0; i < command_count; i++) {
-				_group_barriers_for_render_commands(r_command_buffer, &commands_sorted[i], 1, p_full_barriers);
+				_group_barriers_for_render_commands(barrier_group, r_command_buffer, &commands_sorted[i], 1, p_full_barriers);
 				_run_render_commands(i, &commands_sorted[i], 1, r_command_buffer, r_command_buffer_pool, current_label_index, current_label_level);
 			}
 		}
@@ -2825,6 +3151,52 @@ void RenderingDeviceGraph::end(bool p_reorder_commands, bool p_full_barriers, RD
 #if PRINT_COMMAND_RECORDING
 		print_line(vformat("Recorded %d commands", command_count));
 #endif
+	}
+
+	if (parallel_stats) {
+		ParallelStats &st = parallel_stats_data;
+		const uint64_t end_usec = OS::get_singleton()->get_ticks_usec();
+		st.frames++;
+		st.end_usec += end_usec - stats_begin_usec;
+		if (stats_prepare_end_usec != 0) {
+			st.prepare_usec += stats_prepare_end_usec - stats_begin_usec;
+		}
+		st.calling_usec += stats_calling_usec;
+		st.wait_usec += stats_wait_usec;
+		st.serial_usec += stats_serial_usec;
+		if (stats_split) {
+			st.split_frames++;
+			st.slices += parallel_slices.size();
+			for (uint32_t i = 0; i < parallel_slices.size() && i < ParallelStats::MAX_SLICES; i++) {
+				const ParallelSlice &slice = parallel_slices[i];
+				st.calling_slices += slice.recorded_on_calling_thread ? 1 : 0;
+				st.slice_usec[i] += slice.end_usec - slice.begin_usec;
+				st.slice_delay_usec[i] += slice.begin_usec > parallel_launch_usec ? slice.begin_usec - parallel_launch_usec : 0;
+				st.slice_size[i] += slice.cost;
+				st.slice_count[i]++;
+				st.slice_on_calling_thread[i] += slice.recorded_on_calling_thread ? 1 : 0;
+			}
+		}
+
+		if (st.frames == 240) {
+			const uint64_t n = st.frames;
+			print_line(vformat("RenderingDeviceGraph: end() %d us/frame = prepare %d + own slices %d + wait %d + serial %d (+ rest %d); %d KiB of commands/frame; split %d of %d frames, %.2f slices/frame (up to %d), %.2f on the render thread.",
+					st.end_usec / n, st.prepare_usec / n, st.calling_usec / n, st.wait_usec / n, st.serial_usec / n,
+					(st.end_usec - st.prepare_usec - st.calling_usec - st.wait_usec - st.serial_usec) / n,
+					st.size / n / 1024, st.split_frames, st.frames, st.split_frames ? double(st.slices) / st.split_frames : 0.0, parallel_slice_count,
+					st.split_frames ? double(st.calling_slices) / st.split_frames : 0.0));
+			String slices_line;
+			for (uint32_t i = 0; i < ParallelStats::MAX_SLICES; i++) {
+				if (st.slice_count[i] == 0) {
+					continue;
+				}
+				slices_line += vformat(" [%d: %d us, start +%d us, %d KiB, render thread %d%%]", i, st.slice_usec[i] / st.slice_count[i], st.slice_delay_usec[i] / st.slice_count[i], st.slice_size[i] / st.slice_count[i] / 1024, st.slice_on_calling_thread[i] * 100 / st.slice_count[i]);
+			}
+			if (!slices_line.is_empty()) {
+				print_line("RenderingDeviceGraph: slices" + slices_line);
+			}
+			st = ParallelStats();
+		}
 	}
 
 	// Advance the frame counter. It's not necessary to do this if no commands are recorded because that means no secondary command buffers were used.

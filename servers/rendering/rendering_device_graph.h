@@ -252,6 +252,12 @@ public:
 		LocalVector<RDD::CommandBufferID> buffers;
 		LocalVector<RDD::SemaphoreID> semaphores;
 		uint32_t buffers_used = 0;
+
+		// Recorded concurrently by RenderingDeviceGraph and submitted right after the frame's main command buffer, in
+		// the same submission and in this order. Each one has its own pool, since a pool is not thread-safe.
+		LocalVector<RDD::CommandPoolID> parallel_pools;
+		LocalVector<RDD::CommandBufferID> parallel_buffers;
+		uint32_t parallel_buffers_used = 0;
 	};
 
 	struct WorkaroundsState {
@@ -820,6 +826,21 @@ private:
 		uint32_t secondary_command_buffers_used = 0;
 	};
 
+	// A contiguous range of the sorted commands, recorded into its own command buffer.
+	struct ParallelSlice {
+		uint32_t start = 0;
+		uint32_t end = 0;
+		RDD::CommandBufferID command_buffer;
+		bool begin_command_buffer = false;
+		bool end_command_buffer = false;
+		bool pinned_to_calling_thread = false; // Holds a driver callback.
+		bool recorded_on_calling_thread = false;
+		uint64_t cost = 0;
+		uint64_t begin_usec = 0;
+		uint64_t end_usec = 0;
+		BarrierGroup barrier_group;
+	};
+
 	RDD *driver = nullptr;
 	RDD::DriverWorkarounds driver_workarounds;
 	RenderPassCreationFunction render_pass_creation_function = nullptr;
@@ -852,6 +873,38 @@ private:
 	WorkaroundsState workarounds_state;
 	TightLocalVector<Frame> frames;
 	uint32_t frame = 0;
+	// Parallel recording of the sorted commands (GODOT_PARALLEL_RECORDING, see initialize()).
+	RDD::CommandQueueFamilyID command_queue_family;
+	uint32_t parallel_slice_count = 0;
+	uint32_t parallel_min_size = 0;
+	LocalVector<ParallelSlice> parallel_slices;
+	LocalVector<uint32_t> parallel_claimable_slices;
+	SafeNumeric<uint32_t> parallel_next_claim;
+	// GODOT_PARALLEL_RECORDING_STATS: totals over the last frames, printed every 240 frames.
+	struct ParallelStats {
+		static constexpr uint32_t MAX_SLICES = 16;
+		uint32_t frames = 0;
+		uint32_t split_frames = 0;
+		uint64_t end_usec = 0; // All of end().
+		uint64_t prepare_usec = 0; // Sorting, priorities, planning: until recording starts.
+		uint64_t calling_usec = 0; // Slices recorded by the calling thread.
+		uint64_t wait_usec = 0; // Waiting for the worker slices.
+		uint64_t serial_usec = 0; // Serial recording (the whole frame when not split, the tail otherwise).
+		uint64_t size = 0;
+		uint64_t slices = 0;
+		uint64_t calling_slices = 0;
+		uint64_t slice_usec[MAX_SLICES] = {};
+		uint64_t slice_delay_usec[MAX_SLICES] = {};
+		uint64_t slice_size[MAX_SLICES] = {};
+		uint32_t slice_count[MAX_SLICES] = {};
+		uint32_t slice_on_calling_thread[MAX_SLICES] = {};
+	};
+	bool parallel_stats = false;
+	ParallelStats parallel_stats_data;
+	uint64_t parallel_launch_usec = 0;
+	const RecordedCommandSort *parallel_commands_sorted = nullptr;
+	uint32_t parallel_commands_count = 0;
+	bool parallel_full_barriers = false;
 
 #ifdef DEV_ENABLED
 	RBMap<ResourceTracker *, uint32_t> write_dependency_counters;
@@ -888,7 +941,11 @@ private:
 	void _run_render_commands(int32_t p_level, const RecordedCommandSort *p_sorted_commands, uint32_t p_sorted_commands_count, RDD::CommandBufferID &r_command_buffer, CommandBufferPool &r_command_buffer_pool, int32_t &r_current_label_index, int32_t &r_current_label_level);
 	void _run_label_command_change(RDD::CommandBufferID p_command_buffer, int32_t p_new_label_index, int32_t p_new_level, bool p_ignore_previous_value, bool p_use_label_for_empty, const RecordedCommandSort *p_sorted_commands, uint32_t p_sorted_commands_count, int32_t &r_current_label_index, int32_t &r_current_label_level);
 	void _boost_priority_for_render_commands(RecordedCommandSort *p_sorted_commands, uint32_t p_sorted_commands_count, uint32_t &r_boosted_priority);
-	void _group_barriers_for_render_commands(RDD::CommandBufferID p_command_buffer, const RecordedCommandSort *p_sorted_commands, uint32_t p_sorted_commands_count, bool p_full_memory_barrier);
+	void _group_barriers_for_render_commands(BarrierGroup &r_barrier_group, RDD::CommandBufferID p_command_buffer, const RecordedCommandSort *p_sorted_commands, uint32_t p_sorted_commands_count, bool p_full_memory_barrier);
+	uint32_t _plan_parallel_slices(const RecordedCommandSort *p_sorted_commands, uint32_t p_sorted_commands_count, CommandBufferPool &r_command_buffer_pool);
+	void _run_parallel_slice(ParallelSlice &p_slice);
+	void _run_parallel_slice_task(uint32_t p_index, void *p_userdata);
+	void _run_claimed_parallel_slices(bool p_calling_thread);
 	void _print_render_commands(const RecordedCommandSort *p_sorted_commands, uint32_t p_sorted_commands_count);
 	void _print_draw_list(const uint8_t *p_instruction_data, uint32_t p_instruction_data_size);
 	void _print_compute_list(const uint8_t *p_instruction_data, uint32_t p_instruction_data_size);

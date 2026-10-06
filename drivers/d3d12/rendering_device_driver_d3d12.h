@@ -30,6 +30,7 @@
 
 #pragma once
 
+#include "core/os/mutex.h"
 #include "core/templates/a_hash_map.h"
 #include "core/templates/hash_map.h"
 #include "core/templates/paged_allocator.h"
@@ -710,6 +711,8 @@ public:
 
 private:
 	void _command_check_descriptor_sets(CommandBufferID p_cmd_buffer);
+	// Locked: command buffers may be recorded on several threads at once.
+	Mutex per_frame_descriptor_mutex;
 	DescriptorHeap::Allocation _command_allocate_per_frame_descriptor();
 
 public:

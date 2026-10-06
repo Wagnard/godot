@@ -8289,14 +8289,21 @@ void RenderingDevice::execute_chained_cmds(bool p_present_swap_chain, RenderingD
 	thread_local LocalVector<RDD::SemaphoreID> wait_semaphores;
 	wait_semaphores = frames[frame].semaphores_to_wait_on;
 
+	thread_local LocalVector<RDD::CommandBufferID> command_buffers;
+
 	for (uint32_t i = 0; i < command_buffer_count; i++) {
-		RDD::CommandBufferID command_buffer;
 		RDD::SemaphoreID signal_semaphore;
 		RDD::FenceID signal_fence;
+		command_buffers.clear();
 		if (i > 0) {
-			command_buffer = buffer_pool.buffers[i - 1];
+			command_buffers.push_back(buffer_pool.buffers[i - 1]);
 		} else {
-			command_buffer = frames[frame].command_buffer;
+			// The command buffers recorded in parallel with the main one follow it, in the same submission.
+			command_buffers.push_back(frames[frame].command_buffer);
+			for (uint32_t j = 0; j < buffer_pool.parallel_buffers_used; j++) {
+				command_buffers.push_back(buffer_pool.parallel_buffers[j]);
+			}
+			buffer_pool.parallel_buffers_used = 0;
 		}
 
 		if (i == (command_buffer_count - 1)) {
@@ -8313,7 +8320,7 @@ void RenderingDevice::execute_chained_cmds(bool p_present_swap_chain, RenderingD
 			// Semaphores always need to be signaled if it's not the last command buffer.
 		}
 
-		driver->command_queue_execute_and_present(main_queue, wait_semaphores, command_buffer,
+		driver->command_queue_execute_and_present(main_queue, wait_semaphores, command_buffers,
 				signal_semaphore ? signal_semaphore : VectorView<RDD::SemaphoreID>(), signal_fence,
 				swap_chains);
 
@@ -9092,6 +9099,10 @@ void RenderingDevice::finalize() {
 		RDG::CommandBufferPool &buffer_pool = frames[i].command_buffer_pool;
 		for (uint32_t j = 0; j < buffer_pool.buffers.size(); j++) {
 			driver->semaphore_free(buffer_pool.semaphores[j]);
+		}
+
+		for (uint32_t j = 0; j < buffer_pool.parallel_pools.size(); j++) {
+			driver->command_pool_free(buffer_pool.parallel_pools[j]);
 		}
 
 		for (uint32_t j = 0; j < frames[i].transfer_worker_semaphores.size(); j++) {
