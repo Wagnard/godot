@@ -882,6 +882,7 @@ public:
 
 	PagedArray<Instance *> instance_cull_result;
 	PagedArray<Instance *> instance_shadow_cull_result;
+	PagedArray<Instance *> instance_shadow_light_cull_result;
 
 	struct InstanceCullResult {
 		PagedArray<RenderGeometryInstance *> geometry_instances;

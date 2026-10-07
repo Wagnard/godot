@@ -2488,6 +2488,24 @@ bool RendererSceneCull::_light_instance_update_shadow(Instance *p_instance, cons
 				Projection cm;
 				cm.set_perspective(90, 1, z_near, radius);
 
+				// The six faces together cover the cube of side 2 * radius around the light. Query the BVH once for that cube,
+				// then test each face against the much shorter list it returns, instead of querying the whole scene six times.
+				instance_shadow_light_cull_result.clear();
+				{
+					struct CullAABB {
+						PagedArray<Instance *> *result;
+						_FORCE_INLINE_ bool operator()(void *p_data) {
+							result->push_back((Instance *)p_data);
+							return false;
+						}
+					};
+
+					CullAABB cull_aabb;
+					cull_aabb.result = &instance_shadow_light_cull_result;
+					const Vector3 extents(radius, radius, radius);
+					p_scenario->indexers[Scenario::INDEXER_GEOMETRY].aabb_query(AABB(light_transform.origin - extents, extents * 2), cull_aabb);
+				}
+
 				for (int i = 0; i < 6; i++) {
 					RENDER_TIMESTAMP("Cull OmniLight3D Shadow Cube, Side " + itos(i));
 					//using this one ensures that raster deferred will have it
@@ -2517,19 +2535,12 @@ bool RendererSceneCull::_light_instance_update_shadow(Instance *p_instance, cons
 
 					Vector<Vector3> points = Geometry3D::compute_convex_mesh_points(&planes[0], planes.size());
 
-					struct CullConvex {
-						PagedArray<Instance *> *result;
-						_FORCE_INLINE_ bool operator()(void *p_data) {
-							Instance *p_instance = (Instance *)p_data;
-							result->push_back(p_instance);
-							return false;
+					for (uint32_t j = 0; j < instance_shadow_light_cull_result.size(); j++) {
+						Instance *instance = instance_shadow_light_cull_result[j];
+						if (instance->transformed_aabb.intersects_convex_shape(planes.ptr(), planes.size(), points.ptr(), points.size())) {
+							instance_shadow_cull_result.push_back(instance);
 						}
-					};
-
-					CullConvex cull_convex;
-					cull_convex.result = &instance_shadow_cull_result;
-
-					p_scenario->indexers[Scenario::INDEXER_GEOMETRY].convex_query(planes.ptr(), planes.size(), points.ptr(), points.size(), cull_convex);
+					}
 
 					RendererSceneRender::RenderShadowData &shadow_data = render_shadow_data[max_shadows_used++];
 
@@ -4598,6 +4609,7 @@ RendererSceneCull::RendererSceneCull() {
 
 	instance_cull_result.set_page_pool(&instance_cull_page_pool);
 	instance_shadow_cull_result.set_page_pool(&instance_cull_page_pool);
+	instance_shadow_light_cull_result.set_page_pool(&instance_cull_page_pool);
 
 	for (uint32_t i = 0; i < MAX_UPDATE_SHADOWS; i++) {
 		render_shadow_data[i].instances.set_page_pool(&geometry_instance_cull_page_pool);
@@ -4629,6 +4641,7 @@ RendererSceneCull::RendererSceneCull() {
 RendererSceneCull::~RendererSceneCull() {
 	instance_cull_result.reset();
 	instance_shadow_cull_result.reset();
+	instance_shadow_light_cull_result.reset();
 
 	for (uint32_t i = 0; i < MAX_UPDATE_SHADOWS; i++) {
 		render_shadow_data[i].instances.reset();
