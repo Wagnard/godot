@@ -3463,9 +3463,12 @@ void RenderingDeviceGraph::end(bool p_reorder_commands, bool p_full_barriers, RD
 						}
 					}
 
-					// Up to N - 1 workers; this thread is the N-th once its driver callbacks are recorded.
+					// Up to N - 1 workers; this thread is the N-th once its driver callbacks are recorded. When it has
+					// callbacks to record (a slice of their own, ~300 us with DLSS and DLSS-G), it would only take a whole
+					// slice after them and finish last: then N workers take the N slices.
 					parallel_next_claim.set(0);
-					const uint32_t worker_count = MIN(parallel_claimable_slices.size(), parallel_slice_count - 1);
+					const bool has_pinned_slices = parallel_claimable_slices.size() < parallel_slices.size();
+					const uint32_t worker_count = MIN(parallel_claimable_slices.size(), has_pinned_slices ? parallel_slice_count : parallel_slice_count - 1);
 					WorkerThreadPool::GroupID group_id = 0;
 					const bool use_workers = worker_count > 0;
 					if (parallel_stats) {
