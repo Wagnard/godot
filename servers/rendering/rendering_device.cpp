@@ -4887,9 +4887,9 @@ RID RenderingDevice::uniform_set_create(const VectorView<RD::Uniform> &p_uniform
 }
 
 bool RenderingDevice::uniform_set_is_valid(RID p_uniform_set) {
-	_THREAD_SAFE_METHOD_
-
-	return uniform_set_owner.owns(p_uniform_set);
+	// Draw lists ask this for every material, from several threads at once: the lookup without lock (the one bind
+	// functions use) does not make them wait on the owner's lock.
+	return uniform_set_owner.get_or_null(p_uniform_set) != nullptr;
 }
 
 void RenderingDevice::uniform_set_set_invalidation_callback(RID p_uniform_set, InvalidationCallback p_callback, void *p_userdata) {
