@@ -746,8 +746,8 @@ void RenderForwardClustered::_render_list_with_draw_list(RenderListParameters *p
 }
 
 uint32_t RenderForwardClustered::_render_list_get_split_count(const RenderListParameters *p_params) {
-	if (!render_list_split_groups.is_empty()) {
-		_render_list_split_release_groups(false);
+	if (!parallel_groups.is_empty()) {
+		_parallel_release_groups(false);
 	}
 
 	if (render_list_split_stats.enabled) {
@@ -759,7 +759,12 @@ uint32_t RenderForwardClustered::_render_list_get_split_count(const RenderListPa
 				const RenderListSplitStats &st = render_list_split_stats;
 				print_line(vformat("Parallel draw lists, per frame: %.1f lists split in %.1f parts (%.0f elements, %.0f us, of which waiting %.0f us, joining %.0f us; parts %.0f us in total, last part started after %.0f us), %.1f lists recorded serially (%.0f elements, %.0f us).",
 						st.split_lists / 240.0, st.splits / 240.0, st.split_elements / 240.0, st.split_usec / 240.0, st.split_wait_usec / 240.0, st.split_join_usec / 240.0, st.split_parts_usec / 240.0, st.split_start_usec / 240.0, st.serial_lists / 240.0, st.serial_elements / 240.0, st.serial_usec / 240.0));
-				render_list_split_stats = RenderListSplitStats();
+				print_line(vformat("List building, per frame: filling %.0f us, instance data %.0f us, %.1f of them on several threads.",
+						st.fill_usec / 240.0, st.instance_data_usec / 240.0, st.parallel_builds / 240.0));
+				print_line(vformat("Parallel runs, per frame: %.0f parts, %.0f of them on the calling thread, %.0f us of parts in total, %.0f us of wall time.",
+						st.run_parts.get() / 240.0, st.run_parts_on_caller.get() / 240.0, st.run_parts_usec.get() / 240.0, st.run_usec / 240.0));
+				render_list_split_stats.~RenderListSplitStats();
+				memnew_placement(&render_list_split_stats, RenderListSplitStats);
 				render_list_split_stats.enabled = true;
 				render_list_split_stats.frame = frame;
 			}
@@ -818,32 +823,13 @@ void RenderForwardClustered::_render_list_split(RenderListParameters *p_params, 
 		render_list_splits[i].draw_list = render_list_split_ids[i];
 	}
 
-	// Publish the list: closed first, so a worker still holding the previous generation can't read the new count.
-	render_list_split_generation++;
-	const uint64_t generation_bits = uint64_t(render_list_split_generation) << 32;
-	render_list_split_claim.store(generation_bits | 0xFFFFFFFF, std::memory_order_relaxed);
 	render_list_split_params = p_params;
-	render_list_split_count.set(split_count);
-	render_list_split_done.set(0);
-	render_list_split_claim.store(generation_bits, std::memory_order_release);
-
-	// Up to N - 1 workers; the render thread takes parts too while they wake up, and doesn't wait for workers that
-	// wake up after every part is taken: their group is released later.
-	_render_list_split_release_groups(false);
-	const uint32_t worker_count = MIN(split_count, render_list_max_splits) - 1;
-	if (worker_count > 0) {
-		render_list_split_groups.push_back(WorkerThreadPool::get_singleton()->add_template_group_task(this, &RenderForwardClustered::_render_list_split_task, render_list_split_generation, worker_count, worker_count, true, "ForwardClusteredRenderListSplit"));
-	}
-	_render_claimed_list_splits(render_list_split_generation);
-	const uint64_t wait_usec = render_list_split_stats.enabled ? OS::get_singleton()->get_ticks_usec() : 0;
-	while (render_list_split_done.get() < split_count) {
-		Thread::yield();
-	}
+	const uint64_t wait_usec = _parallel_run(split_count, render_list_max_splits, &RenderForwardClustered::_render_list_split_part);
 
 	const uint64_t join_usec = render_list_split_stats.enabled ? OS::get_singleton()->get_ticks_usec() : 0;
 	RD::get_singleton()->draw_list_split_end();
 	if (render_list_split_stats.enabled) {
-		render_list_split_stats.split_wait_usec += join_usec - wait_usec;
+		render_list_split_stats.split_wait_usec += wait_usec;
 		render_list_split_stats.split_join_usec += OS::get_singleton()->get_ticks_usec() - join_usec;
 	}
 
@@ -860,7 +846,6 @@ void RenderForwardClustered::_render_list_split(RenderListParameters *p_params, 
 		RenderingServerDefault::redraw_request();
 	}
 
-
 	if (render_list_split_stats.enabled) {
 		render_list_split_stats.split_lists++;
 		render_list_split_stats.splits += split_count;
@@ -875,35 +860,78 @@ void RenderForwardClustered::_render_list_split(RenderListParameters *p_params, 
 	}
 }
 
-void RenderForwardClustered::_render_list_split_task(uint32_t p_index, uint32_t p_generation) {
-	_render_claimed_list_splits(p_generation);
-}
-
-void RenderForwardClustered::_render_claimed_list_splits(uint32_t p_generation) {
-	uint64_t claim = render_list_split_claim.load(std::memory_order_acquire);
-	while (uint32_t(claim >> 32) == p_generation && uint32_t(claim) < render_list_split_count.get()) {
-		if (!render_list_split_claim.compare_exchange_weak(claim, claim + 1, std::memory_order_acq_rel, std::memory_order_acquire)) {
-			continue;
-		}
-
-		RenderListSplit &split = render_list_splits[uint32_t(claim)];
-		if (render_list_split_stats.enabled) {
-			split.begin_usec = OS::get_singleton()->get_ticks_usec();
-		}
-		_render_list(split.draw_list, render_list_split_params->framebuffer_format, render_list_split_params, split.from_element, split.to_element, &split);
-		if (render_list_split_stats.enabled) {
-			split.end_usec = OS::get_singleton()->get_ticks_usec();
-		}
-		render_list_split_done.increment();
-		claim = render_list_split_claim.load(std::memory_order_acquire);
+void RenderForwardClustered::_render_list_split_part(uint32_t p_part) {
+	RenderListSplit &split = render_list_splits[p_part];
+	if (render_list_split_stats.enabled) {
+		split.begin_usec = OS::get_singleton()->get_ticks_usec();
+	}
+	_render_list(split.draw_list, render_list_split_params->framebuffer_format, render_list_split_params, split.from_element, split.to_element, &split);
+	if (render_list_split_stats.enabled) {
+		split.end_usec = OS::get_singleton()->get_ticks_usec();
 	}
 }
 
-void RenderForwardClustered::_render_list_split_release_groups(bool p_wait) {
-	for (uint32_t i = 0; i < render_list_split_groups.size();) {
-		if (p_wait || WorkerThreadPool::get_singleton()->is_group_task_completed(render_list_split_groups[i])) {
-			WorkerThreadPool::get_singleton()->wait_for_group_task_completion(render_list_split_groups[i]);
-			render_list_split_groups.remove_at_unordered(i);
+uint64_t RenderForwardClustered::_parallel_run(uint32_t p_part_count, uint32_t p_thread_count, ParallelPart p_part) {
+	// Publish the run: closed first, so a worker still holding the previous generation can't read the new count.
+	parallel_generation++;
+	const uint64_t generation_bits = uint64_t(parallel_generation) << 32;
+	parallel_claim.store(generation_bits | 0xFFFFFFFF, std::memory_order_relaxed);
+	parallel_part = p_part;
+	parallel_part_count.set(p_part_count);
+	parallel_parts_done.set(0);
+	parallel_claim.store(generation_bits, std::memory_order_release);
+
+	// Up to N - 1 workers; the render thread takes parts too while they wake up, and doesn't wait for workers that
+	// wake up after every part is taken: their group is released later.
+	_parallel_release_groups(false);
+	const uint32_t worker_count = MIN(p_part_count, p_thread_count) - 1;
+	if (worker_count > 0) {
+		parallel_groups.push_back(WorkerThreadPool::get_singleton()->add_template_group_task(this, &RenderForwardClustered::_parallel_run_task, parallel_generation, worker_count, worker_count, true, "ForwardClusteredParallelRun"));
+	}
+	const uint64_t begin_usec = OS::get_singleton()->get_ticks_usec();
+	_parallel_run_claimed(parallel_generation, true);
+
+	const uint64_t wait_begin_usec = OS::get_singleton()->get_ticks_usec();
+	while (parallel_parts_done.get() < p_part_count) {
+		Thread::yield();
+	}
+	const uint64_t end_usec = OS::get_singleton()->get_ticks_usec();
+	if (render_list_split_stats.enabled) {
+		render_list_split_stats.run_usec += end_usec - begin_usec;
+	}
+	return end_usec - wait_begin_usec;
+}
+
+void RenderForwardClustered::_parallel_run_task(uint32_t p_index, uint32_t p_generation) {
+	_parallel_run_claimed(p_generation);
+}
+
+void RenderForwardClustered::_parallel_run_claimed(uint32_t p_generation, bool p_caller) {
+	uint64_t claim = parallel_claim.load(std::memory_order_acquire);
+	while (uint32_t(claim >> 32) == p_generation && uint32_t(claim) < parallel_part_count.get()) {
+		if (!parallel_claim.compare_exchange_weak(claim, claim + 1, std::memory_order_acq_rel, std::memory_order_acquire)) {
+			continue;
+		}
+
+		const uint64_t part_begin_usec = render_list_split_stats.enabled ? OS::get_singleton()->get_ticks_usec() : 0;
+		(this->*parallel_part)(uint32_t(claim));
+		if (render_list_split_stats.enabled) {
+			render_list_split_stats.run_parts.increment();
+			render_list_split_stats.run_parts_usec.add(OS::get_singleton()->get_ticks_usec() - part_begin_usec);
+			if (p_caller) {
+				render_list_split_stats.run_parts_on_caller.increment();
+			}
+		}
+		parallel_parts_done.increment();
+		claim = parallel_claim.load(std::memory_order_acquire);
+	}
+}
+
+void RenderForwardClustered::_parallel_release_groups(bool p_wait) {
+	for (uint32_t i = 0; i < parallel_groups.size();) {
+		if (p_wait || WorkerThreadPool::get_singleton()->is_group_task_completed(parallel_groups[i])) {
+			WorkerThreadPool::get_singleton()->wait_for_group_task_completion(parallel_groups[i]);
+			parallel_groups.remove_at_unordered(i);
 		} else {
 			i++;
 		}
@@ -1045,9 +1073,69 @@ void RenderForwardClustered::_fill_instance_data(RenderListType p_render_list, i
 		p_render_info[RSE::VIEWPORT_RENDER_INFO_OBJECTS_IN_FRAME] += element_total;
 	}
 
+	// Large lists are filled by several threads in ranges of elements; the runs of repeated elements are counted
+	// afterwards, in order.
+	const uint64_t begin_usec = render_list_split_stats.enabled ? OS::get_singleton()->get_ticks_usec() : 0;
+	fill_instance_data_repeats.resize(element_total);
+	uint32_t part_count = 1;
+	if (list_build_min_instances > 0 && list_build_max_threads > 1) {
+		part_count = CLAMP(element_total / (list_build_min_instances * 4), 1u, list_build_max_threads * 2);
+	}
+	if (part_count > 1) {
+		FillInstanceDataParameters &params = fill_instance_data_params;
+		params.render_list = p_render_list;
+		params.offset = p_offset;
+		params.count = element_total;
+		params.part_count = part_count;
+		_parallel_run(part_count, list_build_max_threads, &RenderForwardClustered::_fill_instance_data_part);
+	} else {
+		_fill_instance_data_range(p_render_list, p_offset, 0, element_total);
+	}
+
 	uint32_t repeats = 0;
-	GeometryInstanceSurfaceDataCache *prev_surface = nullptr;
 	for (uint32_t i = 0; i < element_total; i++) {
+		if (fill_instance_data_repeats[i] && repeats < RenderElementInfo::MAX_REPEATS) {
+			//this element is the same as the previous one, count repeats to draw it using instancing
+			repeats++;
+		} else {
+			if (repeats > 0) {
+				for (uint32_t j = 1; j <= repeats; j++) {
+					rl->element_info[p_offset + i - j].repeat = j;
+				}
+			}
+			repeats = 1;
+			if (p_render_info) {
+				p_render_info[RSE::VIEWPORT_RENDER_INFO_DRAW_CALLS_IN_FRAME]++;
+			}
+		}
+	}
+
+	if (repeats > 0) {
+		for (uint32_t j = 1; j <= repeats; j++) {
+			rl->element_info[p_offset + element_total - j].repeat = j;
+		}
+	}
+
+	if (render_list_split_stats.enabled) {
+		render_list_split_stats.instance_data_usec += OS::get_singleton()->get_ticks_usec() - begin_usec;
+		render_list_split_stats.parallel_builds += part_count > 1 ? 1 : 0;
+	}
+
+	if (p_update_buffer && element_total > 0u) {
+		RenderingDevice::get_singleton()->buffer_flush(scene_state.instance_buffer[p_render_list]._get(0u));
+	}
+}
+
+void RenderForwardClustered::_fill_instance_data_part(uint32_t p_part) {
+	const FillInstanceDataParameters &params = fill_instance_data_params;
+	const uint32_t from = uint32_t(uint64_t(params.count) * p_part / params.part_count);
+	const uint32_t to = uint32_t(uint64_t(params.count) * (p_part + 1) / params.part_count);
+	_fill_instance_data_range(params.render_list, params.offset, from, to);
+}
+
+void RenderForwardClustered::_fill_instance_data_range(RenderListType p_render_list, uint32_t p_offset, uint32_t p_from, uint32_t p_to) {
+	RenderList *rl = &render_list[p_render_list];
+	for (uint32_t i = p_from; i < p_to; i++) {
 		GeometryInstanceSurfaceDataCache *surface = rl->elements[i + p_offset];
 		GeometryInstanceForwardClustered *inst = surface->owner;
 
@@ -1096,42 +1184,19 @@ void RenderForwardClustered::_fill_instance_data(RenderListType p_render_list, i
 
 		scene_state.curr_gpu_ptr[p_render_list][i + p_offset] = instance_data;
 
+		// Same as the previous element: drawn with it, instanced. Multimeshes and mesh instances never are.
 		const bool cant_repeat = instance_data.flags & INSTANCE_DATA_FLAG_MULTIMESH || inst->mesh_instance.is_valid();
-
-		if (prev_surface != nullptr && !cant_repeat && prev_surface->sort.sort_key1 == surface->sort.sort_key1 && prev_surface->sort.sort_key2 == surface->sort.sort_key2 && inst->mirror == prev_surface->owner->mirror && repeats < RenderElementInfo::MAX_REPEATS) {
-			//this element is the same as the previous one, count repeats to draw it using instancing
-			repeats++;
-		} else {
-			if (repeats > 0) {
-				for (uint32_t j = 1; j <= repeats; j++) {
-					rl->element_info[p_offset + i - j].repeat = j;
-				}
-			}
-			repeats = 1;
-			if (p_render_info) {
-				p_render_info[RSE::VIEWPORT_RENDER_INFO_DRAW_CALLS_IN_FRAME]++;
-			}
+		bool repeat = false;
+		if (i > 0 && !cant_repeat) {
+			const GeometryInstanceSurfaceDataCache *prev_surface = rl->elements[i - 1 + p_offset];
+			const GeometryInstanceForwardClustered *prev_inst = prev_surface->owner;
+			const bool prev_cant_repeat = prev_inst->flags_cache & INSTANCE_DATA_FLAG_MULTIMESH || prev_inst->mesh_instance.is_valid();
+			repeat = !prev_cant_repeat && prev_surface->sort.sort_key1 == surface->sort.sort_key1 && prev_surface->sort.sort_key2 == surface->sort.sort_key2 && inst->mirror == prev_inst->mirror;
 		}
+		fill_instance_data_repeats[i] = repeat;
 
 		RenderElementInfo &element_info = rl->element_info[p_offset + i];
-
 		element_info.value = uint32_t(surface->sort.sort_key1 & 0xFFF);
-
-		if (cant_repeat) {
-			prev_surface = nullptr;
-		} else {
-			prev_surface = surface;
-		}
-	}
-
-	if (repeats > 0) {
-		for (uint32_t j = 1; j <= repeats; j++) {
-			rl->element_info[p_offset + element_total - j].repeat = j;
-		}
-	}
-
-	if (p_update_buffer && element_total > 0u) {
-		RenderingDevice::get_singleton()->buffer_flush(scene_state.instance_buffer[p_render_list]._get(0u));
 	}
 }
 
@@ -1141,8 +1206,6 @@ _FORCE_INLINE_ static uint32_t _indices_to_primitives(RSE::PrimitiveType p_primi
 	return (p_indices - subtractor[p_primitive]) / divisor[p_primitive];
 }
 void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, const RenderDataRD *p_render_data, PassMode p_pass_mode, bool p_using_sdfgi, bool p_using_opaque_gi, bool p_using_motion_pass, bool p_append, bool p_alpha_only) {
-	RendererRD::MeshStorage *mesh_storage = RendererRD::MeshStorage::get_singleton();
-
 	if (p_render_list == RENDER_LIST_OPAQUE) {
 		scene_state.used_sss = false;
 		scene_state.used_screen_texture = false;
@@ -1151,7 +1214,6 @@ void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, con
 		scene_state.used_lightmap = false;
 		scene_state.used_opaque_stencil = false;
 	}
-	uint32_t lightmap_captures_used = 0;
 
 	Plane near_plane = Plane(-p_render_data->scene_data->cam_transform.basis.get_column(Vector3::AXIS_Z), p_render_data->scene_data->cam_transform.origin);
 	near_plane.d += p_render_data->scene_data->cam_projection.get_z_near();
@@ -1171,7 +1233,131 @@ void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, con
 
 	//fill list
 
-	for (int i = 0; i < (int)p_render_data->instances->size(); i++) {
+	const uint64_t begin_usec = render_list_split_stats.enabled ? OS::get_singleton()->get_ticks_usec() : 0;
+	const uint32_t instance_count = p_render_data->instances->size();
+
+	FillRenderListParameters &params = fill_render_list_params;
+	params.render_list = p_render_list;
+	params.render_data = p_render_data;
+	params.pass_mode = p_pass_mode;
+	params.using_sdfgi = p_using_sdfgi;
+	params.using_opaque_gi = p_using_opaque_gi;
+	params.using_motion_pass = p_using_motion_pass;
+	params.alpha_only = p_alpha_only;
+	params.near_plane = near_plane;
+	params.z_max = z_max;
+	params.max_lightmap_captures = scene_state.max_lightmap_captures;
+
+	// Large lists are filled by several threads, in contiguous ranges of instances merged in order: the same lists
+	// in the same order as filled serially.
+	uint32_t chunk_count = 1;
+	if (list_build_min_instances > 0 && list_build_max_threads > 1) {
+		chunk_count = CLAMP(instance_count / list_build_min_instances, 1u, list_build_max_threads * 2);
+	}
+
+	for (int attempt = 0; attempt < 2; attempt++) {
+		if (fill_render_list_chunks.size() < chunk_count) {
+			fill_render_list_chunks.resize(chunk_count);
+		}
+		for (uint32_t i = 0; i < chunk_count; i++) {
+			FillRenderListChunk &chunk = fill_render_list_chunks[i];
+			chunk.from_instance = uint32_t(uint64_t(instance_count) * i / chunk_count);
+			chunk.to_instance = uint32_t(uint64_t(instance_count) * (i + 1) / chunk_count);
+			chunk.elements.clear();
+			chunk.alpha_elements.clear();
+			chunk.motion_elements.clear();
+			chunk.lightmap_captures.clear();
+			chunk.used = 0;
+			chunk.visible_primitives = 0;
+			chunk.shadow_primitives = 0;
+		}
+
+		if (chunk_count > 1) {
+			_parallel_run(chunk_count, list_build_max_threads, &RenderForwardClustered::_fill_render_list_part);
+		} else {
+			_fill_render_list_chunk(fill_render_list_chunks[0]);
+		}
+
+		// Lightmap captures beyond the limit are dropped in instance order, which only one chunk knows: redo serially.
+		uint32_t captures = 0;
+		for (uint32_t i = 0; i < chunk_count; i++) {
+			captures += fill_render_list_chunks[i].lightmap_captures.size();
+		}
+		if (chunk_count == 1 || captures <= scene_state.max_lightmap_captures) {
+			break;
+		}
+		chunk_count = 1;
+	}
+
+	uint32_t lightmap_captures_used = 0;
+	uint32_t used = 0;
+	for (uint32_t i = 0; i < chunk_count; i++) {
+		const FillRenderListChunk &chunk = fill_render_list_chunks[i];
+		for (GeometryInstanceSurfaceDataCache *surf : chunk.elements) {
+			rl->add_element(surf);
+		}
+		for (GeometryInstanceSurfaceDataCache *surf : chunk.alpha_elements) {
+			render_list[RENDER_LIST_ALPHA].add_element(surf);
+		}
+		for (GeometryInstanceSurfaceDataCache *surf : chunk.motion_elements) {
+			render_list[RENDER_LIST_MOTION].add_element(surf);
+		}
+
+		for (GeometryInstanceForwardClustered *inst : chunk.lightmap_captures) {
+			const Color *src_capture = inst->lightmap_sh->sh;
+			LightmapCaptureData &lcd = scene_state.lightmap_captures[lightmap_captures_used];
+			for (int j = 0; j < 9; j++) {
+				lcd.sh[j * 4 + 0] = src_capture[j].r;
+				lcd.sh[j * 4 + 1] = src_capture[j].g;
+				lcd.sh[j * 4 + 2] = src_capture[j].b;
+				lcd.sh[j * 4 + 3] = src_capture[j].a;
+			}
+			inst->gi_offset_cache = lightmap_captures_used;
+			lightmap_captures_used++;
+		}
+
+		used |= chunk.used;
+		if (p_render_data->render_info) {
+			p_render_data->render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_VISIBLE][RSE::VIEWPORT_RENDER_INFO_PRIMITIVES_IN_FRAME] += int(chunk.visible_primitives);
+			p_render_data->render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_SHADOW][RSE::VIEWPORT_RENDER_INFO_PRIMITIVES_IN_FRAME] += int(chunk.shadow_primitives);
+		}
+	}
+
+	scene_state.used_sss = scene_state.used_sss || (used & FillRenderListChunk::USED_SSS);
+	scene_state.used_screen_texture = scene_state.used_screen_texture || (used & FillRenderListChunk::USED_SCREEN_TEXTURE);
+	scene_state.used_normal_texture = scene_state.used_normal_texture || (used & FillRenderListChunk::USED_NORMAL_TEXTURE);
+	scene_state.used_depth_texture = scene_state.used_depth_texture || (used & FillRenderListChunk::USED_DEPTH_TEXTURE);
+	scene_state.used_lightmap = scene_state.used_lightmap || (used & FillRenderListChunk::USED_LIGHTMAP);
+	scene_state.used_opaque_stencil = scene_state.used_opaque_stencil || (used & FillRenderListChunk::USED_OPAQUE_STENCIL);
+
+	if (render_list_split_stats.enabled) {
+		render_list_split_stats.fill_usec += OS::get_singleton()->get_ticks_usec() - begin_usec;
+		render_list_split_stats.parallel_builds += chunk_count > 1 ? 1 : 0;
+	}
+
+	if (p_render_list == RENDER_LIST_OPAQUE && lightmap_captures_used) {
+		RD::get_singleton()->buffer_update(scene_state.lightmap_capture_buffer, 0, sizeof(LightmapCaptureData) * lightmap_captures_used, scene_state.lightmap_captures);
+	}
+}
+
+void RenderForwardClustered::_fill_render_list_part(uint32_t p_part) {
+	_fill_render_list_chunk(fill_render_list_chunks[p_part]);
+}
+
+void RenderForwardClustered::_fill_render_list_chunk(FillRenderListChunk &p_chunk) {
+	RendererRD::MeshStorage *mesh_storage = RendererRD::MeshStorage::get_singleton();
+	const FillRenderListParameters &params = fill_render_list_params;
+	const RenderListType p_render_list = params.render_list;
+	const RenderDataRD *p_render_data = params.render_data;
+	const PassMode p_pass_mode = params.pass_mode;
+	const bool p_using_sdfgi = params.using_sdfgi;
+	const bool p_using_opaque_gi = params.using_opaque_gi;
+	const bool p_using_motion_pass = params.using_motion_pass;
+	const bool p_alpha_only = params.alpha_only;
+	const Plane &near_plane = params.near_plane;
+	const float z_max = params.z_max;
+
+	for (uint32_t i = p_chunk.from_instance; i < p_chunk.to_instance; i++) {
 		GeometryInstanceForwardClustered *inst = static_cast<GeometryInstanceForwardClustered *>((*p_render_data->instances)[i]);
 
 		Vector3 center = inst->transform.origin;
@@ -1271,18 +1457,9 @@ void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, con
 				}
 
 			} else if (inst->lightmap_sh) {
-				if (lightmap_captures_used < scene_state.max_lightmap_captures) {
-					const Color *src_capture = inst->lightmap_sh->sh;
-					LightmapCaptureData &lcd = scene_state.lightmap_captures[lightmap_captures_used];
-					for (int j = 0; j < 9; j++) {
-						lcd.sh[j * 4 + 0] = src_capture[j].r;
-						lcd.sh[j * 4 + 1] = src_capture[j].g;
-						lcd.sh[j * 4 + 2] = src_capture[j].b;
-						lcd.sh[j * 4 + 3] = src_capture[j].a;
-					}
+				if (p_chunk.lightmap_captures.size() < params.max_lightmap_captures) {
 					flags |= INSTANCE_DATA_FLAG_USE_LIGHTMAP_CAPTURE;
-					inst->gi_offset_cache = lightmap_captures_used;
-					lightmap_captures_used++;
+					p_chunk.lightmap_captures.push_back(inst);
 					uses_lightmap = true;
 				}
 
@@ -1351,9 +1528,9 @@ void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, con
 				if (p_render_data->render_info && !p_alpha_only) {
 					indices = _indices_to_primitives(surf->primitive, indices);
 					if (p_render_list == RENDER_LIST_OPAQUE) { //opaque
-						p_render_data->render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_VISIBLE][RSE::VIEWPORT_RENDER_INFO_PRIMITIVES_IN_FRAME] += indices;
+						p_chunk.visible_primitives += indices;
 					} else if (p_render_list == RENDER_LIST_SECONDARY) { //shadow
-						p_render_data->render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_SHADOW][RSE::VIEWPORT_RENDER_INFO_PRIMITIVES_IN_FRAME] += indices;
+						p_chunk.shadow_primitives += indices;
 					}
 				}
 			} else {
@@ -1364,9 +1541,9 @@ void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, con
 					to_draw = _indices_to_primitives(surf->primitive, to_draw);
 					to_draw *= inst->instance_count;
 					if (p_render_list == RENDER_LIST_OPAQUE) { //opaque
-						p_render_data->render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_VISIBLE][RSE::VIEWPORT_RENDER_INFO_PRIMITIVES_IN_FRAME] += to_draw;
+						p_chunk.visible_primitives += to_draw;
 					} else if (p_render_list == RENDER_LIST_SECONDARY) { //shadow
-						p_render_data->render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_SHADOW][RSE::VIEWPORT_RENDER_INFO_PRIMITIVES_IN_FRAME] += to_draw;
+						p_chunk.shadow_primitives += to_draw;
 					}
 				}
 			}
@@ -1388,53 +1565,53 @@ void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, con
 				const uint32_t pass_flags = p_alpha_only ? surf->rt_pass_flags : surf->flags;
 
 				if (!p_alpha_only && !force_alpha && (pass_flags & (GeometryInstanceSurfaceDataCache::FLAG_PASS_DEPTH | GeometryInstanceSurfaceDataCache::FLAG_PASS_OPAQUE))) {
-					rl->add_element(surf);
+					p_chunk.elements.push_back(surf);
 				}
 
 				if (force_alpha || (pass_flags & GeometryInstanceSurfaceDataCache::FLAG_PASS_ALPHA)) {
 					surf->color_pass_inclusion_mask = COLOR_PASS_FLAG_TRANSPARENT;
-					render_list[RENDER_LIST_ALPHA].add_element(surf);
+					p_chunk.alpha_elements.push_back(surf);
 					if (uses_gi) {
 						surf->sort.uses_forward_gi = 1;
 					}
 				} else if (p_using_motion_pass && (uses_motion || (surf->flags & GeometryInstanceSurfaceDataCache::FLAG_USES_MOTION_VECTOR))) {
 					surf->color_pass_inclusion_mask = COLOR_PASS_FLAG_MOTION_VECTORS;
-					render_list[RENDER_LIST_MOTION].add_element(surf);
+					p_chunk.motion_elements.push_back(surf);
 				} else {
 					surf->color_pass_inclusion_mask = 0;
 				}
 
 				if (uses_lightmap) {
 					surf->sort.uses_lightmap = 1;
-					scene_state.used_lightmap = true;
+					p_chunk.used |= FillRenderListChunk::USED_LIGHTMAP;
 				}
 
 				if (surf->flags & GeometryInstanceSurfaceDataCache::FLAG_USES_SUBSURFACE_SCATTERING) {
-					scene_state.used_sss = true;
+					p_chunk.used |= FillRenderListChunk::USED_SSS;
 				}
 				if (surf->flags & GeometryInstanceSurfaceDataCache::FLAG_USES_SCREEN_TEXTURE) {
-					scene_state.used_screen_texture = true;
+					p_chunk.used |= FillRenderListChunk::USED_SCREEN_TEXTURE;
 				}
 				if (surf->flags & GeometryInstanceSurfaceDataCache::FLAG_USES_NORMAL_TEXTURE) {
-					scene_state.used_normal_texture = true;
+					p_chunk.used |= FillRenderListChunk::USED_NORMAL_TEXTURE;
 				}
 				if (surf->flags & GeometryInstanceSurfaceDataCache::FLAG_USES_DEPTH_TEXTURE) {
-					scene_state.used_depth_texture = true;
+					p_chunk.used |= FillRenderListChunk::USED_DEPTH_TEXTURE;
 				}
 				if ((surf->flags & GeometryInstanceSurfaceDataCache::FLAG_USES_STENCIL) && !force_alpha && (surf->flags & (GeometryInstanceSurfaceDataCache::FLAG_PASS_DEPTH | GeometryInstanceSurfaceDataCache::FLAG_PASS_OPAQUE))) {
-					scene_state.used_opaque_stencil = true;
+					p_chunk.used |= FillRenderListChunk::USED_OPAQUE_STENCIL;
 				}
 			} else if (p_pass_mode == PASS_MODE_SHADOW || p_pass_mode == PASS_MODE_SHADOW_DP) {
 				if (surf->flags & GeometryInstanceSurfaceDataCache::FLAG_PASS_SHADOW) {
-					rl->add_element(surf);
+					p_chunk.elements.push_back(surf);
 				}
 			} else if (p_pass_mode == PASS_MODE_DEPTH_MATERIAL) {
 				if (surf->flags & (GeometryInstanceSurfaceDataCache::FLAG_PASS_DEPTH | GeometryInstanceSurfaceDataCache::FLAG_PASS_OPAQUE | GeometryInstanceSurfaceDataCache::FLAG_PASS_ALPHA)) {
-					rl->add_element(surf);
+					p_chunk.elements.push_back(surf);
 				}
 			} else {
 				if (surf->flags & (GeometryInstanceSurfaceDataCache::FLAG_PASS_DEPTH | GeometryInstanceSurfaceDataCache::FLAG_PASS_OPAQUE)) {
-					rl->add_element(surf);
+					p_chunk.elements.push_back(surf);
 				}
 			}
 
@@ -1442,10 +1619,6 @@ void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, con
 
 			surf = surf->next;
 		}
-	}
-
-	if (p_render_list == RENDER_LIST_OPAQUE && lightmap_captures_used) {
-		RD::get_singleton()->buffer_update(scene_state.lightmap_capture_buffer, 0, sizeof(LightmapCaptureData) * lightmap_captures_used, scene_state.lightmap_captures);
 	}
 }
 
@@ -5633,6 +5806,14 @@ RenderForwardClustered::RenderForwardClustered() {
 		const String min_env = OS::get_singleton()->get_environment("GODOT_PARALLEL_DRAW_LISTS_MIN");
 		render_list_split_min_elements = min_env.is_empty() ? 128 : uint32_t(MAX(min_env.to_int(), 1));
 		render_list_split_stats.enabled = OS::get_singleton()->get_environment("GODOT_PARALLEL_DRAW_LISTS_STATS") == "1";
+
+		// The render lists themselves are filled by up to 3 threads (memory bound: more threads only slow each other
+		// down), in chunks of at least 256 instances (1024 elements for the instance data). GODOT_PARALLEL_LIST_BUILD=N
+		// changes the chunk size, 0 fills them serially; GODOT_PARALLEL_LIST_BUILD_THREADS=N the thread count.
+		const String list_build_env = OS::get_singleton()->get_environment("GODOT_PARALLEL_LIST_BUILD");
+		list_build_min_instances = list_build_env.is_empty() ? 256 : uint32_t(MAX(list_build_env.to_int(), 0));
+		const String list_build_threads_env = OS::get_singleton()->get_environment("GODOT_PARALLEL_LIST_BUILD_THREADS");
+		list_build_max_threads = MIN(render_list_max_splits, list_build_threads_env.is_empty() ? 3u : uint32_t(CLAMP(list_build_threads_env.to_int(), 0, 16)));
 	}
 
 	/* SCENE SHADER */
@@ -5782,7 +5963,7 @@ RenderForwardClustered::RenderForwardClustered() {
 }
 
 RenderForwardClustered::~RenderForwardClustered() {
-	_render_list_split_release_groups(true);
+	_parallel_release_groups(true);
 
 	if (ss_effects != nullptr) {
 		memdelete(ss_effects);

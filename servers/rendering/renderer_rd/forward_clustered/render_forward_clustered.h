@@ -285,14 +285,17 @@ protected:
 	LocalVector<RenderListSplit> render_list_splits;
 	LocalVector<RD::DrawListID> render_list_split_ids;
 	RenderListParameters *render_list_split_params = nullptr;
-	// The generation of the list being split (high 32 bits) and the next part to record (low 32 bits). A worker woken
-	// after its list was done finds another generation and leaves without touching anything.
-	std::atomic<uint64_t> render_list_split_claim = { 0xFFFFFFFF };
-	SafeNumeric<uint32_t> render_list_split_count;
-	SafeNumeric<uint32_t> render_list_split_done;
-	uint32_t render_list_split_generation = 0;
-	// Group tasks of finished lists whose workers may not have woken up yet, released once they have.
-	LocalVector<WorkerThreadPool::GroupID> render_list_split_groups;
+
+	// Work cut in parts that WorkerThreadPool workers and the render thread take in turn (_parallel_run()). The claim
+	// holds the run's generation (high 32 bits) and the next part (low 32 bits): a worker woken after its run is done
+	// finds another generation and leaves without touching anything; its group task is released once completed.
+	typedef void (RenderForwardClustered::*ParallelPart)(uint32_t p_part);
+	std::atomic<uint64_t> parallel_claim = { 0xFFFFFFFF };
+	SafeNumeric<uint32_t> parallel_part_count;
+	SafeNumeric<uint32_t> parallel_parts_done;
+	uint32_t parallel_generation = 0;
+	ParallelPart parallel_part = nullptr;
+	LocalVector<WorkerThreadPool::GroupID> parallel_groups;
 	uint32_t render_list_max_splits = 0;
 	uint32_t render_list_split_min_elements = 0;
 
@@ -311,6 +314,14 @@ protected:
 		uint32_t serial_lists = 0;
 		uint64_t serial_elements = 0;
 		uint64_t serial_usec = 0;
+		uint64_t fill_usec = 0; // _fill_render_list
+		uint64_t instance_data_usec = 0; // _fill_instance_data
+		uint32_t parallel_builds = 0; // Calls of either that used several threads.
+		// _parallel_run(), all uses: parts, those run by the calling thread, sum of the parts' durations, wall time.
+		SafeNumeric<uint64_t> run_parts;
+		SafeNumeric<uint64_t> run_parts_on_caller;
+		SafeNumeric<uint64_t> run_parts_usec;
+		uint64_t run_usec = 0;
 	} render_list_split_stats;
 
 	struct LightmapData {
@@ -530,13 +541,75 @@ protected:
 	void _render_list(RenderingDevice::DrawListID p_draw_list, RenderingDevice::FramebufferFormatID p_framebuffer_Format, RenderListParameters *p_params, uint32_t p_from_element, uint32_t p_to_element, RenderListSplit *p_split = nullptr);
 	uint32_t _render_list_get_split_count(const RenderListParameters *p_params);
 	void _render_list_split(RenderListParameters *p_params, uint32_t p_split_count);
-	void _render_list_split_task(uint32_t p_index, uint32_t p_generation);
-	void _render_claimed_list_splits(uint32_t p_generation);
-	void _render_list_split_release_groups(bool p_wait);
+	void _render_list_split_part(uint32_t p_part);
+
+	uint64_t _parallel_run(uint32_t p_part_count, uint32_t p_thread_count, ParallelPart p_part);
+	void _parallel_run_task(uint32_t p_index, uint32_t p_generation);
+	void _parallel_run_claimed(uint32_t p_generation, bool p_caller = false);
+	void _parallel_release_groups(bool p_wait);
 	void _render_list_with_draw_list(RenderListParameters *p_params, RID p_framebuffer, BitField<RD::DrawFlags> p_draw_flags = RD::DRAW_DEFAULT_ALL, const Vector<Color> &p_clear_color_values = Vector<Color>(), float p_clear_depth_value = 0.0, uint32_t p_clear_stencil_value = 0, const Rect2 &p_region = Rect2());
 
 	void _fill_instance_data(RenderListType p_render_list, int *p_render_info = nullptr, uint32_t p_offset = 0, int32_t p_max_elements = -1, bool p_update_buffer = true);
 	void _fill_render_list(RenderListType p_render_list, const RenderDataRD *p_render_data, PassMode p_pass_mode, bool p_using_sdfgi = false, bool p_using_opaque_gi = false, bool p_using_motion_pass = false, bool p_append = false, bool p_alpha_only = false);
+
+	class GeometryInstanceForwardClustered;
+
+	// _fill_render_list() over a range of the culled instances. Every instance and surface is written by its own
+	// chunk only; what the list, the scene state and the render info get is kept in the chunk and merged in order.
+	struct FillRenderListChunk {
+		enum {
+			USED_SSS = 1 << 0,
+			USED_SCREEN_TEXTURE = 1 << 1,
+			USED_NORMAL_TEXTURE = 1 << 2,
+			USED_DEPTH_TEXTURE = 1 << 3,
+			USED_LIGHTMAP = 1 << 4,
+			USED_OPAQUE_STENCIL = 1 << 5,
+		};
+
+		uint32_t from_instance = 0;
+		uint32_t to_instance = 0;
+		LocalVector<GeometryInstanceSurfaceDataCache *> elements; // For the list being filled.
+		LocalVector<GeometryInstanceSurfaceDataCache *> alpha_elements;
+		LocalVector<GeometryInstanceSurfaceDataCache *> motion_elements;
+		LocalVector<GeometryInstanceForwardClustered *> lightmap_captures; // Their index in the frame is set by the merge.
+		uint32_t used = 0;
+		int64_t visible_primitives = 0;
+		int64_t shadow_primitives = 0;
+		char padding[64]; // Each thread writes its own chunk: keep the next chunk's fields off this one's cache lines.
+	};
+
+	struct FillRenderListParameters {
+		RenderListType render_list = RENDER_LIST_OPAQUE;
+		const RenderDataRD *render_data = nullptr;
+		PassMode pass_mode = PASS_MODE_COLOR;
+		bool using_sdfgi = false;
+		bool using_opaque_gi = false;
+		bool using_motion_pass = false;
+		bool alpha_only = false;
+		Plane near_plane;
+		float z_max = 0.0;
+		uint32_t max_lightmap_captures = 0; // Per chunk: the merge checks the total.
+	} fill_render_list_params;
+
+	LocalVector<FillRenderListChunk> fill_render_list_chunks;
+	uint32_t list_build_min_instances = 0; // Smallest chunk of instances worth a thread; 0 builds serially.
+	uint32_t list_build_max_threads = 0;
+
+	void _fill_render_list_chunk(FillRenderListChunk &p_chunk);
+	void _fill_render_list_part(uint32_t p_part);
+
+	// _fill_instance_data() over ranges of elements; whether each element can be drawn with the one before it goes in
+	// fill_instance_data_repeats, the runs are counted afterwards in order.
+	struct FillInstanceDataParameters {
+		RenderListType render_list = RENDER_LIST_OPAQUE;
+		uint32_t offset = 0;
+		uint32_t count = 0;
+		uint32_t part_count = 0;
+	} fill_instance_data_params;
+	LocalVector<uint8_t> fill_instance_data_repeats;
+
+	void _fill_instance_data_range(RenderListType p_render_list, uint32_t p_offset, uint32_t p_from, uint32_t p_to);
+	void _fill_instance_data_part(uint32_t p_part);
 
 	HashMap<Size2i, RID> sdfgi_framebuffer_size_cache;
 
