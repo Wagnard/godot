@@ -32,6 +32,7 @@
 
 #include "core/object/worker_thread_pool.h"
 #include "core/os/mutex.h"
+#include "core/os/rw_lock.h"
 #include "core/templates/hash_map.h"
 #include "core/templates/local_vector.h"
 #include "core/templates/rb_map.h"
@@ -51,6 +52,7 @@ private:
 	Mutex *compilations_mutex = nullptr;
 	uint32_t *compilations = nullptr;
 	RBMap<uint32_t, RID> hash_map;
+	RWLock hash_map_lock; // Lets several threads look pipelines up while one of them adds the compiled ones.
 	LocalVector<Pair<uint32_t, RID>> compiled_queue;
 	Mutex compiled_queue_mutex;
 	RBSet<uint32_t> compilation_set;
@@ -63,6 +65,11 @@ private:
 
 		{
 			MutexLock lock(compiled_queue_mutex);
+			if (compiled_queue.is_empty()) {
+				return false;
+			}
+
+			RWLockWrite write_lock(hash_map_lock);
 			for (const Pair<uint32_t, RID> &pair : compiled_queue) {
 				hash_map[pair.first] = pair.second;
 				hashes_added.push_back(pair.first);
@@ -82,6 +89,17 @@ private:
 		}
 
 		return !hashes_added.is_empty();
+	}
+
+	bool _find_pipeline(uint32_t p_key_hash, RID &r_pipeline) const {
+		RWLockRead read_lock(hash_map_lock);
+		const RBMap<uint32_t, RID>::Element *e = hash_map.find(p_key_hash);
+		if (e == nullptr) {
+			return false;
+		}
+
+		r_pipeline = e->value();
+		return true;
 	}
 
 	void _wait_for_all_pipelines() {
@@ -177,37 +195,35 @@ public:
 
 	// Retrieve a pipeline. It'll return an empty pipeline if it's not available yet, but it'll be guaranteed to succeed if 'wait for compilation' is true and stall as necessary. Source is just an optional number to aid debugging.
 	RID get_pipeline(const Key &p_key, uint32_t p_key_hash, bool p_wait_for_compilation, RSE::PipelineSource p_source) {
-		RBMap<uint32_t, RID>::Element *e = hash_map.find(p_key_hash);
+		RID pipeline;
+		if (_find_pipeline(p_key_hash, pipeline)) {
+			return pipeline;
+		}
 
-		if (e == nullptr) {
-			// Check if there's any new pipelines that need to be added and try again. This method triggers a mutex lock.
-			if (_add_new_pipelines_to_map()) {
-				e = hash_map.find(p_key_hash);
+		// Check if there's any new pipelines that need to be added and try again. This method triggers a mutex lock.
+		if (_add_new_pipelines_to_map() && _find_pipeline(p_key_hash, pipeline)) {
+			return pipeline;
+		}
+
+		// Request compilation. The method will ignore the request if it's already being compiled.
+		compile_pipeline(p_key, p_key_hash, p_source, p_wait_for_compilation);
+
+		if (!p_wait_for_compilation) {
+			return RID();
+		}
+
+		wait_for_pipeline(p_key_hash);
+		_add_new_pipelines_to_map();
+
+		if (!_find_pipeline(p_key_hash, pipeline)) {
+			// Pipeline could not be compiled due to an internal error. Store an empty RID so compilation is not attempted again.
+			RWLockWrite write_lock(hash_map_lock);
+			if (!hash_map.has(p_key_hash)) {
+				hash_map.insert(p_key_hash, RID());
 			}
 		}
 
-		if (e == nullptr) {
-			// Request compilation. The method will ignore the request if it's already being compiled.
-			compile_pipeline(p_key, p_key_hash, p_source, p_wait_for_compilation);
-
-			if (p_wait_for_compilation) {
-				wait_for_pipeline(p_key_hash);
-				_add_new_pipelines_to_map();
-
-				e = hash_map.find(p_key_hash);
-				if (e != nullptr) {
-					return e->value();
-				} else {
-					// Pipeline could not be compiled due to an internal error. Store an empty RID so compilation is not attempted again.
-					hash_map[p_key_hash] = RID();
-					return RID();
-				}
-			} else {
-				return RID();
-			}
-		} else {
-			return e->value();
-		}
+		return pipeline;
 	}
 
 	// Delete all cached pipelines. Can stall if background compilation is in progress.
@@ -215,6 +231,7 @@ public:
 		_wait_for_all_pipelines();
 		_add_new_pipelines_to_map();
 
+		RWLockWrite write_lock(hash_map_lock);
 		for (KeyValue<uint32_t, RID> entry : hash_map) {
 			RD::get_singleton()->free_rid(entry.value);
 		}
