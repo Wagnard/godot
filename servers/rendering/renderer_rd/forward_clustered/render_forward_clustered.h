@@ -30,6 +30,7 @@
 
 #pragma once
 
+#include "core/object/worker_thread_pool.h"
 #include "core/templates/paged_allocator.h"
 #include "servers/rendering/multi_uma_buffer.h"
 #include "servers/rendering/renderer_rd/cluster_builder_rd.h"
@@ -269,6 +270,49 @@ protected:
 		}
 	};
 
+	// A range of a render list recorded on its own thread into a split of the draw list (RD::draw_list_split_begin()).
+	// What the recording would change outside the draw list waits in here for the render thread.
+	struct RenderListSplit {
+		uint32_t from_element = 0;
+		uint32_t to_element = 0;
+		RD::DrawListID draw_list = 0;
+		bool request_redraw = false;
+		LocalVector<RendererRD::MaterialStorage::MaterialData *> used_materials;
+		uint64_t begin_usec = 0; // Stats only.
+		uint64_t end_usec = 0;
+	};
+
+	LocalVector<RenderListSplit> render_list_splits;
+	LocalVector<RD::DrawListID> render_list_split_ids;
+	RenderListParameters *render_list_split_params = nullptr;
+	// The generation of the list being split (high 32 bits) and the next part to record (low 32 bits). A worker woken
+	// after its list was done finds another generation and leaves without touching anything.
+	std::atomic<uint64_t> render_list_split_claim = { 0xFFFFFFFF };
+	SafeNumeric<uint32_t> render_list_split_count;
+	SafeNumeric<uint32_t> render_list_split_done;
+	uint32_t render_list_split_generation = 0;
+	// Group tasks of finished lists whose workers may not have woken up yet, released once they have.
+	LocalVector<WorkerThreadPool::GroupID> render_list_split_groups;
+	uint32_t render_list_max_splits = 0;
+	uint32_t render_list_split_min_elements = 0;
+
+	struct RenderListSplitStats {
+		bool enabled = false;
+		uint64_t frame = 0;
+		uint32_t frames = 0;
+		uint32_t split_lists = 0;
+		uint32_t splits = 0;
+		uint64_t split_elements = 0;
+		uint64_t split_usec = 0;
+		uint64_t split_wait_usec = 0;
+		uint64_t split_join_usec = 0;
+		uint64_t split_parts_usec = 0;
+		uint64_t split_start_usec = 0;
+		uint32_t serial_lists = 0;
+		uint64_t serial_elements = 0;
+		uint64_t serial_usec = 0;
+	} render_list_split_stats;
+
 	struct LightmapData {
 		float normal_xform[12];
 		float texture_size[2];
@@ -482,8 +526,13 @@ protected:
 	static_assert(std::is_trivially_constructible_v<RenderElementInfo>);
 
 	template <PassMode p_pass_mode, uint32_t p_color_pass_flags = 0>
-	_FORCE_INLINE_ void _render_list_template(RenderingDevice::DrawListID p_draw_list, RenderingDevice::FramebufferFormatID p_framebuffer_Format, RenderListParameters *p_params, uint32_t p_from_element, uint32_t p_to_element);
-	void _render_list(RenderingDevice::DrawListID p_draw_list, RenderingDevice::FramebufferFormatID p_framebuffer_Format, RenderListParameters *p_params, uint32_t p_from_element, uint32_t p_to_element);
+	_FORCE_INLINE_ void _render_list_template(RenderingDevice::DrawListID p_draw_list, RenderingDevice::FramebufferFormatID p_framebuffer_Format, RenderListParameters *p_params, uint32_t p_from_element, uint32_t p_to_element, RenderListSplit *p_split);
+	void _render_list(RenderingDevice::DrawListID p_draw_list, RenderingDevice::FramebufferFormatID p_framebuffer_Format, RenderListParameters *p_params, uint32_t p_from_element, uint32_t p_to_element, RenderListSplit *p_split = nullptr);
+	uint32_t _render_list_get_split_count(const RenderListParameters *p_params);
+	void _render_list_split(RenderListParameters *p_params, uint32_t p_split_count);
+	void _render_list_split_task(uint32_t p_index, uint32_t p_generation);
+	void _render_claimed_list_splits(uint32_t p_generation);
+	void _render_list_split_release_groups(bool p_wait);
 	void _render_list_with_draw_list(RenderListParameters *p_params, RID p_framebuffer, BitField<RD::DrawFlags> p_draw_flags = RD::DRAW_DEFAULT_ALL, const Vector<Color> &p_clear_color_values = Vector<Color>(), float p_clear_depth_value = 0.0, uint32_t p_clear_stencil_value = 0, const Rect2 &p_region = Rect2());
 
 	void _fill_instance_data(RenderListType p_render_list, int *p_render_info = nullptr, uint32_t p_offset = 0, int32_t p_max_elements = -1, bool p_update_buffer = true);

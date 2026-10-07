@@ -31,6 +31,8 @@
 #include "render_forward_clustered.h"
 
 #include "core/config/project_settings.h"
+#include "core/object/worker_thread_pool.h"
+#include "core/os/os.h"
 #include "servers/rendering/renderer_rd/effects/camera_reprojection.h"
 #include "servers/rendering/renderer_rd/environment/fog.h"
 #include "servers/rendering/renderer_rd/framebuffer_cache_rd.h"
@@ -319,7 +321,7 @@ void RenderForwardClustered::update() {
 /// RENDERING ///
 
 template <RenderForwardClustered::PassMode p_pass_mode, uint32_t p_color_pass_flags>
-void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p_draw_list, RenderingDevice::FramebufferFormatID p_framebuffer_Format, RenderListParameters *p_params, uint32_t p_from_element, uint32_t p_to_element) {
+void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p_draw_list, RenderingDevice::FramebufferFormatID p_framebuffer_Format, RenderListParameters *p_params, uint32_t p_from_element, uint32_t p_to_element, RenderListSplit *p_split) {
 	RendererRD::MeshStorage *mesh_storage = RendererRD::MeshStorage::get_singleton();
 	RendererRD::ParticlesStorage *particles_storage = RendererRD::ParticlesStorage::get_singleton();
 	RD::DrawListID draw_list = p_draw_list;
@@ -354,6 +356,18 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 	}
 
 	bool should_request_redraw = false;
+
+	// The vertex arrays of the surfaces met in this list. Looking them up in the mesh storage takes the surface's lock,
+	// which threads recording other parts of the same list would fight over for every element of a shared mesh.
+	struct VertexArrayCacheEntry {
+		void *mesh_surface = nullptr;
+		uint64_t input_mask = 0;
+		bool input_motion_vectors = false;
+		bool point_size_emulated = false;
+		RID vertex_array;
+		RD::VertexFormatID vertex_format = 0;
+	};
+	VertexArrayCacheEntry vertex_array_cache[16];
 
 	for (uint32_t i = p_from_element; i < p_to_element; i++) {
 		const GeometryInstanceSurfaceDataCache *surf = p_params->elements[i];
@@ -394,7 +408,11 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 #endif
 				material_uniform_set = surf->material_uniform_set;
 				shader = surf->shader;
-				surf->material->set_as_used();
+				if (p_split == nullptr) {
+					surf->material->set_as_used();
+				} else if (unlikely(!surf->material->render_target_cache.is_empty())) {
+					p_split->used_materials.push_back(surf->material);
+				}
 #ifdef DEBUG_ENABLED
 			}
 #endif
@@ -520,7 +538,16 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 			if (surf->owner->mesh_instance.is_valid()) {
 				mesh_storage->mesh_instance_surface_get_vertex_arrays_and_format(surf->owner->mesh_instance, surf->surface_index, input_mask, pipeline_motion_vectors, emulate_point_size, vertex_array_rd, vertex_format);
 			} else {
-				mesh_storage->mesh_surface_get_vertex_arrays_and_format(mesh_surface, input_mask, pipeline_motion_vectors, emulate_point_size, vertex_array_rd, vertex_format);
+				VertexArrayCacheEntry &entry = vertex_array_cache[((uintptr_t(mesh_surface) >> 6) ^ (uintptr_t(mesh_surface) >> 12)) & 15];
+				if (entry.mesh_surface != mesh_surface || entry.input_mask != input_mask || entry.input_motion_vectors != pipeline_motion_vectors || entry.point_size_emulated != emulate_point_size) {
+					entry.mesh_surface = mesh_surface;
+					entry.input_mask = input_mask;
+					entry.input_motion_vectors = pipeline_motion_vectors;
+					entry.point_size_emulated = emulate_point_size;
+					mesh_storage->mesh_surface_get_vertex_arrays_and_format(mesh_surface, input_mask, pipeline_motion_vectors, emulate_point_size, entry.vertex_array, entry.vertex_format);
+				}
+				vertex_array_rd = entry.vertex_array;
+				vertex_format = entry.vertex_format;
 			}
 
 			pipeline_key.vertex_format_id = vertex_format;
@@ -636,17 +663,21 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 
 	// Make the actual redraw request
 	if (should_request_redraw) {
-		RenderingServerDefault::redraw_request();
+		if (p_split == nullptr) {
+			RenderingServerDefault::redraw_request();
+		} else {
+			p_split->request_redraw = true;
+		}
 	}
 }
 
-void RenderForwardClustered::_render_list(RenderingDevice::DrawListID p_draw_list, RenderingDevice::FramebufferFormatID p_framebuffer_Format, RenderListParameters *p_params, uint32_t p_from_element, uint32_t p_to_element) {
+void RenderForwardClustered::_render_list(RenderingDevice::DrawListID p_draw_list, RenderingDevice::FramebufferFormatID p_framebuffer_Format, RenderListParameters *p_params, uint32_t p_from_element, uint32_t p_to_element, RenderListSplit *p_split) {
 	//use template for faster performance (pass mode comparisons are inlined)
 
 	switch (p_params->pass_mode) {
 #define VALID_FLAG_COMBINATION(f) \
 	case f: { \
-		_render_list_template<PASS_MODE_COLOR, f>(p_draw_list, p_framebuffer_Format, p_params, p_from_element, p_to_element); \
+		_render_list_template<PASS_MODE_COLOR, f>(p_draw_list, p_framebuffer_Format, p_params, p_from_element, p_to_element, p_split); \
 	} break;
 
 		case PASS_MODE_COLOR: {
@@ -670,25 +701,25 @@ void RenderForwardClustered::_render_list(RenderingDevice::DrawListID p_draw_lis
 
 		} break;
 		case PASS_MODE_SHADOW: {
-			_render_list_template<PASS_MODE_SHADOW>(p_draw_list, p_framebuffer_Format, p_params, p_from_element, p_to_element);
+			_render_list_template<PASS_MODE_SHADOW>(p_draw_list, p_framebuffer_Format, p_params, p_from_element, p_to_element, p_split);
 		} break;
 		case PASS_MODE_SHADOW_DP: {
-			_render_list_template<PASS_MODE_SHADOW_DP>(p_draw_list, p_framebuffer_Format, p_params, p_from_element, p_to_element);
+			_render_list_template<PASS_MODE_SHADOW_DP>(p_draw_list, p_framebuffer_Format, p_params, p_from_element, p_to_element, p_split);
 		} break;
 		case PASS_MODE_DEPTH: {
-			_render_list_template<PASS_MODE_DEPTH>(p_draw_list, p_framebuffer_Format, p_params, p_from_element, p_to_element);
+			_render_list_template<PASS_MODE_DEPTH>(p_draw_list, p_framebuffer_Format, p_params, p_from_element, p_to_element, p_split);
 		} break;
 		case PASS_MODE_DEPTH_NORMAL_ROUGHNESS: {
-			_render_list_template<PASS_MODE_DEPTH_NORMAL_ROUGHNESS>(p_draw_list, p_framebuffer_Format, p_params, p_from_element, p_to_element);
+			_render_list_template<PASS_MODE_DEPTH_NORMAL_ROUGHNESS>(p_draw_list, p_framebuffer_Format, p_params, p_from_element, p_to_element, p_split);
 		} break;
 		case PASS_MODE_DEPTH_NORMAL_ROUGHNESS_VOXEL_GI: {
-			_render_list_template<PASS_MODE_DEPTH_NORMAL_ROUGHNESS_VOXEL_GI>(p_draw_list, p_framebuffer_Format, p_params, p_from_element, p_to_element);
+			_render_list_template<PASS_MODE_DEPTH_NORMAL_ROUGHNESS_VOXEL_GI>(p_draw_list, p_framebuffer_Format, p_params, p_from_element, p_to_element, p_split);
 		} break;
 		case PASS_MODE_DEPTH_MATERIAL: {
-			_render_list_template<PASS_MODE_DEPTH_MATERIAL>(p_draw_list, p_framebuffer_Format, p_params, p_from_element, p_to_element);
+			_render_list_template<PASS_MODE_DEPTH_MATERIAL>(p_draw_list, p_framebuffer_Format, p_params, p_from_element, p_to_element, p_split);
 		} break;
 		case PASS_MODE_SDF: {
-			_render_list_template<PASS_MODE_SDF>(p_draw_list, p_framebuffer_Format, p_params, p_from_element, p_to_element);
+			_render_list_template<PASS_MODE_SDF>(p_draw_list, p_framebuffer_Format, p_params, p_from_element, p_to_element, p_split);
 		} break;
 		default: {
 			// Unknown pass mode.
@@ -701,8 +732,182 @@ void RenderForwardClustered::_render_list_with_draw_list(RenderListParameters *p
 	p_params->framebuffer_format = fb_format;
 
 	RD::DrawListID draw_list = RD::get_singleton()->draw_list_begin(p_framebuffer, p_draw_flags, p_clear_color_values, p_clear_depth_value, p_clear_stencil_value, p_region);
-	_render_list(draw_list, fb_format, p_params, 0, p_params->element_count);
+	const uint32_t split_count = _render_list_get_split_count(p_params);
+	if (split_count > 1) {
+		_render_list_split(p_params, split_count);
+	} else {
+		const uint64_t begin_usec = render_list_split_stats.enabled ? OS::get_singleton()->get_ticks_usec() : 0;
+		_render_list(draw_list, fb_format, p_params, 0, p_params->element_count);
+		if (render_list_split_stats.enabled) {
+			render_list_split_stats.serial_usec += OS::get_singleton()->get_ticks_usec() - begin_usec;
+		}
+	}
 	RD::get_singleton()->draw_list_end();
+}
+
+uint32_t RenderForwardClustered::_render_list_get_split_count(const RenderListParameters *p_params) {
+	if (!render_list_split_groups.is_empty()) {
+		_render_list_split_release_groups(false);
+	}
+
+	if (render_list_split_stats.enabled) {
+		const uint64_t frame = RSG::rasterizer->get_frame_number();
+		if (frame != render_list_split_stats.frame) {
+			render_list_split_stats.frame = frame;
+			render_list_split_stats.frames++;
+			if (render_list_split_stats.frames == 240) {
+				const RenderListSplitStats &st = render_list_split_stats;
+				print_line(vformat("Parallel draw lists, per frame: %.1f lists split in %.1f parts (%.0f elements, %.0f us, of which waiting %.0f us, joining %.0f us; parts %.0f us in total, last part started after %.0f us), %.1f lists recorded serially (%.0f elements, %.0f us).",
+						st.split_lists / 240.0, st.splits / 240.0, st.split_elements / 240.0, st.split_usec / 240.0, st.split_wait_usec / 240.0, st.split_join_usec / 240.0, st.split_parts_usec / 240.0, st.split_start_usec / 240.0, st.serial_lists / 240.0, st.serial_elements / 240.0, st.serial_usec / 240.0));
+				render_list_split_stats = RenderListSplitStats();
+				render_list_split_stats.enabled = true;
+				render_list_split_stats.frame = frame;
+			}
+		}
+	}
+
+	// Twice as many parts as threads: a worker that starts late leaves its parts to the others instead of making
+	// everyone wait for it.
+	uint32_t split_count = 1;
+	if (render_list_max_splits > 1 && render_list_split_min_elements > 0) {
+		split_count = CLAMP(uint32_t(p_params->element_count) / render_list_split_min_elements, 1u, render_list_max_splits * 2);
+	}
+
+	if (render_list_split_stats.enabled && split_count <= 1) {
+		render_list_split_stats.serial_lists++;
+		render_list_split_stats.serial_elements += p_params->element_count;
+	}
+
+	return split_count;
+}
+
+void RenderForwardClustered::_render_list_split(RenderListParameters *p_params, uint32_t p_split_count) {
+	const uint64_t begin_usec = render_list_split_stats.enabled ? OS::get_singleton()->get_ticks_usec() : 0;
+	const uint32_t element_count = p_params->element_count;
+
+	if (render_list_splits.size() < p_split_count) {
+		render_list_splits.resize(p_split_count);
+		render_list_split_ids.resize(p_split_count);
+	}
+
+	// Equal ranges, each boundary moved forward to the start of a run of repeated elements: the first element of a run
+	// draws the whole run instanced, a range starting inside one would draw its tail twice.
+	uint32_t split_count = 0;
+	uint32_t from = 0;
+	for (uint32_t i = 0; i < p_split_count && from < element_count; i++) {
+		uint32_t to = i == p_split_count - 1 ? element_count : uint32_t(uint64_t(element_count) * (i + 1) / p_split_count);
+		while (to > from && to < element_count && p_params->element_info[to - 1].repeat > 1) {
+			to++;
+		}
+
+		if (to <= from) {
+			continue;
+		}
+
+		RenderListSplit &split = render_list_splits[split_count];
+		split.from_element = from;
+		split.to_element = to;
+		split.request_redraw = false;
+		split.used_materials.clear();
+		split_count++;
+		from = to;
+	}
+
+	RD::get_singleton()->draw_list_split_begin(split_count, render_list_split_ids.ptr());
+	for (uint32_t i = 0; i < split_count; i++) {
+		render_list_splits[i].draw_list = render_list_split_ids[i];
+	}
+
+	// Publish the list: closed first, so a worker still holding the previous generation can't read the new count.
+	render_list_split_generation++;
+	const uint64_t generation_bits = uint64_t(render_list_split_generation) << 32;
+	render_list_split_claim.store(generation_bits | 0xFFFFFFFF, std::memory_order_relaxed);
+	render_list_split_params = p_params;
+	render_list_split_count.set(split_count);
+	render_list_split_done.set(0);
+	render_list_split_claim.store(generation_bits, std::memory_order_release);
+
+	// Up to N - 1 workers; the render thread takes parts too while they wake up, and doesn't wait for workers that
+	// wake up after every part is taken: their group is released later.
+	_render_list_split_release_groups(false);
+	const uint32_t worker_count = MIN(split_count, render_list_max_splits) - 1;
+	if (worker_count > 0) {
+		render_list_split_groups.push_back(WorkerThreadPool::get_singleton()->add_template_group_task(this, &RenderForwardClustered::_render_list_split_task, render_list_split_generation, worker_count, worker_count, true, "ForwardClusteredRenderListSplit"));
+	}
+	_render_claimed_list_splits(render_list_split_generation);
+	const uint64_t wait_usec = render_list_split_stats.enabled ? OS::get_singleton()->get_ticks_usec() : 0;
+	while (render_list_split_done.get() < split_count) {
+		Thread::yield();
+	}
+
+	const uint64_t join_usec = render_list_split_stats.enabled ? OS::get_singleton()->get_ticks_usec() : 0;
+	RD::get_singleton()->draw_list_split_end();
+	if (render_list_split_stats.enabled) {
+		render_list_split_stats.split_wait_usec += join_usec - wait_usec;
+		render_list_split_stats.split_join_usec += OS::get_singleton()->get_ticks_usec() - join_usec;
+	}
+
+	bool request_redraw = false;
+	for (uint32_t i = 0; i < split_count; i++) {
+		RenderListSplit &split = render_list_splits[i];
+		request_redraw = request_redraw || split.request_redraw;
+		for (RendererRD::MaterialStorage::MaterialData *material : split.used_materials) {
+			material->set_as_used();
+		}
+	}
+
+	if (request_redraw) {
+		RenderingServerDefault::redraw_request();
+	}
+
+
+	if (render_list_split_stats.enabled) {
+		render_list_split_stats.split_lists++;
+		render_list_split_stats.splits += split_count;
+		render_list_split_stats.split_elements += element_count;
+		render_list_split_stats.split_usec += OS::get_singleton()->get_ticks_usec() - begin_usec;
+		uint64_t last_begin_usec = begin_usec;
+		for (uint32_t i = 0; i < split_count; i++) {
+			render_list_split_stats.split_parts_usec += render_list_splits[i].end_usec - render_list_splits[i].begin_usec;
+			last_begin_usec = MAX(last_begin_usec, render_list_splits[i].begin_usec);
+		}
+		render_list_split_stats.split_start_usec += last_begin_usec - begin_usec;
+	}
+}
+
+void RenderForwardClustered::_render_list_split_task(uint32_t p_index, uint32_t p_generation) {
+	_render_claimed_list_splits(p_generation);
+}
+
+void RenderForwardClustered::_render_claimed_list_splits(uint32_t p_generation) {
+	uint64_t claim = render_list_split_claim.load(std::memory_order_acquire);
+	while (uint32_t(claim >> 32) == p_generation && uint32_t(claim) < render_list_split_count.get()) {
+		if (!render_list_split_claim.compare_exchange_weak(claim, claim + 1, std::memory_order_acq_rel, std::memory_order_acquire)) {
+			continue;
+		}
+
+		RenderListSplit &split = render_list_splits[uint32_t(claim)];
+		if (render_list_split_stats.enabled) {
+			split.begin_usec = OS::get_singleton()->get_ticks_usec();
+		}
+		_render_list(split.draw_list, render_list_split_params->framebuffer_format, render_list_split_params, split.from_element, split.to_element, &split);
+		if (render_list_split_stats.enabled) {
+			split.end_usec = OS::get_singleton()->get_ticks_usec();
+		}
+		render_list_split_done.increment();
+		claim = render_list_split_claim.load(std::memory_order_acquire);
+	}
+}
+
+void RenderForwardClustered::_render_list_split_release_groups(bool p_wait) {
+	for (uint32_t i = 0; i < render_list_split_groups.size();) {
+		if (p_wait || WorkerThreadPool::get_singleton()->is_group_task_completed(render_list_split_groups[i])) {
+			WorkerThreadPool::get_singleton()->wait_for_group_task_completion(render_list_split_groups[i]);
+			render_list_split_groups.remove_at_unordered(i);
+		} else {
+			i++;
+		}
+	}
 }
 
 uint32_t RenderForwardClustered::_setup_environment(const RenderDataRD *p_render_data, bool p_no_fog, const Size2i &p_screen_size, const Size2 &p_viewport_size, const Color &p_default_bg_color, bool p_opaque_render_buffers, bool p_apply_alpha_multiplier, bool p_pancake_shadows) {
@@ -5419,6 +5624,17 @@ void RenderForwardClustered::_update_shader_quality_settings() {
 RenderForwardClustered::RenderForwardClustered() {
 	singleton = this;
 
+	// Large render lists are recorded on up to 6 threads, in ranges of at least 128 elements. GODOT_PARALLEL_DRAW_LISTS=N
+	// changes the thread count (0 or 1 records serially), GODOT_PARALLEL_DRAW_LISTS_MIN the range size;
+	// GODOT_PARALLEL_DRAW_LISTS_STATS=1 prints what was split every 240 frames.
+	{
+		const String threads_env = OS::get_singleton()->get_environment("GODOT_PARALLEL_DRAW_LISTS");
+		render_list_max_splits = threads_env.is_empty() ? 6 : uint32_t(CLAMP(threads_env.to_int(), 0, 16));
+		const String min_env = OS::get_singleton()->get_environment("GODOT_PARALLEL_DRAW_LISTS_MIN");
+		render_list_split_min_elements = min_env.is_empty() ? 128 : uint32_t(MAX(min_env.to_int(), 1));
+		render_list_split_stats.enabled = OS::get_singleton()->get_environment("GODOT_PARALLEL_DRAW_LISTS_STATS") == "1";
+	}
+
 	/* SCENE SHADER */
 
 	{
@@ -5566,6 +5782,8 @@ RenderForwardClustered::RenderForwardClustered() {
 }
 
 RenderForwardClustered::~RenderForwardClustered() {
+	_render_list_split_release_groups(true);
+
 	if (ss_effects != nullptr) {
 		memdelete(ss_effects);
 		ss_effects = nullptr;
