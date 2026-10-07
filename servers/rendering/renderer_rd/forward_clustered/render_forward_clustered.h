@@ -331,6 +331,7 @@ protected:
 		uint32_t shadow_passes = 0;
 		uint64_t shadow_elements = 0;
 		uint64_t shadow_usec = 0; // Sorting the shadow passes and writing their instance data, either path.
+		uint64_t shadow_draw_calls = 0; // Deferred builds only.
 		// _parallel_run(), all uses: parts, those run by the calling thread, sum of the parts' durations, wall time.
 		SafeNumeric<uint64_t> run_parts;
 		SafeNumeric<uint64_t> run_parts_on_caller;
@@ -949,6 +950,7 @@ protected:
 	LocalVector<uint8_t> shadow_pass_begins; // Per element: first of its pass.
 	uint32_t shadow_instance_part_count = 0;
 	bool shadow_build_parallel = true;
+	bool shadow_build_merge = true; // Off: a pass cut in several sort runs is drawn run after run, unmerged.
 	bool shadow_build_deferred = false;
 
 	void _render_shadow_build();

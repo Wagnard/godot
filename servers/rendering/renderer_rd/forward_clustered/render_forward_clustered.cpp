@@ -763,8 +763,8 @@ uint32_t RenderForwardClustered::_render_list_get_split_count(const RenderListPa
 				const RenderListSplitStats &st = render_list_split_stats;
 				print_line(vformat("Parallel draw lists, per frame: %.1f lists split in %.1f parts (%.0f elements, %.0f us, of which waiting %.0f us, joining %.0f us; parts %.0f us in total, last part started after %.0f us), %.1f lists recorded serially (%.0f elements, %.0f us).",
 						st.split_lists / 240.0, st.splits / 240.0, st.split_elements / 240.0, st.split_usec / 240.0, st.split_wait_usec / 240.0, st.split_join_usec / 240.0, st.split_parts_usec / 240.0, st.split_start_usec / 240.0, st.serial_lists / 240.0, st.serial_elements / 240.0, st.serial_usec / 240.0));
-				print_line(vformat("List building, per frame: filling %.0f us, instance data %.0f us, %.1f of them on several threads; shadow sort + instance data %.0f us (%.1f deferred builds of %.1f passes, %.0f elements).",
-						st.fill_usec / 240.0, st.instance_data_usec / 240.0, st.parallel_builds / 240.0, st.shadow_usec / 240.0, st.shadow_builds / 240.0, st.shadow_passes / 240.0, st.shadow_elements / 240.0));
+				print_line(vformat("List building, per frame: filling %.0f us, instance data %.0f us, %.1f of them on several threads; shadow sort + instance data %.0f us (%.1f deferred builds of %.1f passes, %.0f elements, %.0f draw calls).",
+						st.fill_usec / 240.0, st.instance_data_usec / 240.0, st.parallel_builds / 240.0, st.shadow_usec / 240.0, st.shadow_builds / 240.0, st.shadow_passes / 240.0, st.shadow_elements / 240.0, st.shadow_draw_calls / 240.0));
 				print_line(vformat("Parallel runs, per frame: %.1f runs, %.1f helpers woken, %.0f parts, %.0f of them on the calling thread, %.0f us of parts in total, %.0f us of wall time.",
 						st.runs / 240.0, st.helpers_woken / 240.0, st.run_parts.get() / 240.0, st.run_parts_on_caller.get() / 240.0, st.run_parts_usec.get() / 240.0, st.run_usec / 240.0));
 				render_list_split_stats.~RenderListSplitStats();
@@ -3558,7 +3558,8 @@ void RenderForwardClustered::_render_shadow_build() {
 
 	// 1. Sort: each pass is a run, a large one is cut in runs of at least 1024 elements merged afterwards. Runs of
 	// equal keys may then come out in another order than one sort would give; it only changes which of several
-	// identical surfaces is drawn first in a depth-only pass.
+	// identical surfaces is drawn first in a depth-only pass. Without the merge (GODOT_PARALLEL_SHADOW_MERGE=0) the
+	// pass is drawn run after run: no serial step, but each run repeats the state changes and splits the instancing.
 	shadow_sort_runs.clear();
 	bool merges = false;
 	for (const SceneState::ShadowPass &shadow_pass : scene_state.shadow_passes) {
@@ -3580,7 +3581,7 @@ void RenderForwardClustered::_render_shadow_build() {
 		}
 	}
 
-	if (merges) {
+	if (merges && shadow_build_merge) {
 		// Runs of the same pass are contiguous after sorting them back by position.
 		struct RunByPosition {
 			_FORCE_INLINE_ bool operator()(const ShadowSortRun &A, const ShadowSortRun &B) const { return A.from < B.from; }
@@ -3659,6 +3660,9 @@ void RenderForwardClustered::_render_shadow_build() {
 		}
 		if (shadow_pass.render_info) {
 			shadow_pass.render_info[RSE::VIEWPORT_RENDER_INFO_DRAW_CALLS_IN_FRAME] += draw_calls;
+		}
+		if (render_list_split_stats.enabled) {
+			render_list_split_stats.shadow_draw_calls += draw_calls;
 		}
 	}
 
@@ -6085,8 +6089,9 @@ RenderForwardClustered::RenderForwardClustered() {
 		parallel_linger_usec = linger_env.is_empty() ? 1000 : uint64_t(MAX(linger_env.to_int(), 0));
 
 		// GODOT_PARALLEL_SHADOW_BUILD=0 sorts the shadow passes and writes their instance data one by one, as they are
-		// filled.
+		// filled; GODOT_PARALLEL_SHADOW_MERGE=0 leaves a large pass in separately sorted runs.
 		shadow_build_parallel = OS::get_singleton()->get_environment("GODOT_PARALLEL_SHADOW_BUILD") != "0";
+		shadow_build_merge = OS::get_singleton()->get_environment("GODOT_PARALLEL_SHADOW_MERGE") != "0";
 	}
 
 	/* SCENE SHADER */
