@@ -824,6 +824,7 @@ private:
 		Vector<RDD::BufferID> buffers; // Not owned, just referenced.
 		Vector<RDG::ResourceTracker *> draw_trackers; // Not owned, just referenced.
 		Vector<uint64_t> offsets;
+		bool has_dynamic_buffers = false; // Any created with BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT.
 		Vector<int32_t> transfer_worker_indices;
 		Vector<uint64_t> transfer_worker_operations;
 		HashSet<RID> untracked_buffers;
@@ -1163,6 +1164,7 @@ private:
 		};
 
 		LocalVector<AttachableTexture> attachable_textures; // Used for validation.
+		bool has_dynamic_buffers = false; // Any UNIFORM_TYPE_*_BUFFER_DYNAMIC uniform.
 		Vector<RDG::ResourceTracker *> draw_trackers;
 		Vector<RDG::ResourceUsage> draw_trackers_usage;
 		HashMap<RID, RDG::ResourceUsage> untracked_usage;

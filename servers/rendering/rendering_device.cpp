@@ -4051,6 +4051,7 @@ RID RenderingDevice::vertex_array_create(uint32_t p_vertex_count, VertexFormatID
 		}
 
 		vertex_array.buffers.write[atf.binding] = buffer->driver_id;
+		vertex_array.has_dynamic_buffers = vertex_array.has_dynamic_buffers || buffer->usage.has_flag(RDD::BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT);
 
 		if (unique_buffers.has(buf)) {
 			// No need to add dependencies multiple times.
@@ -4851,6 +4852,11 @@ RID RenderingDevice::uniform_set_create(const VectorView<RD::Uniform> &p_uniform
 	ERR_FAIL_COND_V(!driver_uniform_set, RID());
 
 	UniformSet uniform_set;
+	for (uint32_t i = 0; i < p_uniforms.size(); i++) {
+		if (p_uniforms[i].uniform_type == UNIFORM_TYPE_UNIFORM_BUFFER_DYNAMIC || p_uniforms[i].uniform_type == UNIFORM_TYPE_STORAGE_BUFFER_DYNAMIC) {
+			uniform_set.has_dynamic_buffers = true;
+		}
+	}
 	uniform_set.driver_id = driver_uniform_set;
 	uniform_set.format = shader->set_formats[p_shader_set];
 	uniform_set.attachable_textures = attachable_textures;
@@ -5953,7 +5959,7 @@ void RenderingDevice::draw_list_bind_vertex_array(DrawListID p_list, RID p_verte
 #endif
 	draw_list.validation.vertex_array_size = vertex_array->vertex_count;
 
-	draw_graph.add_draw_list_bind_vertex_buffers(vertex_array->buffers, vertex_array->offsets);
+	draw_graph.add_draw_list_bind_vertex_buffers(vertex_array->buffers, vertex_array->offsets, vertex_array->has_dynamic_buffers);
 
 	for (int i = 0; i < vertex_array->draw_trackers.size(); i++) {
 		draw_graph.add_draw_list_usage(vertex_array->draw_trackers[i], RDG::RESOURCE_USAGE_VERTEX_BUFFER_READ);
@@ -5984,6 +5990,7 @@ void RenderingDevice::draw_list_bind_vertex_buffers_format(DrawListID p_list, Ve
 
 	FixedVector<RDD::BufferID, 32> driver_buffers;
 	driver_buffers.resize_initialized(p_vertex_buffers.size());
+	bool has_dynamic_buffers = false;
 
 	FixedVector<RDG::ResourceTracker *, 32> draw_trackers;
 
@@ -6038,6 +6045,7 @@ void RenderingDevice::draw_list_bind_vertex_buffers_format(DrawListID p_list, Ve
 #endif
 
 		driver_buffers[i] = buffer->driver_id;
+		has_dynamic_buffers = has_dynamic_buffers || buffer->usage.has_flag(RDD::BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT);
 
 		if (buffer->draw_tracker != nullptr) {
 			draw_trackers.push_back(buffer->draw_tracker);
@@ -6046,7 +6054,7 @@ void RenderingDevice::draw_list_bind_vertex_buffers_format(DrawListID p_list, Ve
 
 	draw_list.state.vertex_array = RID();
 
-	draw_graph.add_draw_list_bind_vertex_buffers(driver_buffers, offsets_span);
+	draw_graph.add_draw_list_bind_vertex_buffers(driver_buffers, offsets_span, has_dynamic_buffers);
 
 	for (RDG::ResourceTracker *tracker : draw_trackers) {
 		draw_graph.add_draw_list_usage(tracker, RDG::RESOURCE_USAGE_VERTEX_BUFFER_READ);
@@ -6168,6 +6176,7 @@ void RenderingDevice::draw_list_draw(DrawListID p_list, bool p_use_indices, uint
 	uint32_t first_set_index = 0;
 	uint32_t last_set_index = 0;
 	bool found_first_set = false;
+	bool batch_has_dynamic_buffers = false; // Whether the sets batched so far need the driver's dynamic offsets.
 
 	for (uint32_t i = 0; i < draw_list.state.set_count; i++) {
 		if (draw_list.state.sets[i].pipeline_expected_format == 0) {
@@ -6196,11 +6205,12 @@ void RenderingDevice::draw_list_draw(DrawListID p_list, bool p_use_indices, uint
 				// All good, see if this requires re-binding.
 				if (i - last_set_index > 1) {
 					// If the descriptor sets are not contiguous, bind the previous ones and start a new batch.
-					draw_graph.add_draw_list_bind_uniform_sets(draw_list.state.pipeline_shader_driver_id, valid_descriptor_ids, first_set_index, valid_set_count);
+					draw_graph.add_draw_list_bind_uniform_sets(draw_list.state.pipeline_shader_driver_id, valid_descriptor_ids, first_set_index, valid_set_count, batch_has_dynamic_buffers);
 
 					first_set_index = i;
 					valid_set_count = 1;
 					valid_descriptor_ids[0] = draw_list.state.sets[i].uniform_set_driver_id;
+					batch_has_dynamic_buffers = false;
 				} else {
 					// Otherwise, keep storing in the current batch.
 					valid_descriptor_ids[valid_set_count] = draw_list.state.sets[i].uniform_set_driver_id;
@@ -6211,6 +6221,7 @@ void RenderingDevice::draw_list_draw(DrawListID p_list, bool p_use_indices, uint
 				ERR_FAIL_NULL(uniform_set);
 				_uniform_set_update_shared(uniform_set);
 				_uniform_set_update_clears(uniform_set);
+				batch_has_dynamic_buffers = batch_has_dynamic_buffers || uniform_set->has_dynamic_buffers;
 
 				draw_graph.add_draw_list_usages(uniform_set->draw_trackers, uniform_set->draw_trackers_usage);
 				draw_list.state.sets[i].bound = true;
@@ -6224,7 +6235,7 @@ void RenderingDevice::draw_list_draw(DrawListID p_list, bool p_use_indices, uint
 
 	// Bind the remaining batch.
 	if (descriptor_set_batching && valid_set_count > 0) {
-		draw_graph.add_draw_list_bind_uniform_sets(draw_list.state.pipeline_shader_driver_id, valid_descriptor_ids, first_set_index, valid_set_count);
+		draw_graph.add_draw_list_bind_uniform_sets(draw_list.state.pipeline_shader_driver_id, valid_descriptor_ids, first_set_index, valid_set_count, batch_has_dynamic_buffers);
 	}
 
 	if (p_use_indices) {
@@ -7006,6 +7017,7 @@ void RenderingDevice::compute_list_dispatch(ComputeListID p_list, uint32_t p_x_g
 	uint32_t first_set_index = 0;
 	uint32_t last_set_index = 0;
 	bool found_first_set = false;
+	bool batch_has_dynamic_buffers = false; // Whether the sets batched so far need the driver's dynamic offsets.
 
 	for (uint32_t i = 0; i < compute_list.state.set_count; i++) {
 		if (compute_list.state.sets[i].pipeline_expected_format == 0) {
@@ -7035,11 +7047,12 @@ void RenderingDevice::compute_list_dispatch(ComputeListID p_list, uint32_t p_x_g
 				// All good, see if this requires re-binding.
 				if (i - last_set_index > 1) {
 					// If the descriptor sets are not contiguous, bind the previous ones and start a new batch.
-					draw_graph.add_compute_list_bind_uniform_sets(compute_list.state.pipeline_shader_driver_id, valid_descriptor_ids, first_set_index, valid_set_count);
+					draw_graph.add_compute_list_bind_uniform_sets(compute_list.state.pipeline_shader_driver_id, valid_descriptor_ids, first_set_index, valid_set_count, batch_has_dynamic_buffers);
 
 					first_set_index = i;
 					valid_set_count = 1;
 					valid_descriptor_ids[0] = compute_list.state.sets[i].uniform_set_driver_id;
+					batch_has_dynamic_buffers = false;
 				} else {
 					// Otherwise, keep storing in the current batch.
 					valid_descriptor_ids[valid_set_count] = compute_list.state.sets[i].uniform_set_driver_id;
@@ -7053,6 +7066,7 @@ void RenderingDevice::compute_list_dispatch(ComputeListID p_list, uint32_t p_x_g
 			UniformSet *uniform_set = uniform_set_owner.get_or_null(compute_list.state.sets[i].uniform_set);
 			_uniform_set_update_shared(uniform_set);
 			_uniform_set_update_clears(uniform_set);
+			batch_has_dynamic_buffers = batch_has_dynamic_buffers || uniform_set->has_dynamic_buffers;
 
 			draw_graph.add_compute_list_usages(uniform_set->draw_trackers, uniform_set->draw_trackers_usage);
 			compute_list.state.sets[i].bound = true;
@@ -7061,7 +7075,7 @@ void RenderingDevice::compute_list_dispatch(ComputeListID p_list, uint32_t p_x_g
 
 	// Bind the remaining batch.
 	if (valid_set_count > 0) {
-		draw_graph.add_compute_list_bind_uniform_sets(compute_list.state.pipeline_shader_driver_id, valid_descriptor_ids, first_set_index, valid_set_count);
+		draw_graph.add_compute_list_bind_uniform_sets(compute_list.state.pipeline_shader_driver_id, valid_descriptor_ids, first_set_index, valid_set_count, batch_has_dynamic_buffers);
 	}
 	draw_graph.add_compute_list_dispatch(p_x_groups, p_y_groups, p_z_groups);
 	compute_list.state.dispatch_count++;
@@ -7146,6 +7160,7 @@ void RenderingDevice::compute_list_dispatch_indirect(ComputeListID p_list, RID p
 	uint32_t first_set_index = 0;
 	uint32_t last_set_index = 0;
 	bool found_first_set = false;
+	bool batch_has_dynamic_buffers = false; // Whether the sets batched so far need the driver's dynamic offsets.
 
 	for (uint32_t i = 0; i < compute_list.state.set_count; i++) {
 		if (compute_list.state.sets[i].pipeline_expected_format == 0) {
@@ -7174,11 +7189,12 @@ void RenderingDevice::compute_list_dispatch_indirect(ComputeListID p_list, RID p
 			// All good, see if this requires re-binding.
 			if (i - last_set_index > 1) {
 				// If the descriptor sets are not contiguous, bind the previous ones and start a new batch.
-				draw_graph.add_compute_list_bind_uniform_sets(compute_list.state.pipeline_shader_driver_id, valid_descriptor_ids, first_set_index, valid_set_count);
+				draw_graph.add_compute_list_bind_uniform_sets(compute_list.state.pipeline_shader_driver_id, valid_descriptor_ids, first_set_index, valid_set_count, batch_has_dynamic_buffers);
 
 				first_set_index = i;
 				valid_set_count = 1;
 				valid_descriptor_ids[0] = compute_list.state.sets[i].uniform_set_driver_id;
+				batch_has_dynamic_buffers = false;
 			} else {
 				// Otherwise, keep storing in the current batch.
 				valid_descriptor_ids[valid_set_count] = compute_list.state.sets[i].uniform_set_driver_id;
@@ -7190,6 +7206,7 @@ void RenderingDevice::compute_list_dispatch_indirect(ComputeListID p_list, RID p
 			UniformSet *uniform_set = uniform_set_owner.get_or_null(compute_list.state.sets[i].uniform_set);
 			_uniform_set_update_shared(uniform_set);
 			_uniform_set_update_clears(uniform_set);
+			batch_has_dynamic_buffers = batch_has_dynamic_buffers || uniform_set->has_dynamic_buffers;
 
 			draw_graph.add_compute_list_usages(uniform_set->draw_trackers, uniform_set->draw_trackers_usage);
 			compute_list.state.sets[i].bound = true;
@@ -7198,7 +7215,7 @@ void RenderingDevice::compute_list_dispatch_indirect(ComputeListID p_list, RID p
 
 	// Bind the remaining batch.
 	if (valid_set_count > 0) {
-		draw_graph.add_compute_list_bind_uniform_sets(compute_list.state.pipeline_shader_driver_id, valid_descriptor_ids, first_set_index, valid_set_count);
+		draw_graph.add_compute_list_bind_uniform_sets(compute_list.state.pipeline_shader_driver_id, valid_descriptor_ids, first_set_index, valid_set_count, batch_has_dynamic_buffers);
 	}
 
 	draw_graph.add_compute_list_dispatch_indirect(buffer->driver_id, p_offset);
