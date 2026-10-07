@@ -1948,6 +1948,43 @@ void RenderForwardClustered::_render_3d_upscaling(const RenderDataRD *p_render_d
 	}
 }
 
+bool RenderForwardClustered::_feeds_fsr_frame_generation(const RenderDataRD *p_render_data) const {
+	Ref<RenderSceneBuffersRD> rb = p_render_data->render_buffers;
+	return rb.is_valid() && p_render_data->reflection_probe.is_null() && rb->has_custom_data(RB_SCOPE_FORWARD_CLUSTERED) && rb->get_view_count() == 1 && rb->get_frame_generation() && RendererRD::FSRFrameGenerationEffect::is_source(rb->get_render_target());
+}
+
+void RenderForwardClustered::_prepare_fsr_frame_generation(const RenderDataRD *p_render_data, double p_time_step) {
+	Ref<RenderSceneBuffersRD> rb = p_render_data->render_buffers;
+	ERR_FAIL_COND(rb.is_null() || !rb->has_velocity_buffer(false));
+
+	real_t fov = p_render_data->scene_data->cam_projection.get_fov();
+	real_t aspect = p_render_data->scene_data->cam_projection.get_aspect();
+	RendererRD::FSRFrameGenerationEffect::Parameters params;
+	params.depth = rb->get_depth_texture(0);
+	params.velocity = rb->get_velocity_buffer(false, 0);
+	params.internal_size = rb->get_internal_size();
+	// Zero without TAA or a temporal upscaler; in pixels, as for FSR2 and DLSS.
+	params.jitter = p_render_data->scene_data->taa_jitter * Vector2(rb->get_internal_size()) * 0.5f;
+	params.z_near = p_render_data->scene_data->z_near;
+	params.z_far = p_render_data->scene_data->z_far;
+	params.fovy = p_render_data->scene_data->cam_projection.get_fovy(fov, 1.0 / aspect);
+	params.delta_time = float(p_time_step);
+
+	Projection correction;
+	correction.set_depth_correction(true, true, false);
+	const Projection &prev_proj = p_render_data->scene_data->prev_cam_projection;
+	const Projection &cur_proj = p_render_data->scene_data->cam_projection;
+	const Transform3D &prev_transform = p_render_data->scene_data->prev_cam_transform;
+	const Transform3D &cur_transform = p_render_data->scene_data->cam_transform;
+	// As for FSR2 and DLSS: relative camera motion first, see camera_reprojection.h.
+	params.reprojection = (correction * prev_proj) * Projection(RendererRD::camera_view_delta(prev_transform, cur_transform)) * (correction * cur_proj).inverse();
+	params.cam_transform = cur_transform;
+
+	RD::get_singleton()->draw_command_begin_label("FSR Frame Generation Prepare");
+	fsr_frame_generation_effect->prepare(params);
+	RD::get_singleton()->draw_command_end_label();
+}
+
 void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Color &p_default_bg_color) {
 	scene_state.used_uniform_buffer_count = 0;
 
@@ -2030,6 +2067,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	Scale3DMode scale_type = _resolve_scale_3d_mode(rb);
 
 	bool using_upscaling = scale_type != SCALE_3D_NONE;
+	const bool feeds_fsr_frame_generation = _feeds_fsr_frame_generation(p_render_data);
 
 	// check if we need motion vectors
 	bool motion_vectors_required;
@@ -2040,6 +2078,8 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	} else if (!is_reflection_probe && using_taa) {
 		motion_vectors_required = true;
 	} else if (!is_reflection_probe && using_upscaling) {
+		motion_vectors_required = true;
+	} else if (feeds_fsr_frame_generation) {
 		motion_vectors_required = true;
 	} else {
 		motion_vectors_required = false;
@@ -2660,7 +2700,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	RD::get_singleton()->draw_command_begin_label("Resolve");
 
 	if (rb_data.is_valid() && use_msaa) {
-		bool resolve_velocity_buffer = (using_taa || using_upscaling || ce_needs_motion_vectors) && rb->has_velocity_buffer(true);
+		bool resolve_velocity_buffer = (using_taa || using_upscaling || ce_needs_motion_vectors || feeds_fsr_frame_generation) && rb->has_velocity_buffer(true);
 		for (uint32_t v = 0; v < rb->get_view_count(); v++) {
 			RD::get_singleton()->texture_resolve_multisample(rb->get_color_msaa(v), rb->get_internal_texture(v));
 			resolve_effects->resolve_depth(rb->get_depth_msaa(v), rb->get_depth_texture(v), rb->get_internal_size(), texture_multisamples[msaa]);
@@ -2687,6 +2727,14 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 
 	if (rb_data.is_valid() && (using_upscaling || using_taa)) {
 		_render_3d_upscaling(p_render_data, scale_type, using_taa, time_step, DLSSRRGuideBuffers());
+	}
+
+	if (scale_type != SCALE_3D_DLSS) {
+		if (feeds_fsr_frame_generation) {
+			_prepare_fsr_frame_generation(p_render_data, time_step);
+		} else if (!is_reflection_probe && RendererRD::FSRFrameGenerationEffect::is_source(rb->get_render_target())) {
+			RendererRD::FSRFrameGenerationEffect::stop();
+		}
 	}
 
 	if (rb_data.is_valid()) {
@@ -5507,6 +5555,7 @@ RenderForwardClustered::RenderForwardClustered() {
 	taa = memnew(RendererRD::TAA);
 	fsr2_effect = memnew(RendererRD::FSR2Effect);
 	dlss_effect = memnew(RendererRD::DLSSEffect);
+	fsr_frame_generation_effect = memnew(RendererRD::FSRFrameGenerationEffect);
 	ss_effects = memnew(RendererRD::SSEffects);
 	motion_vectors_store = memnew(RendererRD::MotionVectorsStore);
 #ifdef METAL_MFXTEMPORAL_ENABLED
@@ -5548,6 +5597,11 @@ RenderForwardClustered::~RenderForwardClustered() {
 	if (dlss_effect) {
 		memdelete(dlss_effect);
 		dlss_effect = nullptr;
+	}
+
+	if (fsr_frame_generation_effect) {
+		memdelete(fsr_frame_generation_effect);
+		fsr_frame_generation_effect = nullptr;
 	}
 
 	RD::get_singleton()->free_rid(shadow_sampler);

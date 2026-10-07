@@ -30,9 +30,14 @@
 
 #include "streamline.h"
 
+#ifdef D3D12_ENABLED
+#include "drivers/d3d12/fsr_frame_generation_d3d12.h"
+#endif
+
 #include "core/config/engine.h"
 #include "core/config/project_settings.h"
 #include "core/object/object.h"
+#include "core/os/os.h"
 #ifdef STREAMLINE_ENABLED
 #include "drivers/streamline/streamline_context.h"
 #endif
@@ -47,6 +52,7 @@ void Streamline::_bind_methods() {
 	BIND_ENUM_CONSTANT(STREAMLINE_PARAM_REFLEX_FRAME_LIMIT_US);
 	BIND_ENUM_CONSTANT(STREAMLINE_PARAM_DLSS_PRESET);
 	BIND_ENUM_CONSTANT(STREAMLINE_PARAM_DLSS_RR_PRESET);
+	BIND_ENUM_CONSTANT(STREAMLINE_PARAM_FRAME_GENERATION_PROVIDER);
 
 	BIND_ENUM_CONSTANT(STREAMLINE_CAPABILITY_DLSS);
 	BIND_ENUM_CONSTANT(STREAMLINE_CAPABILITY_DLSS_G);
@@ -54,6 +60,7 @@ void Streamline::_bind_methods() {
 	BIND_ENUM_CONSTANT(STREAMLINE_CAPABILITY_NIS);
 	BIND_ENUM_CONSTANT(STREAMLINE_CAPABILITY_REFLEX);
 	BIND_ENUM_CONSTANT(STREAMLINE_CAPABILITY_PCL);
+	BIND_ENUM_CONSTANT(STREAMLINE_CAPABILITY_FSR_FRAME_GENERATION);
 }
 
 void Streamline::register_singleton() {
@@ -124,7 +131,9 @@ void Streamline::emit_marker(StreamlineMarkerType marker) {
 			update_project_settings();
 			return;
 		case StreamlineMarkerType::STREAMLINE_MARKER_BEFORE_SWAPCHAIN_CREATION:
-			sl_context.apply_frame_generation_features();
+#ifdef D3D12_ENABLED
+			sl_context.apply_frame_generation_features(FSRFrameGenerationD3D12::is_requested());
+#endif
 			return;
 		case StreamlineMarkerType::STREAMLINE_MARKER_MODIFY_SWAPCHAIN:
 			sl_context.dlssg_disable();
@@ -139,7 +148,7 @@ void Streamline::emit_marker(StreamlineMarkerType marker) {
 			break;
 	}
 
-	if (!sl_context.is_game || !sl_context.streamline_capabilities.reflex_available) {
+	if (!sl_context.is_game || !sl_context.reflex_usable()) {
 		// Make sure we still get frame tokens, needed for DLSS.
 		if (marker == StreamlineMarkerType::STREAMLINE_MARKER_BEFORE_MESSAGE_LOOP) {
 			sl_context.get_new_frame_token();
@@ -254,6 +263,12 @@ void Streamline::set_parameter(StreamlineParameterType p_parameter_type, const V
 			}
 			break;
 		}
+		case StreamlineParameterType::STREAMLINE_PARAM_FRAME_GENERATION_PROVIDER: {
+#ifdef D3D12_ENABLED
+			FSRFrameGenerationD3D12::set_requested(int(p_value) == 1);
+#endif
+			break;
+		}
 		case StreamlineParameterType::STREAMLINE_PARAM_DLSS_RR_PRESET: {
 			if (p_value.is_string()) {
 				String preset = p_value;
@@ -281,6 +296,12 @@ bool Streamline::get_capability(StreamlineCapabilityType p_capability_type) {
 			return StreamlineContext::get().streamline_capabilities.dlss_rr_available;
 		case STREAMLINE_CAPABILITY_NIS:
 			return StreamlineContext::get().streamline_capabilities.nis_available;
+		case STREAMLINE_CAPABILITY_FSR_FRAME_GENERATION:
+#ifdef D3D12_ENABLED
+			return OS::get_singleton()->get_current_rendering_driver_name() == "d3d12" && FSRFrameGenerationD3D12::is_available();
+#else
+			return false;
+#endif
 		case STREAMLINE_CAPABILITY_REFLEX:
 			return StreamlineContext::get().streamline_capabilities.reflex_available;
 		case STREAMLINE_CAPABILITY_PCL:

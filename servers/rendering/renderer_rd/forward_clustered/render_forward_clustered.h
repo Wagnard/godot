@@ -35,6 +35,7 @@
 #include "servers/rendering/renderer_rd/cluster_builder_rd.h"
 #include "servers/rendering/renderer_rd/effects/dlss.h"
 #include "servers/rendering/renderer_rd/effects/fsr2.h"
+#include "servers/rendering/renderer_rd/effects/fsr_frame_generation.h"
 #include "servers/rendering/renderer_rd/effects/motion_vectors_store.h"
 #include "servers/rendering/renderer_rd/effects/ss_effects.h"
 #include "servers/rendering/renderer_rd/effects/taa.h"
@@ -777,6 +778,7 @@ protected:
 	RendererRD::TAA *taa = nullptr;
 	RendererRD::FSR2Effect *fsr2_effect = nullptr;
 	RendererRD::DLSSEffect *dlss_effect = nullptr;
+	RendererRD::FSRFrameGenerationEffect *fsr_frame_generation_effect = nullptr;
 	RendererRD::SSEffects *ss_effects = nullptr;
 
 #ifdef METAL_MFXTEMPORAL_ENABLED
@@ -857,6 +859,11 @@ protected:
 
 	Scale3DMode _resolve_scale_3d_mode(Ref<RenderSceneBuffersRD> p_render_buffers) const;
 	void _render_3d_upscaling(const RenderDataRD *p_render_data, Scale3DMode p_scale_type, bool p_using_taa, double p_time_step, const DLSSRRGuideBuffers &p_dlss_rr);
+	// PROTOTYPE (GODOT_FSR_FG): whether this render feeds FSR frame generation (its motion vectors
+	// are then required), and its inputs once depth and motion vectors are final, after the
+	// temporal pass. With DLSS upscaling the DLSS pass hands them over instead.
+	bool _feeds_fsr_frame_generation(const RenderDataRD *p_render_data) const;
+	void _prepare_fsr_frame_generation(const RenderDataRD *p_render_data, double p_time_step);
 	virtual void _free_rt_viewport_state(RenderSceneBuffersRD *p_render_buffers);
 
 	virtual void _render_material(const Transform3D &p_cam_transform, const Projection &p_cam_projection, bool p_cam_orthogonal, const PagedArray<RenderGeometryInstance *> &p_instances, RID p_framebuffer, const Rect2i &p_region, float p_exposure_normalization) override;

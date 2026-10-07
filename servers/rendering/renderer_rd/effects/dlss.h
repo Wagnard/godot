@@ -96,11 +96,15 @@ public:
 	bool is_ready(DLSSContext *context);
 
 	// Frame generation's HUD-less color (RendererCompositorRD::capture_hudless()): whether a
-	// frame generator (DLSS-G) runs and wants one, and the back-buffer-sized
+	// frame generator (DLSS-G, or FSR's prototype) runs and wants one, and the back-buffer-sized
 	// copy the compositor keeps for it, null when there is none. Render thread only; the compositor
 	// asks once per frame, after the 3D pass (it consumes the DLSS pass's request).
 	static bool frame_generation_wants_hudless();
 	static void set_frame_generation_hudless(RID p_hudless, RID p_ui_alpha);
+	static RID get_frame_generation_hudless();
+	// Whether the frame generator reads the HUD-less color after the next frame has started (FSR's
+	// async workloads): the compositor then alternates two of them.
+	static bool frame_generation_hudless_double_buffered();
 
 private:
 	void _upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext::Parameters &p_params);

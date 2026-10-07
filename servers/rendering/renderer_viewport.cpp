@@ -336,12 +336,17 @@ void RendererViewport::_draw_3d(Viewport *p_viewport) {
 		}
 	}
 
+	// Only a viewport shown on a window can be the one a frame generator generates.
+	const bool shown_on_window = p_viewport->viewport_to_screen != DisplayServerEnums::INVALID_WINDOW_ID && p_viewport->view_count == 1 && xr_interface.is_null();
+
 	float screen_mesh_lod_threshold = p_viewport->mesh_lod_threshold / float(p_viewport->size.width);
+	RSG::rasterizer->set_frame_generation_source(shown_on_window && p_viewport->viewport_to_screen == DisplayServerEnums::MAIN_WINDOW_ID ? p_viewport->render_target : RID());
 	RSG::scene->render_camera(p_viewport->render_buffers, p_viewport->camera, p_viewport->scenario, p_viewport->self, p_viewport->internal_size, p_viewport->jitter_phase_count, screen_mesh_lod_threshold, p_viewport->shadow_atlas, xr_interface, p_viewport->window_output_max_value, &p_viewport->render_info);
+	RSG::rasterizer->set_frame_generation_source(RID());
 
 	// The render target holds the finished 3D image and no canvas yet: what a frame generator
-	// calls the HUD-less color. Only a viewport shown on a window can be the one it generates.
-	if (p_viewport->viewport_to_screen != DisplayServerEnums::INVALID_WINDOW_ID && p_viewport->view_count == 1 && xr_interface.is_null()) {
+	// calls the HUD-less color.
+	if (shown_on_window) {
 		RSG::rasterizer->capture_hudless(p_viewport->render_target, p_viewport->viewport_to_screen);
 	}
 

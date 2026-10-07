@@ -109,14 +109,19 @@ protected:
 
 	HashMap<RID, RID> render_target_descriptors;
 
-	// Frame generation's HUD-less color, see capture_hudless(). One for the main window: DLSS-G
-	// only generates frames there.
+	// Frame generation's HUD-less color, see capture_hudless(). One for the main window: DLSS-G and
+	// the FSR prototype only generate frames there.
 	struct Hudless {
 		RID render_target; // The render target captured this frame.
 		uint64_t captured_frame = UINT64_MAX;
 		RID pre_ui; // Copy of that render target before its canvas: its size and format.
 		RID pre_ui_uniform_set;
-		RID screen; // pre_ui blitted exactly like the back buffer: its size, format, color space.
+		// pre_ui blitted exactly like the back buffer: its size, format, color space. Two, alternated,
+		// when the frame generator still reads the previous one during the next frame (FSR async).
+		RID screens[2];
+		RID screen_framebuffers[2];
+		uint32_t screen_index = 0;
+		RID screen; // screens[screen_index], this frame's.
 		RID screen_framebuffer;
 		RID ui_alpha; // Back-buffer-sized R16F: 1 where the canvas changed the frame (DLSS-G's UI alpha).
 		RID ui_alpha_framebuffer;
@@ -125,6 +130,7 @@ protected:
 	} hudless;
 
 	void _free_hudless();
+	void _free_hudless_screens();
 	void _blit_hudless(DisplayServerEnums::WindowID p_screen, BlitMode p_mode);
 	static void _hudless_ready_callback(RenderingDeviceDriver *, RDD::CommandBufferID, void *) {}
 
@@ -146,6 +152,7 @@ public:
 	virtual RendererParticlesStorage *get_particles_storage() override { return particles_storage; }
 	virtual RendererTextureStorage *get_texture_storage() override { return texture_storage; }
 	virtual void capture_hudless(RID p_render_target, DisplayServerEnums::WindowID p_screen) override;
+	virtual void set_frame_generation_source(RID p_render_target) override;
 	virtual RendererGI *get_gi() override {
 		ERR_FAIL_NULL_V(scene, nullptr);
 		return scene->get_gi();

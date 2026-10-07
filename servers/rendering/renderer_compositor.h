@@ -83,6 +83,9 @@ public:
 	// Frame generation: called right after a viewport's 3D pass, before any canvas is drawn on its
 	// render target. A renderer that feeds a frame generator a HUD-less image copies it here.
 	virtual void capture_hudless(RID p_render_target, DisplayServerEnums::WindowID p_screen) {}
+	// Frame generation: set around a viewport's 3D pass to its render target when that viewport is
+	// shown on the main window (the one a frame generator generates), to null otherwise.
+	virtual void set_frame_generation_source(RID p_render_target) {}
 
 	virtual bool is_opengl() = 0;
 	virtual void gl_end_frame(bool p_swap_buffers) = 0;

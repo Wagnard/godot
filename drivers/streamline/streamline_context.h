@@ -106,11 +106,12 @@ public:
 
 	void dlssg_disable();
 
-	// D3D12, right before a swap chain is created: loads or unloads DLSS-G for it
-	// (slSetFeatureLoaded), loaded only while frame generation is wanted. DLSS-G guide, section 18: a
-	// swap chain created with DLSS-G unloaded is the native one, without its off-screen copy and
-	// extra queue.
-	void apply_frame_generation_features();
+	// D3D12, right before a swap chain is created: loads or unloads DLSS-G, Reflex and PCL for it
+	// (slSetFeatureLoaded). Under AMD FSR none of them; under DLSS-G, Reflex and PCL, and DLSS-G
+	// only while frame generation is wanted (DLSS-G guide, section 18: a swap chain created with
+	// DLSS-G unloaded is the native one, without its off-screen copy and extra queue).
+	void apply_frame_generation_features(bool p_fsr);
+	bool reflex_usable() const { return streamline_capabilities.reflex_available && reflex_loaded; }
 
 	static void initialize(bool d3d12);
 
@@ -141,6 +142,7 @@ public:
 	// DLSS-G loaded for the current swap chain, and wanted for the next one (dlss.cpp, D3D12).
 	bool dlssg_loaded = true;
 	bool dlssg_wanted = false;
+	bool reflex_loaded = true; // Reflex and PCL together.
 	bool is_d3d12 = false;
 
 #if STREAMLINE_ENABLED_VULKAN

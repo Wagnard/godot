@@ -34,6 +34,10 @@
 
 #include "core/io/dir_access.h"
 
+#ifdef D3D12_ENABLED
+#include "drivers/d3d12/fsr_frame_generation_d3d12.h"
+#endif
+
 #ifdef STREAMLINE_ENABLED
 #ifdef _WIN32
 #include <windows.h>
@@ -176,30 +180,54 @@ void StreamlineContext::init_device_d3d12(void *d3d12_device) {
 	if (!is_game) \
 		return;
 
-void StreamlineContext::apply_frame_generation_features() {
+void StreamlineContext::apply_frame_generation_features(bool p_fsr) {
 	STREAMLINE_GAME_ONLY;
 	if (!is_d3d12 || !slSetFeatureLoaded) {
 		return;
 	}
-	const bool want_dlssg = dlssg_wanted && streamline_capabilities.dlss_g_available;
-	if (want_dlssg == dlssg_loaded) {
+	const bool want_dlssg = !p_fsr && dlssg_wanted && streamline_capabilities.dlss_g_available;
+	const bool want_reflex = !p_fsr;
+	if (want_dlssg == dlssg_loaded && want_reflex == reflex_loaded) {
 		return;
 	}
 	// Streamline: the pipeline is flushed (RenderingDevice stalls before resizing a swap chain) and
-	// no other DXGI/D3D call runs meanwhile (render thread).
-	if (!want_dlssg && (uint32_t)dlssg_viewport != UINT_MAX) {
-		dlssg_disable();
+	// no other DXGI/D3D call runs meanwhile (render thread). Unloaded features are unhooked and their
+	// functions unusable: the pointers are fetched again below for the loaded ones.
+	if (want_dlssg != dlssg_loaded) {
+		if (!want_dlssg && (uint32_t)dlssg_viewport != UINT_MAX) {
+			dlssg_disable();
+		}
+		slSetFeatureLoaded(sl::kFeatureDLSS_G, want_dlssg);
+		dlssg_loaded = want_dlssg;
 	}
-	slSetFeatureLoaded(sl::kFeatureDLSS_G, want_dlssg);
-	dlssg_loaded = want_dlssg;
-	// Unloaded, a feature is unhooked and its functions unusable; loaded again, they are fetched anew.
+	if (want_reflex != reflex_loaded) {
+		slSetFeatureLoaded(sl::kFeatureReflex, want_reflex);
+		slSetFeatureLoaded(sl::kFeaturePCL, want_reflex);
+		reflex_loaded = want_reflex;
+		// Re-applied by the next frame's marker once loaded again.
+		reflex_options_dirty = want_reflex;
+		pcl_options_dirty = want_reflex;
+	}
 	slDLSSGGetState = nullptr;
 	slDLSSGSetOptions = nullptr;
-	if (dlssg_loaded && slGetFeatureFunction) {
-		slGetFeatureFunction(sl::kFeatureDLSS_G, "slDLSSGGetState", (void *&)this->slDLSSGGetState);
-		slGetFeatureFunction(sl::kFeatureDLSS_G, "slDLSSGSetOptions", (void *&)this->slDLSSGSetOptions);
+	slReflexSetOptions = nullptr;
+	slReflexSleep = nullptr;
+	slReflexGetState = nullptr;
+	slPCLSetMarker = nullptr;
+	slPCLSetOptions = nullptr;
+	load_functions_post_init();
+	if (!dlssg_loaded) {
+		slDLSSGGetState = nullptr;
+		slDLSSGSetOptions = nullptr;
 	}
-	print_line(vformat("Streamline: DLSS-G %s for the next swap chain.", dlssg_loaded ? "loaded" : "unloaded"));
+	if (!reflex_loaded) {
+		slReflexSetOptions = nullptr;
+		slReflexSleep = nullptr;
+		slReflexGetState = nullptr;
+		slPCLSetMarker = nullptr;
+		slPCLSetOptions = nullptr;
+	}
+	print_line(vformat("Streamline: DLSS-G %s, Reflex and PCL %s for the next swap chain.", dlssg_loaded ? "loaded" : "unloaded", reflex_loaded ? "loaded" : "unloaded"));
 }
 
 void StreamlineContext::dlssg_disable() {
@@ -402,8 +430,11 @@ void StreamlineContext::initialize(bool d3d12) {
 
 	StreamlineContext::get().is_d3d12 = d3d12;
 	if (StreamlineContext::get().is_game) {
-		// Always requested: a feature not requested here can never be loaded later. On D3D12,
-		// sl.dlss_g is then only loaded while frame generation is on (apply_frame_generation_features()).
+		// Always requested: a feature not requested here can never be loaded later. On D3D12 they
+		// are then loaded and unloaded per swap chain (apply_frame_generation_features()): with sl.dlss_g
+		// unloaded Streamline hands back a swap chain AMD's frame generation proxy can own (both
+		// together would generate frames twice), and Reflex and PCL are unloaded under AMD FSR too:
+		// NVIDIA's guidelines make Reflex unavailable under another vendor's frame generation.
 		featuresToLoad.push_back(sl::kFeaturePCL);
 		featuresToLoad.push_back(sl::kFeatureReflex);
 		featuresToLoad.push_back(sl::kFeatureDLSS_G);

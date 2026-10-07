@@ -38,6 +38,10 @@
 #include "drivers/streamline/streamline.h"
 #include "drivers/streamline/streamline_context.h"
 #include "servers/rendering/renderer_rd/effects/camera_reprojection.h"
+
+#ifdef D3D12_ENABLED
+#include "drivers/d3d12/fsr_frame_generation_d3d12.h"
+#endif
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
 
@@ -67,16 +71,33 @@ void RendererRD::DLSSEffect::set_frame_generation_hudless(RID p_hudless, RID p_u
 	frame_generation_ui_alpha = p_ui_alpha;
 }
 
+RID RendererRD::DLSSEffect::get_frame_generation_hudless() {
+	return frame_generation_hudless;
+}
+
+bool RendererRD::DLSSEffect::frame_generation_hudless_double_buffered() {
+#if defined(ENABLE_DLSS) && defined(D3D12_ENABLED)
+	return FSRFrameGenerationD3D12::is_generating() && FSRFrameGenerationD3D12::uses_async_workloads();
+#else
+	return false;
+#endif
+}
+
 using namespace RendererRD;
 
 #ifdef ENABLE_DLSS
 // DLSS-G asked for by the last frame drawn (Viewport.frame_generation), enabled or not yet.
 static bool frame_generation_dlssg_requested = false;
 
-// DLSS-G can be asked for: a game, on hardware that supports it.
-static bool dlssg_available() {
+// DLSS-G can be asked for: a game on hardware that supports it, with DLSS-G (not AMD FSR) as the
+// frame generation provider.
+static bool dlssg_is_provider() {
 	const StreamlineContext &sl = StreamlineContext::get();
-	return sl.is_game && sl.streamline_capabilities.dlss_g_available;
+	bool provider = sl.is_game && sl.streamline_capabilities.dlss_g_available;
+#ifdef D3D12_ENABLED
+	provider = provider && !FSRFrameGenerationD3D12::is_requested();
+#endif
+	return provider;
 }
 
 // Texture layout/state constants (avoid including Vulkan/D3D12 headers here).
@@ -667,13 +688,13 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext
 		// buffer's color space (RendererCompositorRD::capture_hudless()). Its content is written
 		// later in this frame, after the canvas; that is allowed for eValidUntilPresent, whose
 		// content and state only have to be right at Present. The compositor ends the frame with
-		// the texture in the state assignResource() declares (on D3D12, GENERAL: COMMON).
+		// the texture sampled, so the read state assignResource() declares is the one it is in.
 		// Without one -- DLSS-G off, a frame where nothing was captured -- the tag is nulled, as
 		// the guide requires before the resource can go away.
 		// With it, the UI alpha (1 where the canvas changed the frame), which lets DLSS-G interpolate
 		// the scene and the UI separately and recompose them (enableUserInterfaceRecomposition, set
 		// below): the HUD-less color alone only attenuates HUD distortion.
-		const bool dlssg_requested = p_params.dlss_g && dlssg_available();
+		const bool dlssg_requested = p_params.dlss_g && dlssg_is_provider();
 		frame_generation_dlssg_requested = dlssg_requested;
 		if ((dlssg_requested || StreamlineContext::get().dlssg_viewport == context->viewport) && frame_generation_hudless.is_valid() && frame_generation_ui_alpha.is_valid()) {
 			assignResource(resources, resourceTags, numResources, frame_generation_hudless, sl::kBufferTypeHUDLessColor, sl::ResourceLifecycle::eValidUntilPresent);
@@ -694,7 +715,7 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext
 	// Toggle DLSS Frame Generation (only enabled in game mode). On D3D12, sl.dlss_g is only loaded
 	// while frame generation is wanted (see the end of this block): until the swap chain has been
 	// recreated with it, slDLSSGSetOptions is null and this waits.
-	if (StreamlineContext::get().slDLSSGSetOptions != nullptr && dlssg_available() && StreamlineContext::get().dlssg_loaded) {
+	if (StreamlineContext::get().slDLSSGSetOptions != nullptr && dlssg_is_provider() && StreamlineContext::get().dlssg_loaded) {
 		sl::DLSSGOptions dlssGOptions{};
 		bool wantActivateDLSSG = p_params.dlss_g;
 		bool canActivateDLSSG = StreamlineContext::get().dlssg_delay == 0;
@@ -786,7 +807,7 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext
 	// switched on or off, with sl.dlss_g loaded only while it is on; loaded but off, it renders
 	// off-screen and copies every frame. Asked here, done by the D3D12 driver before its next
 	// Present (Streamline::get_swap_chain_serial(), STREAMLINE_MARKER_BEFORE_SWAPCHAIN_CREATION).
-	if (context->is_d3d12 && dlssg_available()) {
+	if (context->is_d3d12 && dlssg_is_provider()) {
 		StreamlineContext &sl = StreamlineContext::get();
 		if (p_params.dlss_g && !sl.dlssg_wanted) {
 			sl.dlssg_wanted = true;
@@ -861,6 +882,45 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext
 			}
 		}
 	}
+
+#ifdef D3D12_ENABLED
+	// PROTOTYPE (GODOT_FSR_FG): AMD FSR frame generation on top of DLSS upscaling. Depth and the
+	// motion vectors (decoded in place above, no (-1,-1) sentinel left) are final here, and the
+	// frame is presented right after this callback's command list is executed.
+	if (context->is_d3d12 && FSRFrameGenerationD3D12::is_requested() && !p_params.dlss_g) {
+		// Viewport.frame_generation off: no generation, context released.
+		FSRFrameGenerationD3D12::stop_generating();
+	} else if (context->is_d3d12 && FSRFrameGenerationD3D12::is_requested()) {
+		FSRFrameGenerationD3D12::PrepareParams fg;
+		fg.native_command_list = nativeCmdlist;
+		fg.depth_resource = RD::get_singleton()->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_TEXTURE, p_params.depth);
+		fg.motion_vectors_resource = RD::get_singleton()->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_TEXTURE, p_params.velocity);
+		fg.render_width = p_params.internal_size.width;
+		fg.render_height = p_params.internal_size.height;
+		fg.jitter_x = p_params.jitter.x;
+		fg.jitter_y = p_params.jitter.y;
+		fg.frame_time_delta_ms = p_params.delta_time * 1000.0f;
+		fg.camera_near = p_params.z_near;
+		fg.camera_far = p_params.z_far;
+		fg.fov_vertical_radians = Math::deg_to_rad(p_params.fovy);
+		fg.depth_inverted = p_params.reverse_depth;
+		if (frame_generation_hudless.is_valid()) {
+			fg.hudless_resource = RD::get_singleton()->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_TEXTURE, frame_generation_hudless);
+		}
+		const Basis &fg_basis = p_params.cam_transform.get_basis();
+		const Vector3 fg_origin = p_params.cam_transform.get_origin();
+		const Vector3 fg_up = fg_basis.get_column(1).normalized();
+		const Vector3 fg_right = fg_basis.get_column(0).normalized();
+		const Vector3 fg_forward = (-fg_basis.get_column(2)).normalized();
+		for (int i = 0; i < 3; i++) {
+			fg.camera_position[i] = fg_origin[i];
+			fg.camera_up[i] = fg_up[i];
+			fg.camera_right[i] = fg_right[i];
+			fg.camera_forward[i] = fg_forward[i];
+		}
+		FSRFrameGenerationD3D12::prepare(fg);
+	}
+#endif
 }
 
 void RendererRD::DLSSEffect::_upscale_internal_graph_callback(RenderingDeviceDriver *p_driver, RDD::CommandBufferID p_command_buffer, void *p_userdata) {
@@ -869,6 +929,11 @@ void RendererRD::DLSSEffect::_upscale_internal_graph_callback(RenderingDeviceDri
 }
 
 bool DLSSEffect::frame_generation_wants_hudless() {
+#ifdef D3D12_ENABLED
+	if (FSRFrameGenerationD3D12::is_generating()) {
+		return true;
+	}
+#endif
 	// From the request on, not only once DLSS-G runs: it is enabled after a delay of several frames
 	// (dlssg_delay), by which time the HUD-less color and UI alpha are tagged and DLSS-G can start
 	// with UI recomposition. Turning recomposition on afterwards makes NGX recreate the feature, and

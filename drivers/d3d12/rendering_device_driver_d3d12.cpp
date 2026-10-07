@@ -30,6 +30,8 @@
 
 #include "rendering_device_driver_d3d12.h"
 
+#include "fsr_frame_generation_d3d12.h"
+
 #include "core/config/engine.h"
 #include "core/config/project_settings.h"
 #include "core/os/os.h"
@@ -2297,6 +2299,7 @@ static D3D12_BARRIER_LAYOUT _rd_texture_layout_to_d3d12_barrier_layout(RDD::Text
 static D3D12_RESOURCE_STATES _callback_layout_to_legacy_state(RDD::TextureLayout p_layout) {
 	switch (p_layout) {
 		case RDD::TEXTURE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+			// What Streamline's DLSS guide requires for inputs, and FidelityFX's COMPUTE_READ.
 			return D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 		case RDD::TEXTURE_LAYOUT_STORAGE_OPTIMAL:
 			return D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
@@ -2315,7 +2318,7 @@ static D3D12_RESOURCE_STATES _callback_layout_to_legacy_state(RDD::TextureLayout
 		case RDD::TEXTURE_LAYOUT_RESOLVE_DST_OPTIMAL:
 			return D3D12_RESOURCE_STATE_RESOLVE_DEST;
 		case RDD::TEXTURE_LAYOUT_GENERAL:
-			// Textures handed to Streamline, announced in COMMON (see _check_capabilities()).
+			// Textures handed to Streamline and FidelityFX, announced in COMMON (see _check_capabilities()).
 			return D3D12_RESOURCE_STATE_COMMON;
 		default:
 			return (D3D12_RESOURCE_STATES)-1;
@@ -2329,12 +2332,10 @@ void RenderingDeviceDriverD3D12::command_prepare_callback_textures(CommandBuffer
 
 	CommandBufferInfo *cmd_buf_info = (CommandBufferInfo *)p_cmd_buffer.id;
 
-	// The legacy model only transitions on Godot's own commands, and a driver callback is not one:
-	// its textures would arrive in whatever state the last command left them, while the callback's
-	// code (Streamline) was told another. The batched transitions are lazy and may merge states (a
-	// texture already in ALL_SHADER_RESOURCE counts as being in NON_PIXEL_SHADER_RESOURCE), so
-	// settle the pending batch, then transition explicitly to the exact state announced and record
-	// it, which the callback's code restores before it returns.
+	// The batched transitions are lazy and may merge states (a texture already in
+	// ALL_SHADER_RESOURCE counts as being in NON_PIXEL_SHADER_RESOURCE). The callback needs the
+	// exact state it will announce, so settle the pending batch, then transition explicitly and
+	// record the new state, which the callback's code restores before it returns.
 	_resource_transitions_flush(cmd_buf_info);
 
 	thread_local LocalVector<D3D12_RESOURCE_BARRIER> barriers;
@@ -2660,6 +2661,10 @@ Error RenderingDeviceDriverD3D12::command_queue_execute_and_present(CommandQueue
 			// Recreated by the next frame's swap_chain_resize(), after RenderingDevice's stall.
 			context_driver->surface_set_needs_resize(swap_chain->surface, true);
 		}
+		// PROTOTYPE (GODOT_FSR_FG): no generation from a stale configuration; and AMD's proxy Present
+		// busy-waits for the previous frame, so block here instead.
+		FSRFrameGenerationD3D12::before_present(swap_chain->d3d_swap_chain.Get());
+		FSRFrameGenerationD3D12::wait_before_present(swap_chain->d3d_swap_chain.Get());
 		res = swap_chain->d3d_swap_chain->Present(swap_chain->sync_interval, swap_chain->present_flags);
 		if (!SUCCEEDED(res)) {
 			print_verbose(vformat("D3D12: Presenting swapchain failed with error 0x%08ux.", (uint64_t)res));
@@ -2836,6 +2841,11 @@ void RenderingDeviceDriverD3D12::_swap_chain_release(SwapChain *p_swap_chain) {
 		p_swap_chain->render_pass = RenderPassID();
 	}
 
+	if (p_swap_chain->d3d_swap_chain) {
+		// PROTOTYPE (GODOT_FSR_FG): the frame generation and swap chain contexts go first; dropping
+		// the reference below then runs the AMD proxy's destructor.
+		FSRFrameGenerationD3D12::release_swap_chain(p_swap_chain->d3d_swap_chain.Get());
+	}
 	p_swap_chain->d3d_swap_chain.Reset();
 }
 
@@ -2945,7 +2955,7 @@ Error RenderingDeviceDriverD3D12::swap_chain_resize(CommandQueueID p_cmd_queue, 
 
 	if (swap_chain->d3d_swap_chain != nullptr && (creation_flags != swap_chain->creation_flags || new_data_format != swap_chain->data_format || swap_chain->frame_generation_serial != Streamline::get_singleton()->get_swap_chain_serial())) {
 		// The swap chain must be recreated if the creation flags or data format are different, or
-		// when frame generation needs another kind of swap chain (DLSS-G loaded or unloaded).
+		// when frame generation needs another kind of swap chain (provider switched, DLSS-G on/off).
 		_swap_chain_release(swap_chain);
 	}
 
@@ -2963,6 +2973,8 @@ Error RenderingDeviceDriverD3D12::swap_chain_resize(CommandQueueID p_cmd_queue, 
 	DXGI_SWAP_CHAIN_DESC1 swap_chain_desc = {};
 	if (swap_chain->d3d_swap_chain != nullptr) {
 		_swap_chain_release_buffers(swap_chain);
+		// PROTOTYPE (GODOT_FSR_FG): AMD's frame generation context goes before the old back buffers.
+		FSRFrameGenerationD3D12::before_resize(swap_chain->d3d_swap_chain.Get());
 		res = swap_chain->d3d_swap_chain->ResizeBuffers(p_desired_framebuffer_count, surface->width, surface->height, DXGI_FORMAT_UNKNOWN, creation_flags);
 		if (!SUCCEEDED(res)) {
 			_report_device_removed("swap_chain_resize");
@@ -2991,7 +3003,7 @@ Error RenderingDeviceDriverD3D12::swap_chain_resize(CommandQueueID p_cmd_queue, 
 		swap_chain_desc.Width = surface->width;
 		swap_chain_desc.Height = surface->height;
 
-		// Streamline loads or unloads DLSS-G for this swap chain (DLSS-G guide, section 18).
+		// Streamline loads or unloads DLSS-G, Reflex and PCL for this swap chain.
 		swap_chain->frame_generation_serial = Streamline::get_singleton()->get_swap_chain_serial();
 		Streamline::get_singleton()->emit_marker(STREAMLINE_MARKER_BEFORE_SWAPCHAIN_CREATION);
 
@@ -3007,7 +3019,14 @@ Error RenderingDeviceDriverD3D12::swap_chain_resize(CommandQueueID p_cmd_queue, 
 				res = context_driver->dxgi_factory_get()->CreateSwapChainForHwnd(command_queue->d3d_queue.Get(), surface->hwnd, &swap_chain_desc, nullptr, nullptr, swap_chain_1.GetAddressOf());
 			}
 		} else {
-			res = context_driver->dxgi_factory_get()->CreateSwapChainForHwnd(command_queue->d3d_queue.Get(), surface->hwnd, &swap_chain_desc, nullptr, nullptr, swap_chain_1.GetAddressOf());
+			// PROTOTYPE (GODOT_FSR_FG): AMD's proxy swap chain for this window, or a plain one.
+			void *fsr_swap_chain = nullptr;
+			if (FSRFrameGenerationD3D12::create_swap_chain(surface->hwnd, &swap_chain_desc, context_driver->dxgi_factory_get(), command_queue->d3d_queue.Get(), device.Get(), &fsr_swap_chain)) {
+				swap_chain_1.Attach((IDXGISwapChain1 *)(IDXGISwapChain4 *)fsr_swap_chain);
+				res = S_OK;
+			} else {
+				res = context_driver->dxgi_factory_get()->CreateSwapChainForHwnd(command_queue->d3d_queue.Get(), surface->hwnd, &swap_chain_desc, nullptr, nullptr, swap_chain_1.GetAddressOf());
+			}
 		}
 
 		ERR_FAIL_COND_V(!SUCCEEDED(res), ERR_CANT_CREATE);
@@ -6550,12 +6569,13 @@ Error RenderingDeviceDriverD3D12::_check_capabilities() {
 		barrier_capabilities.enhanced_barriers_supported = options12.EnhancedBarriersSupported;
 	}
 
-	// Streamline (DLSS, DLSS-RR, NIS, DLSS-G) is handed textures with a legacy D3D12_RESOURCE_STATES
-	// and transitions them with ResourceBarrier. D3D12 only allows mixing that with enhanced barriers
-	// on a resource in the COMMON layout: the textures handed to it are declared
+	// Streamline (DLSS, DLSS-RR, NIS, DLSS-G) and FidelityFX are handed textures with a legacy
+	// D3D12_RESOURCE_STATES and transition them with ResourceBarrier. D3D12 only allows mixing that with
+	// enhanced barriers on a resource in the COMMON layout: the textures handed to them are declared
 	// CALLBACK_RESOURCE_USAGE_GENERAL (RDD::TEXTURE_LAYOUT_GENERAL, D3D12_BARRIER_LAYOUT_COMMON) and
-	// announced in D3D12_RESOURCE_STATE_COMMON (effects/dlss.cpp). Enhanced barriers stay on: the
-	// legacy model's per-command state tracking costs the render thread measurably more CPU.
+	// announced in D3D12_RESOURCE_STATE_COMMON (dlss.cpp, fsr_frame_generation*.cpp,
+	// RendererCompositorRD::_blit_hudless()). Enhanced barriers stay on: the legacy model's per-command
+	// state tracking cost the render thread measurably more CPU in MySupCom.
 
 	D3D12_FEATURE_DATA_D3D12_OPTIONS19 options19 = {};
 	res = device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS19, &options19, sizeof(options19));

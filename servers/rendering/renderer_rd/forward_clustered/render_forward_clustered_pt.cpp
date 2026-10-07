@@ -98,8 +98,10 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 	Scale3DMode scale_type = _resolve_scale_3d_mode(rb);
 	bool using_upscaling = scale_type != SCALE_3D_NONE;
 
+	const bool feeds_fsr_frame_generation = _feeds_fsr_frame_generation(p_render_data);
+
 	// Motion vectors are produced by the path tracer (rt_velocity_image)
-	bool motion_vectors_required = using_debug_mvs || ce_needs_motion_vectors || using_taa || using_upscaling;
+	bool motion_vectors_required = using_debug_mvs || ce_needs_motion_vectors || using_taa || using_upscaling || feeds_fsr_frame_generation;
 
 	p_render_data->scene_data->calculate_motion_vectors = motion_vectors_required;
 	p_render_data->scene_data->directional_light_count = 0;
@@ -482,6 +484,14 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 			dlss_rr_guides.specular_hit_dist = raytracing->dlss_rr_get_specular_hit_dist(rb.ptr());
 		}
 		_render_3d_upscaling(p_render_data, scale_type, using_taa, time_step, dlss_rr_guides);
+	}
+
+	if (scale_type != SCALE_3D_DLSS) {
+		if (feeds_fsr_frame_generation) {
+			_prepare_fsr_frame_generation(p_render_data, time_step);
+		} else if (RendererRD::FSRFrameGenerationEffect::is_source(rb->get_render_target())) {
+			RendererRD::FSRFrameGenerationEffect::stop();
+		}
 	}
 
 	_debug_draw_cluster(rb);
