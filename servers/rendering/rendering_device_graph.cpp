@@ -31,6 +31,7 @@
 #include "rendering_device_graph.h"
 
 #include "core/os/os.h"
+#include "core/templates/hash_set.h"
 
 #define PRINT_RENDER_GRAPH 0
 #define FORCE_FULL_ACCESS_BITS 0
@@ -1551,6 +1552,8 @@ uint32_t RenderingDeviceGraph::_plan_parallel_slices(const RecordedCommandSort *
 	uint32_t parallel_end = p_sorted_commands_count;
 	uint64_t total_cost = 0;
 	uint64_t callbacks_cost = 0;
+	thread_local HashSet<uint64_t> update_targets;
+	update_targets.clear();
 	for (uint32_t i = 0; i < p_sorted_commands_count; i++) {
 		const RecordedCommand *command = reinterpret_cast<const RecordedCommand *>(&command_data[command_data_offsets[p_sorted_commands[i].index]]);
 		uint32_t cost = COMMAND_COST;
@@ -1563,7 +1566,13 @@ uint32_t RenderingDeviceGraph::_plan_parallel_slices(const RecordedCommandSort *
 				cost = RENDER_PASS_COST + draw_list_command->instruction_data_size + PIPELINE_COST * draw_list_command->pipeline_count;
 			} break;
 			case RecordedCommand::TYPE_BUFFER_UPDATE: {
-				cost = COPY_COST * MAX(reinterpret_cast<const RecordedBufferUpdateCommand *>(command)->buffer_copies_count, 1u);
+				const RecordedBufferUpdateCommand *update_command = reinterpret_cast<const RecordedBufferUpdateCommand *>(command);
+				cost = COPY_COST * MAX(update_command->buffer_copies_count, 1u);
+				if (parallel_stats) {
+					parallel_stats_data.buffer_updates++;
+					parallel_stats_data.buffer_update_copies += update_command->buffer_copies_count;
+					update_targets.insert(update_command->destination.id);
+				}
 			} break;
 			case RecordedCommand::TYPE_TEXTURE_UPDATE: {
 				cost = COPY_COST * MAX(reinterpret_cast<const RecordedTextureUpdateCommand *>(command)->buffer_to_texture_copies_count, 1u);
@@ -1592,6 +1601,7 @@ uint32_t RenderingDeviceGraph::_plan_parallel_slices(const RecordedCommandSort *
 
 	if (parallel_stats) {
 		parallel_stats_data.size += total_cost;
+		parallel_stats_data.buffer_update_targets += update_targets.size();
 	}
 
 	// The callbacks alone don't make a frame worth splitting: they stay on the calling thread anyway.
@@ -3624,7 +3634,7 @@ void RenderingDeviceGraph::end(bool p_reorder_commands, bool p_full_barriers, RD
 
 		if (st.frames == 240) {
 			const uint64_t n = st.frames;
-			print_line(vformat("RenderingDeviceGraph: driver callbacks %d us/frame, join after the last worker slice %d us/frame.", st.callback_usec / n, st.join_usec / n));
+			print_line(vformat("RenderingDeviceGraph: driver callbacks %d us/frame, join after the last worker slice %d us/frame; buffer updates %.1f/frame (%.1f copies into %.1f distinct buffers).", st.callback_usec / n, st.join_usec / n, double(st.buffer_updates) / n, double(st.buffer_update_copies) / n, double(st.buffer_update_targets) / n));
 			print_line(vformat("RenderingDeviceGraph: end() %d us/frame = prepare %d + own slices %d + wait %d + serial %d (+ rest %d); %d KiB-equivalent of commands/frame; split %d of %d frames, %.2f slices/frame (up to %d), %.2f on the render thread, %.2f draw list cuts/frame.",
 					st.end_usec / n, st.prepare_usec / n, st.calling_usec / n, st.wait_usec / n, st.serial_usec / n,
 					(st.end_usec - st.prepare_usec - st.calling_usec - st.wait_usec - st.serial_usec) / n,

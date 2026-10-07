@@ -949,6 +949,9 @@ private:
 		uint64_t serial_usec = 0; // Serial recording (the whole frame when not split, the tail otherwise).
 		uint64_t callback_usec = 0; // Driver callbacks (Streamline), whichever slice holds them.
 		uint64_t join_usec = 0; // From the end of the last worker slice to the calling thread's return from the wait.
+		uint64_t buffer_updates = 0; // Buffer update commands, their copies and the distinct buffers they write.
+		uint64_t buffer_update_copies = 0;
+		uint64_t buffer_update_targets = 0;
 		uint64_t size = 0;
 		uint64_t slices = 0;
 		uint64_t calling_slices = 0;

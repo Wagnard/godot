@@ -332,6 +332,7 @@ protected:
 		uint64_t shadow_elements = 0;
 		uint64_t shadow_usec = 0; // Sorting the shadow passes and writing their instance data, either path.
 		uint64_t shadow_draw_calls = 0; // Deferred builds only.
+		uint64_t sort_usec = 0; // Sorting the main view's opaque, motion and alpha lists, either path.
 		// _parallel_run(), all uses: parts, those run by the calling thread, sum of the parts' durations, wall time.
 		SafeNumeric<uint64_t> run_parts;
 		SafeNumeric<uint64_t> run_parts_on_caller;
@@ -951,6 +952,19 @@ protected:
 	uint32_t shadow_instance_part_count = 0;
 	bool shadow_build_parallel = true;
 	bool shadow_build_merge = true; // Off: a pass cut in several sort runs is drawn run after run, unmerged.
+
+	// The main view's lists sorted together (_sort_render_lists()): a large opaque list in runs merged afterwards, the
+	// motion and alpha lists whole, each a _parallel_run part. GODOT_PARALLEL_SORT=0 sorts them one after the other.
+	struct OpaqueSortRun {
+		uint32_t from = 0;
+		uint32_t count = 0;
+	};
+	bool list_sort_parallel = true;
+	LocalVector<OpaqueSortRun> opaque_sort_runs;
+	LocalVector<GeometryInstanceSurfaceDataCache *> opaque_merge_buffer;
+
+	void _sort_render_lists();
+	void _sort_render_lists_part(uint32_t p_part);
 	bool shadow_build_deferred = false;
 
 	void _render_shadow_build();

@@ -763,8 +763,8 @@ uint32_t RenderForwardClustered::_render_list_get_split_count(const RenderListPa
 				const RenderListSplitStats &st = render_list_split_stats;
 				print_line(vformat("Parallel draw lists, per frame: %.1f lists split in %.1f parts (%.0f elements, %.0f us, of which waiting %.0f us, joining %.0f us; parts %.0f us in total, last part started after %.0f us), %.1f lists recorded serially (%.0f elements, %.0f us).",
 						st.split_lists / 240.0, st.splits / 240.0, st.split_elements / 240.0, st.split_usec / 240.0, st.split_wait_usec / 240.0, st.split_join_usec / 240.0, st.split_parts_usec / 240.0, st.split_start_usec / 240.0, st.serial_lists / 240.0, st.serial_elements / 240.0, st.serial_usec / 240.0));
-				print_line(vformat("List building, per frame: filling %.0f us, instance data %.0f us, %.1f of them on several threads; shadow sort + instance data %.0f us (%.1f deferred builds of %.1f passes, %.0f elements, %.0f draw calls).",
-						st.fill_usec / 240.0, st.instance_data_usec / 240.0, st.parallel_builds / 240.0, st.shadow_usec / 240.0, st.shadow_builds / 240.0, st.shadow_passes / 240.0, st.shadow_elements / 240.0, st.shadow_draw_calls / 240.0));
+				print_line(vformat("List building, per frame: filling %.0f us, instance data %.0f us, %.1f of them on several threads; shadow sort + instance data %.0f us (%.1f deferred builds of %.1f passes, %.0f elements, %.0f draw calls); main lists sort %.0f us.",
+						st.fill_usec / 240.0, st.instance_data_usec / 240.0, st.parallel_builds / 240.0, st.shadow_usec / 240.0, st.shadow_builds / 240.0, st.shadow_passes / 240.0, st.shadow_elements / 240.0, st.shadow_draw_calls / 240.0, st.sort_usec / 240.0));
 				print_line(vformat("Parallel runs, per frame: %.1f runs, %.1f helpers woken, %.0f parts, %.0f of them on the calling thread, %.0f us of parts in total, %.0f us of wall time.",
 						st.runs / 240.0, st.helpers_woken / 240.0, st.run_parts.get() / 240.0, st.run_parts_on_caller.get() / 240.0, st.run_parts_usec.get() / 240.0, st.run_usec / 240.0));
 				render_list_split_stats.~RenderListSplitStats();
@@ -2623,9 +2623,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	_update_render_base_uniform_set();
 
 	_fill_render_list(RENDER_LIST_OPAQUE, p_render_data, PASS_MODE_COLOR, using_sdfgi, using_sdfgi || using_voxelgi, using_motion_pass);
-	render_list[RENDER_LIST_OPAQUE].sort_by_key();
-	render_list[RENDER_LIST_MOTION].sort_by_key();
-	render_list[RENDER_LIST_ALPHA].sort_by_reverse_depth_and_priority();
+	_sort_render_lists();
 
 	int *render_info = p_render_data->render_info ? p_render_data->render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_VISIBLE] : (int *)nullptr;
 	_fill_instance_data(RENDER_LIST_OPAQUE, render_info);
@@ -3672,6 +3670,65 @@ void RenderForwardClustered::_render_shadow_build() {
 		render_list_split_stats.shadow_elements += element_total;
 		render_list_split_stats.shadow_builds += 1;
 		render_list_split_stats.parallel_builds += shadow_instance_part_count > 1 ? 1 : 0;
+	}
+}
+
+void RenderForwardClustered::_sort_render_lists() {
+	const uint64_t begin_usec = render_list_split_stats.enabled ? OS::get_singleton()->get_ticks_usec() : 0;
+	const uint32_t opaque_count = render_list[RENDER_LIST_OPAQUE].elements.size();
+	// Runs of at least 1024 elements, as many as the list building threads.
+	const uint32_t runs = (list_sort_parallel && list_build_max_threads > 1 && opaque_count >= 2048u) ? MIN(opaque_count / 1024u, list_build_max_threads) : 0u;
+
+	if (runs < 2u) {
+		render_list[RENDER_LIST_OPAQUE].sort_by_key();
+		render_list[RENDER_LIST_MOTION].sort_by_key();
+		render_list[RENDER_LIST_ALPHA].sort_by_reverse_depth_and_priority();
+	} else {
+		opaque_sort_runs.resize(runs);
+		for (uint32_t i = 0; i < runs; i++) {
+			const uint32_t from = uint32_t(uint64_t(opaque_count) * i / runs);
+			const uint32_t to = uint32_t(uint64_t(opaque_count) * (i + 1) / runs);
+			opaque_sort_runs[i] = { from, to - from };
+		}
+		// The opaque runs first (the longest parts), then the motion and alpha lists whole.
+		_parallel_run(runs + 2u, list_build_max_threads, &RenderForwardClustered::_sort_render_lists_part);
+
+		// k-way merge of the opaque runs, ties to the earlier run. Equal keys may come out in another order than one
+		// sort would give (SortArray is not stable either): same mesh, material and pipeline, drawn in another order.
+		GeometryInstanceSurfaceDataCache **elements = render_list[RENDER_LIST_OPAQUE].elements.ptr();
+		uint32_t heads[16];
+		uint32_t ends[16];
+		for (uint32_t i = 0; i < runs; i++) {
+			heads[i] = opaque_sort_runs[i].from;
+			ends[i] = heads[i] + opaque_sort_runs[i].count;
+		}
+		const RenderList::SortByKey less;
+		opaque_merge_buffer.resize(opaque_count);
+		for (uint32_t out = 0; out < opaque_count; out++) {
+			int best = -1;
+			for (uint32_t i = 0; i < runs; i++) {
+				if (heads[i] < ends[i] && (best < 0 || less(elements[heads[i]], elements[heads[best]]))) {
+					best = int(i);
+				}
+			}
+			opaque_merge_buffer[out] = elements[heads[best]++];
+		}
+		memcpy(elements, opaque_merge_buffer.ptr(), sizeof(GeometryInstanceSurfaceDataCache *) * opaque_count);
+	}
+
+	if (render_list_split_stats.enabled) {
+		render_list_split_stats.sort_usec += OS::get_singleton()->get_ticks_usec() - begin_usec;
+	}
+}
+
+void RenderForwardClustered::_sort_render_lists_part(uint32_t p_part) {
+	const uint32_t runs = opaque_sort_runs.size();
+	if (p_part < runs) {
+		render_list[RENDER_LIST_OPAQUE].sort_by_key_range(opaque_sort_runs[p_part].from, opaque_sort_runs[p_part].count);
+	} else if (p_part == runs) {
+		render_list[RENDER_LIST_MOTION].sort_by_key();
+	} else {
+		render_list[RENDER_LIST_ALPHA].sort_by_reverse_depth_and_priority();
 	}
 }
 
@@ -6092,6 +6149,7 @@ RenderForwardClustered::RenderForwardClustered() {
 		// filled; GODOT_PARALLEL_SHADOW_MERGE=0 leaves a large pass in separately sorted runs.
 		shadow_build_parallel = OS::get_singleton()->get_environment("GODOT_PARALLEL_SHADOW_BUILD") != "0";
 		shadow_build_merge = OS::get_singleton()->get_environment("GODOT_PARALLEL_SHADOW_MERGE") != "0";
+		list_sort_parallel = OS::get_singleton()->get_environment("GODOT_PARALLEL_SORT") != "0";
 	}
 
 	/* SCENE SHADER */
