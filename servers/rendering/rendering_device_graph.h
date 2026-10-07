@@ -280,12 +280,14 @@ public:
 		LocalVector<ResourceTracker *> trackers;
 		LocalVector<ResourceUsage> usages;
 		BitField<RDD::PipelineStageBits> stages = {};
+		uint32_t pipeline_count = 0;
 
 		void clear() {
 			data.clear();
 			trackers.clear();
 			usages.clear();
 			stages.clear();
+			pipeline_count = 0;
 		}
 	};
 
@@ -328,6 +330,7 @@ private:
 #endif
 		bool split_cmd_buffer = false;
 		bool resumable = true; // No subpasses nor secondary command buffers: can be suspended and resumed.
+		uint32_t pipeline_count = 0;
 
 		// Instructions recorded by splits, inserted at main_offset of data when the draw list ends: they are only
 		// copied once, into the recorded command. The splits keep their data until then.
@@ -463,6 +466,7 @@ private:
 		RDD::FramebufferID framebuffer;
 		RDD::RenderPassID render_pass;
 		uint32_t instruction_data_size = 0;
+		uint32_t pipeline_count = 0; // Pipelines bound by the instructions, for the cost of recording them.
 		RDD::CommandBufferType command_buffer_type;
 		Rect2i region;
 		uint32_t clear_values_count = 0;

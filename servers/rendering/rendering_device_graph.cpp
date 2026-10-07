@@ -1055,6 +1055,7 @@ void RenderingDeviceGraph::_add_draw_list_begin(FramebufferCache *p_framebuffer_
 
 	draw_instruction_list.split_cmd_buffer = p_split_cmd_buffer;
 	draw_instruction_list.resumable = true;
+	draw_instruction_list.pipeline_count = 0;
 	draw_instruction_list.split_segments.clear();
 
 #if defined(DEBUG_ENABLED) || defined(DEV_ENABLED)
@@ -1528,15 +1529,17 @@ uint32_t RenderingDeviceGraph::_draw_list_instruction_size(const DrawListInstruc
 }
 
 uint32_t RenderingDeviceGraph::_plan_parallel_slices(const RecordedCommandSort *p_sorted_commands, uint32_t p_sorted_commands_count, CommandBufferPool &r_command_buffer_pool) {
-	// Estimate the recording cost of every command, in bytes of draw list instructions (about 2.5 us per KiB with
-	// D3D12 on NVIDIA): lists cost their instructions plus their render pass, other commands (dispatches, clears,
-	// copies between resources) about a KiB, buffer or texture updates about 450 bytes per copy, and a driver callback
-	// (Streamline: DLSS, DLSS-G tags) about 64 KiB, as measured in a game frame. Recording stops being
+	// Estimate the recording cost of every command, in bytes of draw list instructions (0.5-0.7 us per KiB with D3D12
+	// on NVIDIA): lists cost their instructions plus their render pass and about 768 bytes more per pipeline they bind,
+	// other commands (dispatches, clears, copies between resources) about 2 KiB, buffer or texture updates about
+	// 1.25 KiB per copy, and a driver callback (Streamline: DLSS, DLSS-G tags) about 64 KiB, as fitted on the slices of
+	// two game frames (a pipeline bind 0.6-1.35 us, a copy about 1 us, another command 1.7-2.3 us). Recording stops being
 	// parallel at the first draw list that splits the command buffer (the swap chain blit): from there on it switches
 	// command buffers, which only the serial path does.
-	const uint32_t COMMAND_COST = 1024;
+	const uint32_t COMMAND_COST = 2048;
 	const uint32_t RENDER_PASS_COST = 256;
-	const uint32_t COPY_COST = 448;
+	const uint32_t COPY_COST = 1280;
+	const uint32_t PIPELINE_COST = 768;
 	const uint32_t DRIVER_CALLBACK_COST = 64 * 1024;
 	thread_local LocalVector<uint32_t> command_costs;
 	command_costs.resize(p_sorted_commands_count);
@@ -1553,7 +1556,7 @@ uint32_t RenderingDeviceGraph::_plan_parallel_slices(const RecordedCommandSort *
 				if (draw_list_command->split_cmd_buffer) {
 					parallel_end = i;
 				}
-				cost = RENDER_PASS_COST + draw_list_command->instruction_data_size;
+				cost = RENDER_PASS_COST + draw_list_command->instruction_data_size + PIPELINE_COST * draw_list_command->pipeline_count;
 			} break;
 			case RecordedCommand::TYPE_BUFFER_UPDATE: {
 				cost = COPY_COST * MAX(reinterpret_cast<const RecordedBufferUpdateCommand *>(command)->buffer_copies_count, 1u);
@@ -1679,6 +1682,8 @@ uint32_t RenderingDeviceGraph::_plan_parallel_slices(const RecordedCommandSort *
 			const uint32_t instruction_data_size = draw_list_command->instruction_data_size;
 			uint32_t cursor = 0;
 			uint32_t last_draw_end = 0;
+			uint32_t pipelines_counted = 0;
+			uint32_t pipelines_pending = 0;
 			accumulated_cost += RENDER_PASS_COST;
 			while (cursor < instruction_data_size) {
 				const DrawListInstruction *instruction = reinterpret_cast<const DrawListInstruction *>(&instruction_data[cursor]);
@@ -1689,6 +1694,7 @@ uint32_t RenderingDeviceGraph::_plan_parallel_slices(const RecordedCommandSort *
 					case DrawListInstruction::TYPE_BIND_PIPELINE: {
 						const DrawListBindPipelineInstruction *bind_instruction = reinterpret_cast<const DrawListBindPipelineInstruction *>(instruction);
 						tracked[TRACKED_PIPELINE] = current;
+						pipelines_pending++;
 						for (uint32_t j = bind_instruction->first_unbound_set; j < RDD::MAX_UNIFORM_SETS; j++) {
 							tracked[TRACKED_SETS + j] = Tracked();
 						}
@@ -1738,9 +1744,12 @@ uint32_t RenderingDeviceGraph::_plan_parallel_slices(const RecordedCommandSort *
 					continue;
 				}
 
-				accumulated_cost += cursor - last_draw_end;
+				accumulated_cost += cursor - last_draw_end + PIPELINE_COST * pipelines_pending;
 				last_draw_end = cursor;
-				const bool enough_left = uint64_t(instruction_data_size - cursor) * 8 >= slice_cost;
+				pipelines_counted += pipelines_pending;
+				pipelines_pending = 0;
+				const uint64_t left_after_draw = instruction_data_size - cursor + PIPELINE_COST * (draw_list_command->pipeline_count - pipelines_counted);
+				const bool enough_left = left_after_draw * 8 >= slice_cost;
 				if (enough_left && accumulated_cost >= slice_cost * (balanced_cuts + 1)) {
 					close_slice(i, cursor);
 
@@ -1768,13 +1777,13 @@ uint32_t RenderingDeviceGraph::_plan_parallel_slices(const RecordedCommandSort *
 				}
 
 				// Stop following the draw list once no other cut can fall inside it.
-				const uint64_t left = instruction_data_size - cursor;
+				const uint64_t left = instruction_data_size - cursor + PIPELINE_COST * (draw_list_command->pipeline_count - pipelines_counted);
 				if (balanced_cuts + 1 >= parallel_slice_count || left * 8 < slice_cost || accumulated_cost + left < slice_cost * (balanced_cuts + 1) + slice_cost / 8) {
 					break;
 				}
 			}
 
-			accumulated_cost += instruction_data_size - last_draw_end;
+			accumulated_cost += instruction_data_size - last_draw_end + PIPELINE_COST * (draw_list_command->pipeline_count - pipelines_counted);
 		} else {
 			accumulated_cost += command_costs[i];
 		}
@@ -2764,6 +2773,11 @@ void RenderingDeviceGraph::add_draw_list_bind_pipeline(RDD::PipelineID p_pipelin
 	instruction->first_unbound_set = p_first_unbound_set;
 	instruction->layout_reset = p_layout_reset;
 	_draw_list_stages(p_split) = _draw_list_stages(p_split) | p_pipeline_stage_bits;
+	if (p_split != nullptr) {
+		p_split->pipeline_count++;
+	} else {
+		draw_instruction_list.pipeline_count++;
+	}
 }
 
 void RenderingDeviceGraph::add_draw_list_bind_uniform_set(RDD::ShaderID p_shader, RDD::UniformSetID p_uniform_set, uint32_t set_index, DrawListSplit *p_split) {
@@ -2957,6 +2971,7 @@ void RenderingDeviceGraph::add_draw_list_split(DrawListSplit &p_split) {
 	}
 
 	draw_instruction_list.stages = draw_instruction_list.stages | p_split.stages;
+	draw_instruction_list.pipeline_count += p_split.pipeline_count;
 
 	for (uint32_t i = 0; i < p_split.trackers.size(); i++) {
 		add_draw_list_usage(p_split.trackers[i], p_split.usages[i]);
@@ -3001,6 +3016,7 @@ void RenderingDeviceGraph::add_draw_list_end() {
 #endif
 	command->split_cmd_buffer = draw_instruction_list.split_cmd_buffer;
 	command->resumable = draw_instruction_list.resumable;
+	command->pipeline_count = draw_instruction_list.pipeline_count;
 	command->clear_values_count = draw_instruction_list.attachment_clear_values.size();
 	command->trackers_count = trackers_count;
 
