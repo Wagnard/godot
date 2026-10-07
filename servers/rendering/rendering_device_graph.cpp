@@ -2284,13 +2284,15 @@ void RenderingDeviceGraph::initialize(RDD *p_driver, RenderPassCreationFunction 
 	driver_clears_with_copy_engine = driver->api_trait_get(RDD::API_TRAIT_CLEARS_WITH_COPY_ENGINE);
 	driver_buffers_require_transitions = driver->api_trait_get(RDD::API_TRAIT_BUFFERS_REQUIRE_TRANSITIONS);
 
-	// Prototype: GODOT_PARALLEL_RECORDING=N records the frame's commands in up to N command buffers at once (D3D12 with
-	// enhanced barriers only, Adreno workaround off). GODOT_PARALLEL_RECORDING_MIN is the smallest frame worth splitting,
-	// in bytes of commands. GODOT_PARALLEL_RECORDING_STATS=1 prints the cost of end() every 240 frames.
+	// The frame's commands are recorded in up to 6 command buffers at once (D3D12 with enhanced barriers only, Adreno
+	// workaround off); GODOT_PARALLEL_RECORDING=N changes that count, 0 or 1 records serially. GODOT_PARALLEL_RECORDING_MIN
+	// is the smallest frame worth splitting, in bytes of commands. GODOT_PARALLEL_RECORDING_STATS=1 prints the cost of
+	// end() every 240 frames.
+	const uint32_t DEFAULT_PARALLEL_SLICE_COUNT = 6;
 	command_queue_family = p_secondary_command_queue_family;
 	const String parallel_env = OS::get_singleton()->get_environment("GODOT_PARALLEL_RECORDING");
-	if (!parallel_env.is_empty() && driver->get_api_name() == "D3D12" && driver_honors_barriers && !driver_workarounds.avoid_compute_after_draw) {
-		parallel_slice_count = CLAMP(parallel_env.to_int(), 0, 16);
+	if (driver->get_api_name() == "D3D12" && driver_honors_barriers && !driver_workarounds.avoid_compute_after_draw) {
+		parallel_slice_count = parallel_env.is_empty() ? DEFAULT_PARALLEL_SLICE_COUNT : CLAMP(parallel_env.to_int(), 0, 16);
 	}
 	const String parallel_min_env = OS::get_singleton()->get_environment("GODOT_PARALLEL_RECORDING_MIN");
 	parallel_min_size = parallel_min_env.is_empty() ? 16384 : uint32_t(MAX(parallel_min_env.to_int(), 0));
