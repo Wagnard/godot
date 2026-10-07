@@ -286,15 +286,25 @@ protected:
 	LocalVector<RD::DrawListID> render_list_split_ids;
 	RenderListParameters *render_list_split_params = nullptr;
 
-	// Work cut in parts that WorkerThreadPool workers and the render thread take in turn (_parallel_run()). The claim
-	// holds the run's generation (high 32 bits) and the next part (low 32 bits): a worker woken after its run is done
-	// finds another generation and leaves without touching anything; its group task is released once completed.
+	// Work cut in parts that helper threads and the render thread take in turn (_parallel_run()). The claim holds the
+	// run's generation (high 32 bits) and the next part (low 32 bits); a run is closed (low bits all set) while the
+	// next one is published, and a claim made on a stale value fails its compare-exchange.
+	// Helpers are WorkerThreadPool tasks that stay a while (parallel_linger_usec) looking for the next run once theirs
+	// is done: waking a pool thread costs the render thread ~20 us (the pool notifies under its mutex), and a frame has
+	// a dozen runs close together. A run only wakes the helpers it lacks; each run says how many may join it.
+	// _render_scene() dismisses them when it returns (parallel_epoch): the graph replay that follows needs the cores.
 	typedef void (RenderForwardClustered::*ParallelPart)(uint32_t p_part);
 	std::atomic<uint64_t> parallel_claim = { 0xFFFFFFFF };
 	SafeNumeric<uint32_t> parallel_part_count;
 	SafeNumeric<uint32_t> parallel_parts_done;
 	uint32_t parallel_generation = 0;
 	ParallelPart parallel_part = nullptr;
+	std::atomic<uint32_t> parallel_run_workers = { 0 }; // Helpers allowed in the current run.
+	SafeNumeric<uint32_t> parallel_run_joined; // Helpers that joined it.
+	SafeNumeric<uint32_t> parallel_helpers; // Helper tasks running or about to.
+	SafeFlag parallel_helpers_stop;
+	SafeNumeric<uint32_t> parallel_epoch; // Helpers woken in an older epoch leave once idle.
+	uint64_t parallel_linger_usec = 0;
 	LocalVector<WorkerThreadPool::GroupID> parallel_groups;
 	uint32_t render_list_max_splits = 0;
 	uint32_t render_list_split_min_elements = 0;
@@ -322,6 +332,8 @@ protected:
 		SafeNumeric<uint64_t> run_parts_on_caller;
 		SafeNumeric<uint64_t> run_parts_usec;
 		uint64_t run_usec = 0;
+		uint32_t runs = 0;
+		uint32_t helpers_woken = 0;
 	} render_list_split_stats;
 
 	struct LightmapData {
@@ -544,8 +556,8 @@ protected:
 	void _render_list_split_part(uint32_t p_part);
 
 	uint64_t _parallel_run(uint32_t p_part_count, uint32_t p_thread_count, ParallelPart p_part);
-	void _parallel_run_task(uint32_t p_index, uint32_t p_generation);
-	void _parallel_run_claimed(uint32_t p_generation, bool p_caller = false);
+	void _parallel_helper_task(uint32_t p_index, uint32_t p_epoch);
+	bool _parallel_run_claimed(bool p_caller);
 	void _parallel_release_groups(bool p_wait);
 	void _render_list_with_draw_list(RenderListParameters *p_params, RID p_framebuffer, BitField<RD::DrawFlags> p_draw_flags = RD::DRAW_DEFAULT_ALL, const Vector<Color> &p_clear_color_values = Vector<Color>(), float p_clear_depth_value = 0.0, uint32_t p_clear_stencil_value = 0, const Rect2 &p_region = Rect2());
 

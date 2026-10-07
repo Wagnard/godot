@@ -45,6 +45,10 @@
 #include "servers/rendering/rendering_server_default.h"
 #include "servers/rendering/storage/ltc_lut.gen.h"
 
+#ifdef _MSC_VER
+#include <intrin.h>
+#endif
+
 using namespace RendererSceneRenderImplementation;
 
 #define PRELOAD_PIPELINES_ON_SURFACE_CACHE_CONSTRUCTION 1
@@ -761,8 +765,8 @@ uint32_t RenderForwardClustered::_render_list_get_split_count(const RenderListPa
 						st.split_lists / 240.0, st.splits / 240.0, st.split_elements / 240.0, st.split_usec / 240.0, st.split_wait_usec / 240.0, st.split_join_usec / 240.0, st.split_parts_usec / 240.0, st.split_start_usec / 240.0, st.serial_lists / 240.0, st.serial_elements / 240.0, st.serial_usec / 240.0));
 				print_line(vformat("List building, per frame: filling %.0f us, instance data %.0f us, %.1f of them on several threads.",
 						st.fill_usec / 240.0, st.instance_data_usec / 240.0, st.parallel_builds / 240.0));
-				print_line(vformat("Parallel runs, per frame: %.0f parts, %.0f of them on the calling thread, %.0f us of parts in total, %.0f us of wall time.",
-						st.run_parts.get() / 240.0, st.run_parts_on_caller.get() / 240.0, st.run_parts_usec.get() / 240.0, st.run_usec / 240.0));
+				print_line(vformat("Parallel runs, per frame: %.1f runs, %.1f helpers woken, %.0f parts, %.0f of them on the calling thread, %.0f us of parts in total, %.0f us of wall time.",
+						st.runs / 240.0, st.helpers_woken / 240.0, st.run_parts.get() / 240.0, st.run_parts_on_caller.get() / 240.0, st.run_parts_usec.get() / 240.0, st.run_usec / 240.0));
 				render_list_split_stats.~RenderListSplitStats();
 				memnew_placement(&render_list_split_stats, RenderListSplitStats);
 				render_list_split_stats.enabled = true;
@@ -872,24 +876,33 @@ void RenderForwardClustered::_render_list_split_part(uint32_t p_part) {
 }
 
 uint64_t RenderForwardClustered::_parallel_run(uint32_t p_part_count, uint32_t p_thread_count, ParallelPart p_part) {
-	// Publish the run: closed first, so a worker still holding the previous generation can't read the new count.
+	// Publish the run: closed first, so a helper still looking at the previous one can't pair its claim with the new
+	// count.
+	const uint32_t worker_count = MIN(p_part_count, p_thread_count) - 1;
 	parallel_generation++;
 	const uint64_t generation_bits = uint64_t(parallel_generation) << 32;
 	parallel_claim.store(generation_bits | 0xFFFFFFFF, std::memory_order_relaxed);
 	parallel_part = p_part;
 	parallel_part_count.set(p_part_count);
 	parallel_parts_done.set(0);
+	parallel_run_workers.store(worker_count, std::memory_order_relaxed);
+	parallel_run_joined.set(0);
 	parallel_claim.store(generation_bits, std::memory_order_release);
 
-	// Up to N - 1 workers; the render thread takes parts too while they wake up, and doesn't wait for workers that
-	// wake up after every part is taken: their group is released later.
+	// Wake only the helpers missing; the render thread takes parts too while they come, and doesn't wait for helpers
+	// that come after every part is taken.
 	_parallel_release_groups(false);
-	const uint32_t worker_count = MIN(p_part_count, p_thread_count) - 1;
-	if (worker_count > 0) {
-		parallel_groups.push_back(WorkerThreadPool::get_singleton()->add_template_group_task(this, &RenderForwardClustered::_parallel_run_task, parallel_generation, worker_count, worker_count, true, "ForwardClusteredParallelRun"));
+	const uint32_t helpers = parallel_helpers.get();
+	if (worker_count > helpers) {
+		const uint32_t wake = worker_count - helpers;
+		parallel_helpers.add(wake);
+		parallel_groups.push_back(WorkerThreadPool::get_singleton()->add_template_group_task(this, &RenderForwardClustered::_parallel_helper_task, parallel_epoch.get(), wake, wake, true, "ForwardClusteredParallelHelper"));
+		if (render_list_split_stats.enabled) {
+			render_list_split_stats.helpers_woken += wake;
+		}
 	}
 	const uint64_t begin_usec = OS::get_singleton()->get_ticks_usec();
-	_parallel_run_claimed(parallel_generation, true);
+	_parallel_run_claimed(true);
 
 	const uint64_t wait_begin_usec = OS::get_singleton()->get_ticks_usec();
 	while (parallel_parts_done.get() < p_part_count) {
@@ -898,17 +911,59 @@ uint64_t RenderForwardClustered::_parallel_run(uint32_t p_part_count, uint32_t p
 	const uint64_t end_usec = OS::get_singleton()->get_ticks_usec();
 	if (render_list_split_stats.enabled) {
 		render_list_split_stats.run_usec += end_usec - begin_usec;
+		render_list_split_stats.runs++;
 	}
 	return end_usec - wait_begin_usec;
 }
 
-void RenderForwardClustered::_parallel_run_task(uint32_t p_index, uint32_t p_generation) {
-	_parallel_run_claimed(p_generation);
+// Wait a little without leaving the core, and without taking much from the other thread of the same core.
+static _FORCE_INLINE_ void _parallel_spin_pause() {
+	for (int i = 0; i < 16; i++) {
+#if defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64))
+		_mm_pause();
+#elif defined(_MSC_VER) && (defined(_M_ARM) || defined(_M_ARM64))
+		__yield();
+#elif (defined(__GNUC__) || defined(__clang__)) && (defined(__i386__) || defined(__x86_64__))
+		__builtin_ia32_pause();
+#elif (defined(__GNUC__) || defined(__clang__)) && (defined(__arm__) || defined(__aarch64__))
+		asm volatile("yield");
+#endif
+	}
 }
 
-void RenderForwardClustered::_parallel_run_claimed(uint32_t p_generation, bool p_caller) {
+void RenderForwardClustered::_parallel_helper_task(uint32_t p_index, uint32_t p_epoch) {
+	uint32_t generation = 0xFFFFFFFF; // The last run this helper looked at.
+	bool joined = false;
+	uint64_t idle_begin_usec = 0;
+	while (!parallel_helpers_stop.is_set()) {
+		const uint64_t claim = parallel_claim.load(std::memory_order_acquire);
+		if (uint32_t(claim) < parallel_part_count.get()) {
+			// A run with parts left: join it if it still wants helpers. Time spent beside a run isn't idle.
+			if (uint32_t(claim >> 32) != generation) {
+				generation = uint32_t(claim >> 32);
+				joined = parallel_run_joined.increment() <= parallel_run_workers.load(std::memory_order_relaxed);
+			}
+			if (joined) {
+				_parallel_run_claimed(false);
+			}
+			idle_begin_usec = 0;
+		} else {
+			const uint64_t now_usec = OS::get_singleton()->get_ticks_usec();
+			if (idle_begin_usec == 0) {
+				idle_begin_usec = now_usec;
+			} else if (now_usec - idle_begin_usec >= parallel_linger_usec || parallel_epoch.get() != p_epoch) {
+				break;
+			}
+		}
+		_parallel_spin_pause();
+	}
+	parallel_helpers.decrement();
+}
+
+bool RenderForwardClustered::_parallel_run_claimed(bool p_caller) {
+	bool ran = false;
 	uint64_t claim = parallel_claim.load(std::memory_order_acquire);
-	while (uint32_t(claim >> 32) == p_generation && uint32_t(claim) < parallel_part_count.get()) {
+	while (uint32_t(claim) < parallel_part_count.get()) {
 		if (!parallel_claim.compare_exchange_weak(claim, claim + 1, std::memory_order_acq_rel, std::memory_order_acquire)) {
 			continue;
 		}
@@ -923,8 +978,10 @@ void RenderForwardClustered::_parallel_run_claimed(uint32_t p_generation, bool p
 			}
 		}
 		parallel_parts_done.increment();
+		ran = true;
 		claim = parallel_claim.load(std::memory_order_acquire);
 	}
+	return ran;
 }
 
 void RenderForwardClustered::_parallel_release_groups(bool p_wait) {
@@ -2298,7 +2355,7 @@ void RenderForwardClustered::_render_3d_upscaling(const RenderDataRD *p_render_d
 		}
 
 		RD::get_singleton()->draw_command_begin_label("MetalFX Temporal");
-		// Scale to ±0.5.
+		// Scale to Â±0.5.
 		Vector2 jitter = p_render_data->scene_data->taa_jitter * 0.5f;
 		jitter *= Vector2(1.0, -1.0); // Flip y-axis as bottom left is origin.
 
@@ -2364,6 +2421,12 @@ void RenderForwardClustered::_prepare_fsr_frame_generation(const RenderDataRD *p
 }
 
 void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Color &p_default_bg_color) {
+	// Helpers looking for the next parallel run leave once the scene is rendered, whichever way this returns.
+	struct ParallelHelpersDismiss {
+		RenderForwardClustered *renderer;
+		~ParallelHelpersDismiss() { renderer->parallel_epoch.increment(); }
+	} parallel_helpers_dismiss = { this };
+
 	scene_state.used_uniform_buffer_count = 0;
 
 	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
@@ -5814,6 +5877,11 @@ RenderForwardClustered::RenderForwardClustered() {
 		list_build_min_instances = list_build_env.is_empty() ? 256 : uint32_t(MAX(list_build_env.to_int(), 0));
 		const String list_build_threads_env = OS::get_singleton()->get_environment("GODOT_PARALLEL_LIST_BUILD_THREADS");
 		list_build_max_threads = MIN(render_list_max_splits, list_build_threads_env.is_empty() ? 3u : uint32_t(CLAMP(list_build_threads_env.to_int(), 0, 16)));
+
+		// Helper threads stay GODOT_PARALLEL_LINGER_US microseconds looking for the next parallel run of the scene
+		// being rendered (0: they leave as soon as theirs is done, every run wakes its own).
+		const String linger_env = OS::get_singleton()->get_environment("GODOT_PARALLEL_LINGER_US");
+		parallel_linger_usec = linger_env.is_empty() ? 1000 : uint64_t(MAX(linger_env.to_int(), 0));
 	}
 
 	/* SCENE SHADER */
@@ -5963,6 +6031,7 @@ RenderForwardClustered::RenderForwardClustered() {
 }
 
 RenderForwardClustered::~RenderForwardClustered() {
+	parallel_helpers_stop.set();
 	_parallel_release_groups(true);
 
 	if (ss_effects != nullptr) {
