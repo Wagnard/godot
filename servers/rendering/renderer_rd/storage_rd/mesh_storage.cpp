@@ -1716,10 +1716,7 @@ void MeshStorage::_multimesh_get_motion_vectors_offsets(RID p_multimesh, uint32_
 	MultiMesh *multimesh = multimesh_owner.get_or_null(p_multimesh);
 	ERR_FAIL_NULL(multimesh);
 	r_current_offset = multimesh->motion_vectors_current_offset;
-	if (!_multimesh_uses_motion_vectors(multimesh)) {
-		multimesh->motion_vectors_previous_offset = multimesh->motion_vectors_current_offset;
-	}
-	r_prev_offset = multimesh->motion_vectors_previous_offset;
+	r_prev_offset = _multimesh_uses_motion_vectors(multimesh) ? multimesh->motion_vectors_previous_offset : multimesh->motion_vectors_current_offset;
 }
 
 bool MeshStorage::_multimesh_uses_motion_vectors_offsets(RID p_multimesh) {
