@@ -115,6 +115,7 @@ public:
 		ID_TYPE_DRAW_LIST,
 		ID_TYPE_COMPUTE_LIST = 4,
 		ID_TYPE_RAYTRACING_LIST = 5,
+		ID_TYPE_SPLIT_DRAW_LIST = 6,
 		ID_TYPE_MAX,
 		ID_BASE_SHIFT = 58, // 5 bits for ID types.
 		ID_MASK = (ID_BASE_SHIFT - 1),
@@ -1540,6 +1541,29 @@ private:
 
 	LocalVector<RID> draw_list_bound_textures;
 
+	// A part of the active draw list recorded on another thread (draw_list_split_begin()). What the recording would
+	// change outside the split's own state is kept aside and done in order by draw_list_split_end().
+	struct DrawListSplit {
+		DrawList draw_list;
+		RDG::DrawListSplit graph;
+		LocalVector<UniformSet *> uniform_sets_to_update;
+		LocalVector<Buffer *> transfer_buffers;
+		LocalVector<VertexArray *> transfer_vertex_arrays;
+		LocalVector<IndexArray *> transfer_index_arrays;
+	};
+
+	LocalVector<DrawListSplit> draw_list_splits;
+	uint32_t draw_list_split_count = 0;
+	uint32_t draw_list_split_base = 0; // The splits in use: [base, base + count).
+	uint32_t draw_list_splits_used = 0; // Splits whose instructions the open draw list still references, until it ends.
+
+	DrawList *_get_draw_list(DrawListID p_list, DrawListSplit *&r_split);
+	_FORCE_INLINE_ bool _is_split_draw_list(DrawListID p_list) const { return (p_list >> ID_BASE_SHIFT) == ID_TYPE_SPLIT_DRAW_LIST; }
+	void _draw_list_uniform_set_bound(DrawListSplit *p_split, UniformSet *p_uniform_set);
+	void _draw_list_check_transfer_worker_buffer(DrawListSplit *p_split, Buffer *p_buffer);
+	void _draw_list_check_transfer_worker_vertex_array(DrawListSplit *p_split, VertexArray *p_vertex_array);
+	void _draw_list_check_transfer_worker_index_array(DrawListSplit *p_split, IndexArray *p_index_array);
+
 	void _draw_list_start(const Rect2i &p_viewport);
 	void _draw_list_end(Rect2i *r_last_viewport = nullptr);
 
@@ -1604,6 +1628,12 @@ public:
 	DrawListID draw_list_switch_to_next_pass();
 
 	void draw_list_end();
+
+	// Splits the active draw list in p_count parts that other threads may record at the same time, each with the
+	// DrawListID it gets in r_split_ids and the usual draw_list_*() functions. Each part starts with nothing bound.
+	// draw_list_split_end(), on the render thread once every part is recorded, appends them to the draw list in order.
+	void draw_list_split_begin(uint32_t p_count, DrawListID *r_split_ids);
+	void draw_list_split_end();
 
 private:
 	/**************************/
