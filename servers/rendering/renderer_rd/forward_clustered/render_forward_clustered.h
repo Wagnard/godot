@@ -327,6 +327,10 @@ protected:
 		uint64_t fill_usec = 0; // _fill_render_list
 		uint64_t instance_data_usec = 0; // _fill_instance_data
 		uint32_t parallel_builds = 0; // Calls of either that used several threads.
+		uint32_t shadow_builds = 0; // _render_shadow_build(): calls, shadow passes, elements.
+		uint32_t shadow_passes = 0;
+		uint64_t shadow_elements = 0;
+		uint64_t shadow_usec = 0; // Sorting the shadow passes and writing their instance data, either path.
 		// _parallel_run(), all uses: parts, those run by the calling thread, sum of the parts' durations, wall time.
 		SafeNumeric<uint64_t> run_parts;
 		SafeNumeric<uint64_t> run_parts_on_caller;
@@ -516,6 +520,9 @@ protected:
 			bool flip_cull;
 
 			uint32_t uniform_buffer_index;
+
+			int *render_info = nullptr; // Shadow render info of the pass, for its draw calls.
+			uint32_t draw_calls = 0;
 		};
 
 		LocalVector<ShadowPass> shadow_passes;
@@ -622,6 +629,7 @@ protected:
 
 	void _fill_instance_data_range(RenderListType p_render_list, uint32_t p_offset, uint32_t p_from, uint32_t p_to);
 	void _fill_instance_data_part(uint32_t p_part);
+	_FORCE_INLINE_ void _store_instance_data(const GeometryInstanceForwardClustered *p_inst, const GeometryInstanceSurfaceDataCache *p_surface, uint32_t p_flags, uint32_t p_gi_offset, SceneState::InstanceData *r_instance_data);
 
 	HashMap<Size2i, RID> sdfgi_framebuffer_size_cache;
 
@@ -904,6 +912,49 @@ protected:
 	};
 
 	RenderList render_list[RENDER_LIST_MAX];
+
+	// Shadow passes are filled one after the other: filling writes per-pass values on instances and surfaces that
+	// several passes share. Sorting them and writing their instance data only reads a few of those values, copied per
+	// element as each pass is filled; that part runs later for all the passes at once (_render_shadow_build()):
+	// sorts on several threads (a large pass in sorted runs merged afterwards), then the instance data in ranges.
+	struct ShadowElement {
+		uint64_t sort_key1;
+		uint64_t sort_key2;
+		GeometryInstanceSurfaceDataCache *surface;
+		uint32_t flags;
+		uint32_t gi_offset;
+	};
+
+	struct ShadowElementByKey {
+		_FORCE_INLINE_ bool operator()(const ShadowElement &A, const ShadowElement &B) const {
+			return (A.sort_key2 == B.sort_key2) ? (A.sort_key1 < B.sort_key1) : (A.sort_key2 < B.sort_key2);
+		}
+	};
+
+	struct ShadowSortRun {
+		uint32_t from = 0;
+		uint32_t count = 0;
+	};
+
+	struct ShadowSortRunLarger {
+		_FORCE_INLINE_ bool operator()(const ShadowSortRun &A, const ShadowSortRun &B) const {
+			return A.count != B.count ? A.count > B.count : A.from < B.from;
+		}
+	};
+
+	LocalVector<ShadowElement> shadow_elements; // Parallel to render_list[RENDER_LIST_SECONDARY].elements.
+	LocalVector<ShadowElement> shadow_merge_buffer;
+	LocalVector<ShadowSortRun> shadow_sort_runs; // Largest first, so the long sorts start first.
+	LocalVector<uint8_t> shadow_repeats; // Per element: drawn with the previous one.
+	LocalVector<uint8_t> shadow_pass_begins; // Per element: first of its pass.
+	uint32_t shadow_instance_part_count = 0;
+	bool shadow_build_parallel = true;
+	bool shadow_build_deferred = false;
+
+	void _render_shadow_build();
+	void _render_shadow_sort_part(uint32_t p_part);
+	void _render_shadow_instance_part(uint32_t p_part);
+	void _render_shadow_instance_range(uint32_t p_from, uint32_t p_to);
 
 	virtual void _update_shader_quality_settings() override;
 

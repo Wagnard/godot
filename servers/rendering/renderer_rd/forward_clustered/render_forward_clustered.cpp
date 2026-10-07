@@ -763,8 +763,8 @@ uint32_t RenderForwardClustered::_render_list_get_split_count(const RenderListPa
 				const RenderListSplitStats &st = render_list_split_stats;
 				print_line(vformat("Parallel draw lists, per frame: %.1f lists split in %.1f parts (%.0f elements, %.0f us, of which waiting %.0f us, joining %.0f us; parts %.0f us in total, last part started after %.0f us), %.1f lists recorded serially (%.0f elements, %.0f us).",
 						st.split_lists / 240.0, st.splits / 240.0, st.split_elements / 240.0, st.split_usec / 240.0, st.split_wait_usec / 240.0, st.split_join_usec / 240.0, st.split_parts_usec / 240.0, st.split_start_usec / 240.0, st.serial_lists / 240.0, st.serial_elements / 240.0, st.serial_usec / 240.0));
-				print_line(vformat("List building, per frame: filling %.0f us, instance data %.0f us, %.1f of them on several threads.",
-						st.fill_usec / 240.0, st.instance_data_usec / 240.0, st.parallel_builds / 240.0));
+				print_line(vformat("List building, per frame: filling %.0f us, instance data %.0f us, %.1f of them on several threads; shadow sort + instance data %.0f us (%.1f deferred builds of %.1f passes, %.0f elements).",
+						st.fill_usec / 240.0, st.instance_data_usec / 240.0, st.parallel_builds / 240.0, st.shadow_usec / 240.0, st.shadow_builds / 240.0, st.shadow_passes / 240.0, st.shadow_elements / 240.0));
 				print_line(vformat("Parallel runs, per frame: %.1f runs, %.1f helpers woken, %.0f parts, %.0f of them on the calling thread, %.0f us of parts in total, %.0f us of wall time.",
 						st.runs / 240.0, st.helpers_woken / 240.0, st.run_parts.get() / 240.0, st.run_parts_on_caller.get() / 240.0, st.run_parts_usec.get() / 240.0, st.run_usec / 240.0));
 				render_list_split_stats.~RenderListSplitStats();
@@ -1110,6 +1110,49 @@ void RenderForwardClustered::SceneState::grow_instance_buffer(RenderListType p_r
 	}
 }
 
+void RenderForwardClustered::_store_instance_data(const GeometryInstanceForwardClustered *p_inst, const GeometryInstanceSurfaceDataCache *p_surface, uint32_t p_flags, uint32_t p_gi_offset, SceneState::InstanceData *r_instance_data) {
+	if (likely(p_inst->store_transform_cache)) {
+		RendererRD::MaterialStorage::store_transform_transposed_3x4(p_inst->transform, r_instance_data->transform);
+		RendererRD::MaterialStorage::store_transform_transposed_3x4(p_inst->prev_transform, r_instance_data->prev_transform);
+
+#ifdef REAL_T_IS_DOUBLE
+		// Split the origin into two components, the float approximation and the missing precision.
+		// In the shader we will combine these back together to restore the lost precision.
+		RendererRD::MaterialStorage::split_double(p_inst->transform.origin.x, &r_instance_data->transform[3], &r_instance_data->model_precision[0]);
+		RendererRD::MaterialStorage::split_double(p_inst->transform.origin.y, &r_instance_data->transform[7], &r_instance_data->model_precision[1]);
+		RendererRD::MaterialStorage::split_double(p_inst->transform.origin.z, &r_instance_data->transform[11], &r_instance_data->model_precision[2]);
+		RendererRD::MaterialStorage::split_double(p_inst->prev_transform.origin.x, &r_instance_data->prev_transform[3], &r_instance_data->prev_model_precision[0]);
+		RendererRD::MaterialStorage::split_double(p_inst->prev_transform.origin.y, &r_instance_data->prev_transform[7], &r_instance_data->prev_model_precision[1]);
+		RendererRD::MaterialStorage::split_double(p_inst->prev_transform.origin.z, &r_instance_data->prev_transform[11], &r_instance_data->prev_model_precision[2]);
+#endif
+	} else {
+		RendererRD::MaterialStorage::store_transform_transposed_3x4(Transform3D(), r_instance_data->transform);
+		RendererRD::MaterialStorage::store_transform_transposed_3x4(Transform3D(), r_instance_data->prev_transform);
+#ifdef REAL_T_IS_DOUBLE
+		memset(r_instance_data->model_precision, 0, sizeof(r_instance_data->model_precision));
+		memset(r_instance_data->prev_model_precision, 0, sizeof(r_instance_data->prev_model_precision));
+#endif
+	}
+
+	r_instance_data->flags = p_flags;
+	r_instance_data->gi_offset = p_gi_offset;
+	r_instance_data->layer_mask = p_inst->layer_mask;
+	r_instance_data->instance_uniforms_ofs = uint32_t(p_inst->shader_uniforms_offset);
+	r_instance_data->set_lightmap_uv_scale(p_inst->lightmap_uv_scale);
+
+	AABB surface_aabb = AABB(Vector3(0.0, 0.0, 0.0), Vector3(1.0, 1.0, 1.0));
+	uint64_t format = RendererRD::MeshStorage::get_singleton()->mesh_surface_get_format(p_surface->surface);
+	Vector4 uv_scale = Vector4(0.0, 0.0, 0.0, 0.0);
+
+	if (format & RSE::ARRAY_FLAG_COMPRESS_ATTRIBUTES) {
+		surface_aabb = RendererRD::MeshStorage::get_singleton()->mesh_surface_get_aabb(p_surface->surface);
+		uv_scale = RendererRD::MeshStorage::get_singleton()->mesh_surface_get_uv_scale(p_surface->surface);
+	}
+
+	r_instance_data->set_compressed_aabb(surface_aabb);
+	r_instance_data->set_uv_scale(uv_scale);
+}
+
 void RenderForwardClustered::_fill_instance_data(RenderListType p_render_list, int *p_render_info, uint32_t p_offset, int32_t p_max_elements, bool p_update_buffer) {
 	RenderList *rl = &render_list[p_render_list];
 	uint32_t element_total = p_max_elements >= 0 ? uint32_t(p_max_elements) : rl->elements.size();
@@ -1197,47 +1240,7 @@ void RenderForwardClustered::_fill_instance_data_range(RenderListType p_render_l
 		GeometryInstanceForwardClustered *inst = surface->owner;
 
 		SceneState::InstanceData instance_data;
-
-		if (likely(inst->store_transform_cache)) {
-			RendererRD::MaterialStorage::store_transform_transposed_3x4(inst->transform, instance_data.transform);
-			RendererRD::MaterialStorage::store_transform_transposed_3x4(inst->prev_transform, instance_data.prev_transform);
-
-#ifdef REAL_T_IS_DOUBLE
-			// Split the origin into two components, the float approximation and the missing precision.
-			// In the shader we will combine these back together to restore the lost precision.
-			RendererRD::MaterialStorage::split_double(inst->transform.origin.x, &instance_data.transform[3], &instance_data.model_precision[0]);
-			RendererRD::MaterialStorage::split_double(inst->transform.origin.y, &instance_data.transform[7], &instance_data.model_precision[1]);
-			RendererRD::MaterialStorage::split_double(inst->transform.origin.z, &instance_data.transform[11], &instance_data.model_precision[2]);
-			RendererRD::MaterialStorage::split_double(inst->prev_transform.origin.x, &instance_data.prev_transform[3], &instance_data.prev_model_precision[0]);
-			RendererRD::MaterialStorage::split_double(inst->prev_transform.origin.y, &instance_data.prev_transform[7], &instance_data.prev_model_precision[1]);
-			RendererRD::MaterialStorage::split_double(inst->prev_transform.origin.z, &instance_data.prev_transform[11], &instance_data.prev_model_precision[2]);
-#endif
-		} else {
-			RendererRD::MaterialStorage::store_transform_transposed_3x4(Transform3D(), instance_data.transform);
-			RendererRD::MaterialStorage::store_transform_transposed_3x4(Transform3D(), instance_data.prev_transform);
-#ifdef REAL_T_IS_DOUBLE
-			memset(instance_data.model_precision, 0, sizeof(instance_data.model_precision));
-			memset(instance_data.prev_model_precision, 0, sizeof(instance_data.prev_model_precision));
-#endif
-		}
-
-		instance_data.flags = inst->flags_cache;
-		instance_data.gi_offset = inst->gi_offset_cache;
-		instance_data.layer_mask = inst->layer_mask;
-		instance_data.instance_uniforms_ofs = uint32_t(inst->shader_uniforms_offset);
-		instance_data.set_lightmap_uv_scale(inst->lightmap_uv_scale);
-
-		AABB surface_aabb = AABB(Vector3(0.0, 0.0, 0.0), Vector3(1.0, 1.0, 1.0));
-		uint64_t format = RendererRD::MeshStorage::get_singleton()->mesh_surface_get_format(surface->surface);
-		Vector4 uv_scale = Vector4(0.0, 0.0, 0.0, 0.0);
-
-		if (format & RSE::ARRAY_FLAG_COMPRESS_ATTRIBUTES) {
-			surface_aabb = RendererRD::MeshStorage::get_singleton()->mesh_surface_get_aabb(surface->surface);
-			uv_scale = RendererRD::MeshStorage::get_singleton()->mesh_surface_get_uv_scale(surface->surface);
-		}
-
-		instance_data.set_compressed_aabb(surface_aabb);
-		instance_data.set_uv_scale(uv_scale);
+		_store_instance_data(inst, surface, inst->flags_cache, inst->gi_offset_cache, &instance_data);
 
 		scene_state.curr_gpu_ptr[p_render_list][i + p_offset] = instance_data;
 
@@ -3437,6 +3440,9 @@ void RenderForwardClustered::_render_shadow_begin() {
 	render_list[RENDER_LIST_SECONDARY].clear();
 	// No need to reset scene_state.curr_gpu_ptr or scene_state.instance_buffer[RENDER_LIST_SECONDARY]
 	// because _fill_instance_data will do that if it detects p_offset == 0u.
+
+	shadow_elements.clear();
+	shadow_build_deferred = shadow_build_parallel && list_build_min_instances > 0 && list_build_max_threads > 1;
 }
 
 void RenderForwardClustered::_render_shadow_append(RID p_framebuffer, const PagedArray<RenderGeometryInstance *> &p_instances, const Projection &p_projection, const Transform3D &p_transform, float p_zfar, float p_bias, float p_normal_bias, bool p_reverse_cull_face, bool p_use_dp, bool p_use_dp_flip, bool p_use_pancake, float p_lod_distance_multiplier, float p_screen_mesh_lod_threshold, const Rect2i &p_rect, bool p_flip_y, bool p_clear_region, bool p_begin, bool p_end, RenderingServerTypes::RenderInfo *p_render_info, const Size2i &p_viewport_size, const Transform3D &p_main_cam_transform) {
@@ -3482,8 +3488,25 @@ void RenderForwardClustered::_render_shadow_append(RID p_framebuffer, const Page
 	uint32_t render_list_from = render_list[RENDER_LIST_SECONDARY].elements.size();
 	_fill_render_list(RENDER_LIST_SECONDARY, &render_data, pass_mode, false, false, false, true);
 	uint32_t render_list_size = render_list[RENDER_LIST_SECONDARY].elements.size() - render_list_from;
-	render_list[RENDER_LIST_SECONDARY].sort_by_key_range(render_list_from, render_list_size);
-	_fill_instance_data(RENDER_LIST_SECONDARY, p_render_info ? p_render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_SHADOW] : (int *)nullptr, render_list_from, render_list_size, false);
+	int *shadow_render_info = p_render_info ? p_render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_SHADOW] : (int *)nullptr;
+	const uint64_t shadow_begin_usec = render_list_split_stats.enabled ? OS::get_singleton()->get_ticks_usec() : 0;
+	if (shadow_build_deferred) {
+		shadow_elements.resize(render_list_from + render_list_size);
+		for (uint32_t i = render_list_from; i < render_list_from + render_list_size; i++) {
+			GeometryInstanceSurfaceDataCache *surface = render_list[RENDER_LIST_SECONDARY].elements[i];
+			const GeometryInstanceForwardClustered *inst = surface->owner;
+			shadow_elements[i] = { surface->sort.sort_key1, surface->sort.sort_key2, surface, inst->flags_cache, inst->gi_offset_cache };
+		}
+		if (shadow_render_info) {
+			shadow_render_info[RSE::VIEWPORT_RENDER_INFO_OBJECTS_IN_FRAME] += render_list_size;
+		}
+	} else {
+		render_list[RENDER_LIST_SECONDARY].sort_by_key_range(render_list_from, render_list_size);
+		_fill_instance_data(RENDER_LIST_SECONDARY, shadow_render_info, render_list_from, render_list_size, false);
+	}
+	if (render_list_split_stats.enabled) {
+		render_list_split_stats.shadow_usec += OS::get_singleton()->get_ticks_usec() - shadow_begin_usec;
+	}
 
 	{
 		//regular forward for now
@@ -3510,12 +3533,190 @@ void RenderForwardClustered::_render_shadow_append(RID p_framebuffer, const Page
 		shadow_pass.rect = p_rect;
 
 		shadow_pass.uniform_buffer_index = uniform_buffer_index;
+		shadow_pass.render_info = shadow_render_info;
 
 		scene_state.shadow_passes.push_back(shadow_pass);
 	}
 }
 
+void RenderForwardClustered::_render_shadow_build() {
+	RenderList *rl = &render_list[RENDER_LIST_SECONDARY];
+	const uint32_t element_total = rl->elements.size();
+	const uint32_t pass_count = scene_state.shadow_passes.size();
+	if (element_total == 0u || pass_count == 0u) {
+		return;
+	}
+
+	const uint64_t begin_usec = render_list_split_stats.enabled ? OS::get_singleton()->get_ticks_usec() : 0;
+	const bool parallel = element_total >= list_build_min_instances;
+	rl->element_info.resize(element_total);
+	// As _fill_instance_data() does for the first pass (offset 0): a new buffer for this frame, mapped if needed.
+	scene_state.grow_instance_buffer(RENDER_LIST_SECONDARY, element_total, false);
+	if (!scene_state.curr_gpu_ptr[RENDER_LIST_SECONDARY]) {
+		scene_state.curr_gpu_ptr[RENDER_LIST_SECONDARY] = reinterpret_cast<SceneState::InstanceData *>(scene_state.instance_buffer[RENDER_LIST_SECONDARY].map_raw_for_upload(0u));
+	}
+
+	// 1. Sort: each pass is a run, a large one is cut in runs of at least 1024 elements merged afterwards. Runs of
+	// equal keys may then come out in another order than one sort would give; it only changes which of several
+	// identical surfaces is drawn first in a depth-only pass.
+	shadow_sort_runs.clear();
+	bool merges = false;
+	for (const SceneState::ShadowPass &shadow_pass : scene_state.shadow_passes) {
+		const uint32_t cuts = parallel ? CLAMP(shadow_pass.element_count / 1024u, 1u, list_build_max_threads) : 1u;
+		merges = merges || cuts > 1;
+		for (uint32_t i = 0; i < cuts; i++) {
+			const uint32_t from = uint32_t(uint64_t(shadow_pass.element_count) * i / cuts);
+			const uint32_t to = uint32_t(uint64_t(shadow_pass.element_count) * (i + 1) / cuts);
+			shadow_sort_runs.push_back({ shadow_pass.element_from + from, to - from });
+		}
+	}
+	if (parallel && shadow_sort_runs.size() > 1) {
+		SortArray<ShadowSortRun, ShadowSortRunLarger> run_sorter;
+		run_sorter.sort(shadow_sort_runs.ptr(), shadow_sort_runs.size());
+		_parallel_run(shadow_sort_runs.size(), list_build_max_threads, &RenderForwardClustered::_render_shadow_sort_part);
+	} else {
+		for (uint32_t i = 0; i < shadow_sort_runs.size(); i++) {
+			_render_shadow_sort_part(i);
+		}
+	}
+
+	if (merges) {
+		// Runs of the same pass are contiguous after sorting them back by position.
+		struct RunByPosition {
+			_FORCE_INLINE_ bool operator()(const ShadowSortRun &A, const ShadowSortRun &B) const { return A.from < B.from; }
+		};
+		SortArray<ShadowSortRun, RunByPosition> position_sorter;
+		position_sorter.sort(shadow_sort_runs.ptr(), shadow_sort_runs.size());
+		const ShadowElementByKey less;
+		uint32_t run = 0;
+		for (const SceneState::ShadowPass &shadow_pass : scene_state.shadow_passes) {
+			uint32_t first_run = run;
+			while (run < shadow_sort_runs.size() && shadow_sort_runs[run].from < shadow_pass.element_from + shadow_pass.element_count) {
+				run++;
+			}
+			const uint32_t run_count = run - first_run;
+			if (run_count < 2) {
+				continue;
+			}
+			// k-way merge, ties to the earlier run.
+			uint32_t heads[16];
+			uint32_t ends[16];
+			ERR_CONTINUE(run_count > 16);
+			for (uint32_t i = 0; i < run_count; i++) {
+				heads[i] = shadow_sort_runs[first_run + i].from;
+				ends[i] = heads[i] + shadow_sort_runs[first_run + i].count;
+			}
+			shadow_merge_buffer.resize(shadow_pass.element_count);
+			for (uint32_t out = 0; out < shadow_pass.element_count; out++) {
+				int best = -1;
+				for (uint32_t i = 0; i < run_count; i++) {
+					if (heads[i] < ends[i] && (best < 0 || less(shadow_elements[heads[i]], shadow_elements[heads[best]]))) {
+						best = int(i);
+					}
+				}
+				shadow_merge_buffer[out] = shadow_elements[heads[best]++];
+			}
+			memcpy(shadow_elements.ptr() + shadow_pass.element_from, shadow_merge_buffer.ptr(), sizeof(ShadowElement) * shadow_pass.element_count);
+		}
+	}
+
+	// 2. Instance data, element info and the marks for instancing, in ranges across all the passes.
+	shadow_repeats.resize(element_total);
+	shadow_pass_begins.resize(element_total);
+	memset(shadow_pass_begins.ptr(), 0, element_total);
+	for (const SceneState::ShadowPass &shadow_pass : scene_state.shadow_passes) {
+		if (shadow_pass.element_count > 0u) {
+			shadow_pass_begins[shadow_pass.element_from] = 1;
+		}
+	}
+	shadow_instance_part_count = parallel ? CLAMP(element_total / 1024u, 1u, list_build_max_threads * 2) : 1u;
+	if (shadow_instance_part_count > 1) {
+		_parallel_run(shadow_instance_part_count, list_build_max_threads, &RenderForwardClustered::_render_shadow_instance_part);
+	} else {
+		_render_shadow_instance_range(0, element_total);
+	}
+
+	// 3. Runs of instanced elements and draw calls, pass by pass, as _fill_instance_data() counts them.
+	for (SceneState::ShadowPass &shadow_pass : scene_state.shadow_passes) {
+		RenderElementInfo *element_info = rl->element_info.ptr() + shadow_pass.element_from;
+		const uint8_t *repeat = shadow_repeats.ptr() + shadow_pass.element_from;
+		const uint32_t count = shadow_pass.element_count;
+		uint32_t draw_calls = 0;
+		uint32_t repeats = 0;
+		for (uint32_t i = 0; i < count; i++) {
+			if (repeat[i] && repeats < RenderElementInfo::MAX_REPEATS) {
+				repeats++;
+			} else {
+				for (uint32_t j = 1; j <= repeats; j++) {
+					element_info[i - j].repeat = j;
+				}
+				repeats = 1;
+				draw_calls++;
+			}
+		}
+		for (uint32_t j = 1; j <= repeats; j++) {
+			element_info[count - j].repeat = j;
+		}
+		if (shadow_pass.render_info) {
+			shadow_pass.render_info[RSE::VIEWPORT_RENDER_INFO_DRAW_CALLS_IN_FRAME] += draw_calls;
+		}
+	}
+
+	if (render_list_split_stats.enabled) {
+		render_list_split_stats.shadow_usec += OS::get_singleton()->get_ticks_usec() - begin_usec;
+		render_list_split_stats.shadow_passes += pass_count;
+		render_list_split_stats.shadow_elements += element_total;
+		render_list_split_stats.shadow_builds += 1;
+		render_list_split_stats.parallel_builds += shadow_instance_part_count > 1 ? 1 : 0;
+	}
+}
+
+void RenderForwardClustered::_render_shadow_sort_part(uint32_t p_part) {
+	// The same comparisons as RenderList::sort_by_key_range(), so the same order for a pass sorted in one run.
+	const ShadowSortRun &run = shadow_sort_runs[p_part];
+	SortArray<ShadowElement, ShadowElementByKey> sorter;
+	sorter.sort(shadow_elements.ptr() + run.from, run.count);
+}
+
+void RenderForwardClustered::_render_shadow_instance_part(uint32_t p_part) {
+	const uint32_t element_total = render_list[RENDER_LIST_SECONDARY].elements.size();
+	const uint32_t from = uint32_t(uint64_t(element_total) * p_part / shadow_instance_part_count);
+	const uint32_t to = uint32_t(uint64_t(element_total) * (p_part + 1) / shadow_instance_part_count);
+	_render_shadow_instance_range(from, to);
+}
+
+void RenderForwardClustered::_render_shadow_instance_range(uint32_t p_from, uint32_t p_to) {
+	RenderList *rl = &render_list[RENDER_LIST_SECONDARY];
+	SceneState::InstanceData *gpu_ptr = scene_state.curr_gpu_ptr[RENDER_LIST_SECONDARY];
+	for (uint32_t i = p_from; i < p_to; i++) {
+		const ShadowElement &element = shadow_elements[i];
+		GeometryInstanceSurfaceDataCache *surface = element.surface;
+		const GeometryInstanceForwardClustered *inst = surface->owner;
+		rl->elements[i] = surface;
+
+		SceneState::InstanceData instance_data;
+		_store_instance_data(inst, surface, element.flags, element.gi_offset, &instance_data);
+		gpu_ptr[i] = instance_data;
+
+		// Same as the previous element of the pass: drawn with it, instanced. Multimeshes and mesh instances never are.
+		const bool cant_repeat = element.flags & INSTANCE_DATA_FLAG_MULTIMESH || inst->mesh_instance.is_valid();
+		bool repeat = false;
+		if (!shadow_pass_begins[i] && !cant_repeat) {
+			const ShadowElement &prev = shadow_elements[i - 1];
+			const GeometryInstanceForwardClustered *prev_inst = prev.surface->owner;
+			const bool prev_cant_repeat = prev.flags & INSTANCE_DATA_FLAG_MULTIMESH || prev_inst->mesh_instance.is_valid();
+			repeat = !prev_cant_repeat && prev.sort_key1 == element.sort_key1 && prev.sort_key2 == element.sort_key2 && inst->mirror == prev_inst->mirror;
+		}
+		shadow_repeats[i] = repeat;
+		rl->element_info[i].value = uint32_t(element.sort_key1 & 0xFFF);
+	}
+}
+
 void RenderForwardClustered::_render_shadow_process() {
+	if (shadow_build_deferred) {
+		_render_shadow_build();
+	}
+
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	if (scene_state.instance_buffer[RENDER_LIST_SECONDARY].get_size(0u) > 0u) {
 		rd->buffer_flush(scene_state.instance_buffer[RENDER_LIST_SECONDARY]._get(0u));
@@ -5882,6 +6083,10 @@ RenderForwardClustered::RenderForwardClustered() {
 		// being rendered (0: they leave as soon as theirs is done, every run wakes its own).
 		const String linger_env = OS::get_singleton()->get_environment("GODOT_PARALLEL_LINGER_US");
 		parallel_linger_usec = linger_env.is_empty() ? 1000 : uint64_t(MAX(linger_env.to_int(), 0));
+
+		// GODOT_PARALLEL_SHADOW_BUILD=0 sorts the shadow passes and writes their instance data one by one, as they are
+		// filled.
+		shadow_build_parallel = OS::get_singleton()->get_environment("GODOT_PARALLEL_SHADOW_BUILD") != "0";
 	}
 
 	/* SCENE SHADER */
