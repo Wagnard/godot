@@ -1123,7 +1123,11 @@ void RenderingDeviceGraph::_run_render_commands(int32_t p_level, const RecordedC
 				if (driver_callback_command->textures_count > 0) {
 					driver->command_prepare_callback_textures(r_command_buffer, VectorView<RDD::CallbackTexture>(driver_callback_command->textures(), driver_callback_command->textures_count));
 				}
+				const uint64_t callback_begin_usec = parallel_stats ? OS::get_singleton()->get_ticks_usec() : 0;
 				driver_callback_command->callback(driver, r_command_buffer, driver_callback_command->userdata);
+				if (parallel_stats) {
+					stats_callback_usec += OS::get_singleton()->get_ticks_usec() - callback_begin_usec;
+				}
 				driver->command_buffer_invalidate_state_cache(r_command_buffer);
 			} break;
 			case RecordedCommand::TYPE_RAYTRACING_LIST: {
@@ -1932,7 +1936,6 @@ void RenderingDeviceGraph::_run_parallel_slice(ParallelSlice &p_slice) {
 
 	if (parallel_stats) {
 		p_slice.end_usec = OS::get_singleton()->get_ticks_usec();
-		_count_parallel_slice(p_slice);
 	}
 }
 
@@ -3287,6 +3290,7 @@ void RenderingDeviceGraph::end(bool p_reorder_commands, bool p_full_barriers, RD
 	uint64_t stats_calling_usec = 0;
 	uint64_t stats_wait_usec = 0;
 	uint64_t stats_serial_usec = 0;
+	uint64_t stats_join_usec = 0;
 	bool stats_split = false;
 
 	thread_local LocalVector<RecordedCommandSort> commands_sorted;
@@ -3497,6 +3501,15 @@ void RenderingDeviceGraph::end(bool p_reorder_commands, bool p_full_barriers, RD
 						const uint64_t wait_end_usec = OS::get_singleton()->get_ticks_usec();
 						stats_calling_usec = wait_begin_usec - calling_begin_usec;
 						stats_wait_usec = wait_end_usec - wait_begin_usec;
+						// Counted here rather than by each worker: counting after its slice delayed the join.
+						uint64_t last_worker_end_usec = 0;
+						for (ParallelSlice &slice : parallel_slices) {
+							_count_parallel_slice(slice);
+							if (!slice.recorded_on_calling_thread) {
+								last_worker_end_usec = MAX(last_worker_end_usec, slice.end_usec);
+							}
+						}
+						stats_join_usec = last_worker_end_usec > wait_begin_usec ? wait_end_usec - last_worker_end_usec : 0;
 					}
 
 					parallel_commands_sorted = nullptr;
@@ -3586,6 +3599,9 @@ void RenderingDeviceGraph::end(bool p_reorder_commands, bool p_full_barriers, RD
 		st.calling_usec += stats_calling_usec;
 		st.wait_usec += stats_wait_usec;
 		st.serial_usec += stats_serial_usec;
+		st.callback_usec += stats_callback_usec;
+		st.join_usec += stats_join_usec;
+		stats_callback_usec = 0;
 		if (stats_split) {
 			st.split_frames++;
 			st.slices += parallel_slices.size();
@@ -3608,6 +3624,7 @@ void RenderingDeviceGraph::end(bool p_reorder_commands, bool p_full_barriers, RD
 
 		if (st.frames == 240) {
 			const uint64_t n = st.frames;
+			print_line(vformat("RenderingDeviceGraph: driver callbacks %d us/frame, join after the last worker slice %d us/frame.", st.callback_usec / n, st.join_usec / n));
 			print_line(vformat("RenderingDeviceGraph: end() %d us/frame = prepare %d + own slices %d + wait %d + serial %d (+ rest %d); %d KiB-equivalent of commands/frame; split %d of %d frames, %.2f slices/frame (up to %d), %.2f on the render thread, %.2f draw list cuts/frame.",
 					st.end_usec / n, st.prepare_usec / n, st.calling_usec / n, st.wait_usec / n, st.serial_usec / n,
 					(st.end_usec - st.prepare_usec - st.calling_usec - st.wait_usec - st.serial_usec) / n,

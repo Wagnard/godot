@@ -35,6 +35,7 @@
 #endif
 
 #ifdef ENABLE_DLSS
+#include "core/os/os.h"
 #include "drivers/streamline/streamline.h"
 #include "drivers/streamline/streamline_context.h"
 #include "servers/rendering/renderer_rd/effects/camera_reprojection.h"
@@ -55,6 +56,32 @@ static constexpr sl::BufferType DLSS_BUFFER_TYPE_UI_ALPHA = 69; // sl::kBufferTy
 // thread, or the main-thread token when no draw command set it — the very first frame, or a
 // direct draw. See RenderingServerDefault::draw for why the main-thread token alone was not
 // enough.
+// GODOT_PARALLEL_RECORDING_STATS=1: where the DLSS callback's time goes, printed every 240 calls.
+enum DLSSCallbackSection {
+	DLSS_SECTION_OPTIONS,
+	DLSS_SECTION_CONSTANTS,
+	DLSS_SECTION_TAGS,
+	DLSS_SECTION_FRAME_GENERATION,
+	DLSS_SECTION_EVALUATE,
+	DLSS_SECTION_REST,
+	DLSS_SECTION_MAX,
+};
+static struct {
+	int enabled = -1;
+	uint32_t calls = 0;
+	uint64_t usec[DLSS_SECTION_MAX] = {};
+	uint64_t lap_usec = 0;
+} dlss_callback_stats;
+
+static void dlss_callback_lap(DLSSCallbackSection p_section) {
+	if (dlss_callback_stats.enabled <= 0) {
+		return;
+	}
+	const uint64_t now_usec = OS::get_singleton()->get_ticks_usec();
+	dlss_callback_stats.usec[p_section] += now_usec - dlss_callback_stats.lap_usec;
+	dlss_callback_stats.lap_usec = now_usec;
+}
+
 static sl::FrameToken *sl_frame_token() {
 	StreamlineContext &sl = StreamlineContext::get();
 	return sl.render_token != nullptr ? sl.render_token : sl.last_token;
@@ -601,6 +628,8 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext
 		}
 	}
 
+	dlss_callback_lap(DLSS_SECTION_OPTIONS);
+
 	// Set SL Options
 	if (StreamlineContext::get().slSetConstants != nullptr) {
 		sl::float4x4 mtxIdentity = sl_make_identity_matrix();
@@ -663,6 +692,8 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext
 		}
 	}
 
+	dlss_callback_lap(DLSS_SECTION_CONSTANTS);
+
 	// Tag resources
 	if (StreamlineContext::get().slSetTag != nullptr) {
 		sl::Resource resources[10];
@@ -711,6 +742,8 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext
 			ERR_FAIL_MSG("Failed to call streamline slSetTag. Result: " + String(StreamlineContext::result_to_string(result)));
 		}
 	}
+
+	dlss_callback_lap(DLSS_SECTION_TAGS);
 
 	// Toggle DLSS Frame Generation (only enabled in game mode). On D3D12, sl.dlss_g is only loaded
 	// while frame generation is wanted (see the end of this block): until the swap chain has been
@@ -819,6 +852,8 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext
 	}
 #endif
 
+	dlss_callback_lap(DLSS_SECTION_FRAME_GENERATION);
+
 	// Evaluate DLSS Super Resolution or DLSS Ray Reconstruction
 	if (context->currentDlssOptions.mode != sl::DLSSMode::eOff) {
 		const sl::BaseStructure *inputs[] = { &context->viewport };
@@ -838,6 +873,8 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext
 			}
 		}
 	}
+
+	dlss_callback_lap(DLSS_SECTION_EVALUATE);
 
 	// NIS sharpening
 	// **************
@@ -925,7 +962,21 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext
 
 void RendererRD::DLSSEffect::_upscale_internal_graph_callback(RenderingDeviceDriver *p_driver, RDD::CommandBufferID p_command_buffer, void *p_userdata) {
 	DLSSContextInner *self = (DLSSContextInner *)p_userdata;
+	if (dlss_callback_stats.enabled < 0) {
+		dlss_callback_stats.enabled = OS::get_singleton()->get_environment("GODOT_PARALLEL_RECORDING_STATS") == "1" ? 1 : 0;
+	}
+	dlss_callback_stats.lap_usec = OS::get_singleton()->get_ticks_usec();
 	self->last_effect->_upscale_internal(p_command_buffer, self->last_parameters);
+	dlss_callback_lap(DLSS_SECTION_REST);
+	if (dlss_callback_stats.enabled > 0 && ++dlss_callback_stats.calls == 240) {
+		const uint64_t *u = dlss_callback_stats.usec;
+		print_line(vformat("DLSS callback, per call: options %d us, constants %d us, tags %d us, frame generation %d us, evaluate %d us, rest %d us.",
+				u[DLSS_SECTION_OPTIONS] / 240, u[DLSS_SECTION_CONSTANTS] / 240, u[DLSS_SECTION_TAGS] / 240, u[DLSS_SECTION_FRAME_GENERATION] / 240, u[DLSS_SECTION_EVALUATE] / 240, u[DLSS_SECTION_REST] / 240));
+		dlss_callback_stats.calls = 0;
+		for (uint64_t &usec : dlss_callback_stats.usec) {
+			usec = 0;
+		}
+	}
 }
 
 bool DLSSEffect::frame_generation_wants_hudless() {

@@ -947,6 +947,8 @@ private:
 		uint64_t calling_usec = 0; // Slices recorded by the calling thread.
 		uint64_t wait_usec = 0; // Waiting for the worker slices.
 		uint64_t serial_usec = 0; // Serial recording (the whole frame when not split, the tail otherwise).
+		uint64_t callback_usec = 0; // Driver callbacks (Streamline), whichever slice holds them.
+		uint64_t join_usec = 0; // From the end of the last worker slice to the calling thread's return from the wait.
 		uint64_t size = 0;
 		uint64_t slices = 0;
 		uint64_t calling_slices = 0;
@@ -965,6 +967,7 @@ private:
 	};
 	bool parallel_stats = false;
 	ParallelStats parallel_stats_data;
+	uint64_t stats_callback_usec = 0; // This frame's driver callbacks; they are all recorded by the calling thread.
 	uint64_t parallel_launch_usec = 0;
 	const RecordedCommandSort *parallel_commands_sorted = nullptr;
 	uint32_t parallel_commands_count = 0;
