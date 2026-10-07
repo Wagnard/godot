@@ -39,6 +39,7 @@
 #include "core/os/os.h"
 #include "core/profiling/profiling.h"
 #include "core/templates/fixed_vector.h"
+#include "drivers/streamline/streamline.h"
 #include "servers/rendering/rendering_device_binds.h"
 #include "servers/rendering/rendering_shader_container.h"
 #include "servers/rendering/shader_include_db.h"
@@ -5494,6 +5495,10 @@ Error RenderingDevice::screen_prepare_for_drawing(DisplayServerEnums::WindowID p
 	// Erase the framebuffer corresponding to this screen from the map in case any of the operations fail.
 	screen_framebuffers.erase(p_screen);
 
+	// The previous frame's present moves the back buffer index the acquisition reads, and nothing may use the main
+	// queue or the swap chain behind the submission thread's back.
+	_submit_thread_drain();
+
 	// If this frame has already queued this swap chain for presentation, we present it and remove it from the pending list.
 	uint32_t to_present_index = 0;
 	while (to_present_index < frames[frame].swap_chains_to_present.size()) {
@@ -8225,7 +8230,17 @@ void RenderingDevice::swap_buffers(bool p_present) {
 	}
 
 	GodotProfileZoneGrouped(_profile_zone, "_execute_frame");
-	_execute_frame(p_present);
+	if (submit_thread_enabled) {
+		// The submission thread submits and presents this frame while this one begins the next.
+		{
+			MutexLock lock(submit_mutex);
+			submit_jobs.push_back({ uint32_t(frame), p_present, Streamline::get_singleton()->get_render_frame_token() });
+			submit_frame_job[frame] = ++submit_jobs_pushed;
+		}
+		submit_condition.notify_one();
+	} else {
+		_execute_frame(p_present);
+	}
 
 	// Advance to the next frame and begin recording again.
 	frame = (frame + 1) % frames.size();
@@ -8474,13 +8489,13 @@ void RenderingDevice::_end_frame() {
 	driver->end_segment();
 }
 
-void RenderingDevice::execute_chained_cmds(bool p_present_swap_chain, RenderingDeviceDriver::FenceID p_draw_fence,
+void RenderingDevice::execute_chained_cmds(uint32_t p_frame, bool p_present_swap_chain, RenderingDeviceDriver::FenceID p_draw_fence,
 		RenderingDeviceDriver::SemaphoreID p_dst_draw_semaphore_to_signal) {
 	// Execute command buffers and use semaphores to wait on the execution of the previous one.
 	// Normally there's only one command buffer, but driver workarounds can force situations where
 	// there'll be more.
 	uint32_t command_buffer_count = 1;
-	RDG::CommandBufferPool &buffer_pool = frames[frame].command_buffer_pool;
+	RDG::CommandBufferPool &buffer_pool = frames[p_frame].command_buffer_pool;
 	if (buffer_pool.buffers_used > 0) {
 		command_buffer_count += buffer_pool.buffers_used;
 		buffer_pool.buffers_used = 0;
@@ -8493,7 +8508,7 @@ void RenderingDevice::execute_chained_cmds(bool p_present_swap_chain, RenderingD
 	// Adreno workaround on mobile, only if the workaround is active). Thus we must execute all of them
 	// and chain them together via semaphores as dependent executions.
 	thread_local LocalVector<RDD::SemaphoreID> wait_semaphores;
-	wait_semaphores = frames[frame].semaphores_to_wait_on;
+	wait_semaphores = frames[p_frame].semaphores_to_wait_on;
 
 	thread_local LocalVector<RDD::CommandBufferID> command_buffers;
 
@@ -8505,7 +8520,7 @@ void RenderingDevice::execute_chained_cmds(bool p_present_swap_chain, RenderingD
 			command_buffers.push_back(buffer_pool.buffers[i - 1]);
 		} else {
 			// The command buffers recorded in parallel with the main one follow it, in the same submission.
-			command_buffers.push_back(frames[frame].command_buffer);
+			command_buffers.push_back(frames[p_frame].command_buffer);
 			for (uint32_t j = 0; j < buffer_pool.parallel_buffers_used; j++) {
 				command_buffers.push_back(buffer_pool.parallel_buffers[j]);
 			}
@@ -8519,7 +8534,7 @@ void RenderingDevice::execute_chained_cmds(bool p_present_swap_chain, RenderingD
 
 			if (p_present_swap_chain) {
 				// Just present the swap chains as part of the last command execution.
-				swap_chains = frames[frame].swap_chains_to_present;
+				swap_chains = frames[p_frame].swap_chains_to_present;
 			}
 		} else {
 			signal_semaphore = buffer_pool.semaphores[i];
@@ -8535,38 +8550,95 @@ void RenderingDevice::execute_chained_cmds(bool p_present_swap_chain, RenderingD
 		wait_semaphores[0] = signal_semaphore;
 	}
 
-	frames[frame].semaphores_to_wait_on.clear();
+	frames[p_frame].semaphores_to_wait_on.clear();
 }
 
 void RenderingDevice::_execute_frame(bool p_present) {
+	_execute_frame_slot(frame, p_present);
+}
+
+void RenderingDevice::_execute_frame_slot(uint32_t p_frame, bool p_present) {
 	// Check whether this frame should present the swap chains and in which queue.
-	const bool frame_can_present = p_present && !frames[frame].swap_chains_to_present.is_empty();
+	const bool frame_can_present = p_present && !frames[p_frame].swap_chains_to_present.is_empty();
 	const bool separate_present_queue = main_queue != present_queue;
 
 	// The semaphore is required if the frame can be presented and a separate present queue is used;
 	// since the separate queue will wait for that semaphore before presenting.
 	const RDD::SemaphoreID semaphore = (frame_can_present && separate_present_queue)
-			? frames[frame].semaphore
+			? frames[p_frame].semaphore
 			: RDD::SemaphoreID(nullptr);
 	const bool present_swap_chain = frame_can_present && !separate_present_queue;
 
-	execute_chained_cmds(present_swap_chain, frames[frame].fence, semaphore);
+	execute_chained_cmds(p_frame, present_swap_chain, frames[p_frame].fence, semaphore);
 	// Indicate the fence has been signaled so the next time the frame's contents need to be
 	// used, the CPU needs to wait on the work to be completed.
-	frames[frame].fence_signaled = true;
+	frames[p_frame].fence_signaled = true;
 
 	if (frame_can_present) {
 		if (separate_present_queue) {
 			// Issue the presentation separately if the presentation queue is different from the main queue.
-			driver->command_queue_execute_and_present(present_queue, frames[frame].semaphore, {}, {}, {}, frames[frame].swap_chains_to_present);
+			driver->command_queue_execute_and_present(present_queue, frames[p_frame].semaphore, {}, {}, {}, frames[p_frame].swap_chains_to_present);
 		}
 
-		frames[frame].swap_chains_to_present.clear();
+		frames[p_frame].swap_chains_to_present.clear();
+	}
+}
+
+void RenderingDevice::_submit_thread_func(void *p_userdata) {
+	Thread::set_name("RenderingDevice submission");
+	RenderingDevice *rd = (RenderingDevice *)p_userdata;
+	while (true) {
+		SubmitJob job;
+		{
+			MutexLock lock(rd->submit_mutex);
+			while (rd->submit_jobs.is_empty() && !rd->submit_thread_exit) {
+				rd->submit_condition.wait(lock);
+			}
+			if (rd->submit_jobs.is_empty()) {
+				break;
+			}
+			job = rd->submit_jobs[0];
+			rd->submit_jobs.remove_at(0);
+		}
+
+		Streamline::set_present_frame_token(job.frame_token);
+		rd->_execute_frame_slot(job.frame, job.present);
+
+		{
+			MutexLock lock(rd->submit_mutex);
+			rd->submit_jobs_done++;
+		}
+		rd->submit_done_condition.notify_all();
+	}
+}
+
+void RenderingDevice::_submit_thread_wait(uint64_t p_job) {
+	if (!submit_thread_enabled) {
+		return;
+	}
+	MutexLock lock(submit_mutex);
+	while (submit_jobs_done < p_job) {
+		submit_done_condition.wait(lock);
+	}
+}
+
+void RenderingDevice::_submit_thread_drain() {
+	if (!submit_thread_enabled) {
+		return;
+	}
+	MutexLock lock(submit_mutex);
+	while (submit_jobs_done < submit_jobs_pushed) {
+		submit_done_condition.wait(lock);
 	}
 }
 
 void RenderingDevice::_stall_for_frame(uint32_t p_frame) {
 	thread_local PackedByteArray packed_byte_array;
+
+	if (submit_thread_enabled) {
+		// The slot's fence is only signaled once its submission has run.
+		_submit_thread_wait(submit_frame_job[p_frame]);
+	}
 
 	if (frames[p_frame].fence_signaled) {
 		GodotProfileZoneGroupedFirst(_profile_zone, "driver->fence_wait");
@@ -8660,6 +8732,7 @@ void RenderingDevice::_stall_for_previous_frames() {
 }
 
 void RenderingDevice::_flush_and_stall_for_all_frames(bool p_begin_frame) {
+	_submit_thread_drain();
 	_stall_for_previous_frames();
 	_end_frame();
 	_execute_frame(false);
@@ -8896,6 +8969,18 @@ Error RenderingDevice::initialize(RenderingContextDriver *p_context, DisplayServ
 
 	// Vulkan only: the hiccups it removes were seen with Vulkan presentation; D3D12 did not need it.
 	submit_after_previous_frame = main_surface != 0 && frames.size() > 1 && driver->get_api_name() == "Vulkan" && bool(GLOBAL_GET("rendering/rendering_device/vsync/submit_after_previous_frame"));
+
+	// D3D12 with a window: frames are submitted and presented by a thread of their own (GODOT_SUBMIT_THREAD=0: by the
+	// render thread, as before).
+	submit_thread_enabled = main_surface != 0 && driver->get_api_name() == "D3D12" && OS::get_singleton()->get_environment("GODOT_SUBMIT_THREAD") != "0";
+	if (submit_thread_enabled) {
+		submit_frame_job.resize(frames.size());
+		for (uint64_t &job : submit_frame_job) {
+			job = 0;
+		}
+		submit_thread.start(_submit_thread_func, this);
+		print_verbose("RenderingDevice: frames are submitted and presented by a thread of their own.");
+	}
 
 	// Convert block size from KB.
 	upload_staging_buffers.block_size = GLOBAL_GET("rendering/rendering_device/staging_buffer/block_size_kb");
@@ -9229,6 +9314,16 @@ void RenderingDevice::finalize() {
 	if (!frames.is_empty()) {
 		// Wait for all frames to have finished rendering.
 		_flush_and_stall_for_all_frames(false);
+	}
+
+	if (submit_thread_enabled) {
+		{
+			MutexLock lock(submit_mutex);
+			submit_thread_exit = true;
+		}
+		submit_condition.notify_one();
+		submit_thread.wait_to_finish();
+		submit_thread_enabled = false;
 	}
 
 	// Wait for transfer workers to finish.

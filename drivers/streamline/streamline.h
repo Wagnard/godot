@@ -65,6 +65,12 @@ public:
 	uint32_t get_swap_chain_serial() const { return swap_chain_serial.get(); }
 	void bump_swap_chain_serial() { swap_chain_serial.increment(); }
 
+	// The frame token of the draw the render thread is executing, and the one a submission thread presents with:
+	// present markers must carry the token of the frame being presented, which the render thread has already left.
+	// 0 (the default on every thread) uses the draw's own token.
+	uint64_t get_render_frame_token() const;
+	static void set_present_frame_token(uint64_t p_token);
+
 	Streamline();
 	virtual ~Streamline();
 };

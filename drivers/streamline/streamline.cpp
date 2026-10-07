@@ -98,6 +98,20 @@ void Streamline::update_project_settings() {
 #endif
 }
 
+static thread_local uint64_t present_frame_token = 0;
+
+uint64_t Streamline::get_render_frame_token() const {
+#ifdef STREAMLINE_ENABLED
+	return (uint64_t)StreamlineContext::get().render_token;
+#else
+	return 0;
+#endif
+}
+
+void Streamline::set_present_frame_token(uint64_t p_token) {
+	present_frame_token = p_token;
+}
+
 void Streamline::emit_marker(StreamlineMarkerType marker) {
 #ifdef STREAMLINE_ENABLED
 	StreamlineContext &sl_context = StreamlineContext::get();
@@ -212,7 +226,9 @@ void Streamline::emit_marker(StreamlineMarkerType marker) {
 		case StreamlineMarkerType::STREAMLINE_MARKER_END_RENDER:
 		case StreamlineMarkerType::STREAMLINE_MARKER_BEGIN_PRESENT:
 		case StreamlineMarkerType::STREAMLINE_MARKER_END_PRESENT:
-			if (sl_context.render_token != nullptr) {
+			if (present_frame_token != 0) {
+				token = (sl::FrameToken *)present_frame_token; // Submission thread: the presented frame's token.
+			} else if (sl_context.render_token != nullptr) {
 				token = sl_context.render_token;
 			}
 			break;

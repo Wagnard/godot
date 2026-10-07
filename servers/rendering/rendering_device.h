@@ -32,6 +32,7 @@
 
 #include "core/object/worker_thread_pool.h"
 #include "core/os/condition_variable.h"
+#include "core/os/thread.h"
 #include "core/os/thread_safe.h"
 #include "core/templates/local_vector.h"
 #include "core/templates/rb_map.h"
@@ -90,6 +91,30 @@ private:
 	bool is_main_instance = false;
 	// rendering/rendering_device/vsync/submit_after_previous_frame, on Vulkan, with a swap chain and more than one frame in flight.
 	bool submit_after_previous_frame = false;
+
+	// Submission thread (D3D12, main instance with a window; GODOT_SUBMIT_THREAD=0 disables it): swap_buffers() hands
+	// the recorded frame over and begins the next one while this thread submits and presents it. Anything else that
+	// uses the main queue or a swap chain first waits for it to be idle (_submit_thread_drain()), and a frame slot is
+	// reused only once its submission is done (_stall_for_frame()).
+	struct SubmitJob {
+		uint32_t frame = 0;
+		bool present = false;
+		uint64_t frame_token = 0; // Streamline token of the frame, for its present markers.
+	};
+	bool submit_thread_enabled = false;
+	Thread submit_thread;
+	BinaryMutex submit_mutex;
+	ConditionVariable submit_condition; // A job was pushed, or the thread must exit.
+	ConditionVariable submit_done_condition; // A job is done.
+	LocalVector<SubmitJob> submit_jobs; // FIFO.
+	uint64_t submit_jobs_pushed = 0;
+	uint64_t submit_jobs_done = 0;
+	bool submit_thread_exit = false;
+	LocalVector<uint64_t> submit_frame_job; // Per frame slot: the number of the job that submits it.
+
+	static void _submit_thread_func(void *p_userdata);
+	void _submit_thread_wait(uint64_t p_job);
+	void _submit_thread_drain();
 
 protected:
 	static void _bind_methods();
@@ -1938,7 +1963,7 @@ private:
 	SafeNumeric<uint64_t> buffer_memory;
 
 protected:
-	void execute_chained_cmds(bool p_present_swap_chain,
+	void execute_chained_cmds(uint32_t p_frame, bool p_present_swap_chain,
 			RenderingDeviceDriver::FenceID p_draw_fence,
 			RenderingDeviceDriver::SemaphoreID p_dst_draw_semaphore_to_signal);
 
@@ -1947,6 +1972,7 @@ public:
 	void _begin_frame(bool p_presented = false);
 	void _end_frame();
 	void _execute_frame(bool p_present);
+	void _execute_frame_slot(uint32_t p_frame, bool p_present);
 	void _stall_for_frame(uint32_t p_frame);
 	void _stall_for_previous_frames();
 	void _flush_and_stall_for_all_frames(bool p_begin_frame = true);
