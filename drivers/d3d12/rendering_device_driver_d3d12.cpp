@@ -2418,8 +2418,11 @@ void RenderingDeviceDriverD3D12::command_pipeline_barrier(CommandBufferID p_cmd_
 		buffer_barriers.push_back(buffer_barrier_d3d12);
 	}
 
-	D3D12_TEXTURE_BARRIER texture_barrier_d3d12 = {};
 	for (uint32_t i = 0; i < p_texture_barriers.size(); i++) {
+		// A new one per barrier: a whole-resource barrier leaves the range fields untouched, and values left there by the
+		// previous barrier of the loop (another texture's layers or planes) made D3D12 skip subresources of this one
+		// (GPU-based validation: SRV/UAV accessed in the layout before the transition).
+		D3D12_TEXTURE_BARRIER texture_barrier_d3d12 = {};
 		const TextureBarrier &texture_barrier_rd = p_texture_barriers[i];
 		const TextureInfo *texture_info = (const TextureInfo *)(texture_barrier_rd.texture.id);
 		if (texture_info->main_texture) {
