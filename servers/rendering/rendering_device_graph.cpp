@@ -2342,6 +2342,8 @@ void RenderingDeviceGraph::finalize() {
 	frames.clear();
 }
 
+SafeNumeric<int64_t> RenderingDeviceGraph::tracking_frame_counter;
+
 void RenderingDeviceGraph::begin() {
 	command_data.clear();
 	command_data_offsets.clear();
@@ -2364,7 +2366,9 @@ void RenderingDeviceGraph::begin() {
 	frames[frame].secondary_command_buffers_used = 0;
 	draw_instruction_list.index = 0;
 	compute_instruction_list.index = 0;
-	tracking_frame++;
+	// From a counter shared by every graph: resource trackers compare it to the frame they last saw, and the next
+	// frame may be recorded into another graph while this one is replayed.
+	tracking_frame = tracking_frame_counter.increment();
 
 #ifdef DEV_ENABLED
 	write_dependency_counters.clear();

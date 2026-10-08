@@ -1870,7 +1870,10 @@ private:
 	void _check_transfer_worker_vertex_array(VertexArray *p_vertex_array);
 	void _check_transfer_worker_index_array(IndexArray *p_index_array);
 	void _submit_transfer_workers(RDD::CommandBufferID p_draw_command_buffer = RDD::CommandBufferID());
-	void _submit_transfer_barriers(RDD::CommandBufferID p_draw_command_buffer);
+	void _take_transfer_barriers(uint32_t p_frame);
+	// The replay of a recorded frame: the transfer barriers, the graph, the end of its command buffer. Reads nothing
+	// but that frame's slot and graph (RD-REPLAY-THREAD-STUDY.md, step 1b).
+	void _replay_frame(uint32_t p_frame, RenderingDeviceGraph *p_graph);
 	void _wait_for_transfer_workers();
 	void _free_transfer_workers();
 
@@ -1888,7 +1891,10 @@ private:
 	bool _dependencies_make_mutable_recursive(RID p_id, RDG::ResourceTracker *p_resource_tracker);
 	bool _dependencies_make_mutable(RID p_id, RDG::ResourceTracker *p_resource_tracker);
 
-	RenderingDeviceGraph draw_graph;
+	// Two graphs: the next frame is recorded into one while the other is replayed (RD-REPLAY-THREAD-STUDY.md, step 1d).
+	// draw_graph is the one being recorded, swapped by swap_buffers().
+	RenderingDeviceGraph draw_graphs[2];
+	RenderingDeviceGraph *draw_graph = &draw_graphs[0];
 
 	/**************************/
 	/**** QUEUE MANAGEMENT ****/
@@ -1920,6 +1926,10 @@ private:
 	// when the frame is cycled.
 
 	struct Frame {
+		// The transfer workers' texture barriers this frame's commands start with, taken when its recording ends and
+		// recorded by its replay (_replay_frame()), which may run on another thread.
+		LocalVector<RDD::TextureBarrier> transfer_texture_barriers;
+
 		// List in usage order, from last to free to first to free.
 		List<Buffer> buffers_to_dispose_of;
 		List<Texture> textures_to_dispose_of;

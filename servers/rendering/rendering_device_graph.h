@@ -900,7 +900,8 @@ private:
 	RDD *driver = nullptr;
 	RDD::DriverWorkarounds driver_workarounds;
 	RenderPassCreationFunction render_pass_creation_function = nullptr;
-	int64_t tracking_frame = 0;
+	int64_t tracking_frame = 0; // Unique among all graphs (tracking_frame_counter): two graphs alternate frames (replay thread).
+	static SafeNumeric<int64_t> tracking_frame_counter;
 	LocalVector<uint8_t> command_data;
 	LocalVector<uint32_t> command_data_offsets;
 	LocalVector<RDD::TextureBarrier> command_normalization_barriers;
