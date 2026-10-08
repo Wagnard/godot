@@ -238,6 +238,7 @@ public:
 	struct FramebufferCache {
 		uint32_t width = 0;
 		uint32_t height = 0;
+		uint32_t layers = 1; // More than one: a layered framebuffer (RenderingDevice::framebuffer_create(), p_layers).
 		LocalVector<RDD::TextureID> textures;
 		LocalVector<ResourceTracker *> trackers;
 		HashMap<uint64_t, FramebufferStorage> storage_map;

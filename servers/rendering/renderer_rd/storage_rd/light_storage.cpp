@@ -2857,6 +2857,12 @@ LightStorage::ShadowCubemap *LightStorage::_get_shadow_cubemap(int p_size) {
 			sc.side_fb[i] = RD::get_singleton()->framebuffer_create(fbtex);
 		}
 
+		if (RD::get_singleton()->has_feature(RD::SUPPORTS_SHADER_OUTPUT_LAYER)) {
+			Vector<RID> fbtex;
+			fbtex.push_back(sc.cubemap);
+			sc.layered_fb = RD::get_singleton()->framebuffer_create(fbtex, RD::INVALID_ID, 1, 6);
+		}
+
 		shadow_cubemaps[p_size] = sc;
 	}
 
@@ -2873,6 +2879,12 @@ RID LightStorage::get_cubemap_fb(int p_size, int p_pass) {
 	ShadowCubemap *cubemap = _get_shadow_cubemap(p_size);
 
 	return cubemap->side_fb[p_pass];
+}
+
+RID LightStorage::get_cubemap_layered_fb(int p_size) {
+	ShadowCubemap *cubemap = _get_shadow_cubemap(p_size);
+
+	return cubemap->layered_fb;
 }
 
 RD::DataFormat LightStorage::get_cubemap_depth_format() {

@@ -348,7 +348,7 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 	uint32_t pipeline_hash = 0;
 	uint32_t prev_pipeline_hash = 0;
 
-	bool shadow_pass = (p_pass_mode == PASS_MODE_SHADOW) || (p_pass_mode == PASS_MODE_SHADOW_DP);
+	bool shadow_pass = (p_pass_mode == PASS_MODE_SHADOW) || (p_pass_mode == PASS_MODE_SHADOW_DP) || (p_pass_mode == PASS_MODE_SHADOW_CUBE);
 
 	SceneState::PushConstant push_constant;
 
@@ -437,7 +437,7 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 		if constexpr (p_pass_mode == PASS_MODE_DEPTH_MATERIAL || p_pass_mode == PASS_MODE_SDF) {
 			cull_variant = SceneShaderForwardClustered::ShaderData::CULL_VARIANT_DOUBLE_SIDED;
 		} else {
-			if constexpr (p_pass_mode == PASS_MODE_SHADOW || p_pass_mode == PASS_MODE_SHADOW_DP) {
+			if constexpr (p_pass_mode == PASS_MODE_SHADOW || p_pass_mode == PASS_MODE_SHADOW_DP || p_pass_mode == PASS_MODE_SHADOW_CUBE) {
 				if (surf->flags & GeometryInstanceSurfaceDataCache::FLAG_USES_DOUBLE_SIDED_SHADOWS) {
 					cull_variant = SceneShaderForwardClustered::ShaderData::CULL_VARIANT_DOUBLE_SIDED;
 				}
@@ -504,6 +504,9 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 			case PASS_MODE_SHADOW_DP: {
 				ERR_FAIL_COND_MSG(p_params->view_count > 1, "Multiview not supported for shadow DP pass");
 				pipeline_key.version = SceneShaderForwardClustered::PIPELINE_VERSION_DEPTH_PASS_DP;
+			} break;
+			case PASS_MODE_SHADOW_CUBE: {
+				pipeline_key.version = SceneShaderForwardClustered::PIPELINE_VERSION_DEPTH_PASS_CUBE_LAYERED;
 			} break;
 			case PASS_MODE_DEPTH_NORMAL_ROUGHNESS: {
 				pipeline_key.version = p_params->view_count > 1 ? SceneShaderForwardClustered::PIPELINE_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_MULTIVIEW : SceneShaderForwardClustered::PIPELINE_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS;
@@ -641,14 +644,52 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 				push_constant_size = sizeof(SceneState::PushConstant) - sizeof(SceneState::PushConstantUbershader);
 			}
 
-			RD::get_singleton()->draw_list_set_push_constant(draw_list, &push_constant, push_constant_size);
-
 			uint32_t instance_count = surf->owner->instance_count > 1 ? surf->owner->instance_count : element_info.repeat;
 			if (surf->flags & GeometryInstanceSurfaceDataCache::FLAG_USES_PARTICLE_TRAILS) {
 				instance_count /= surf->owner->trail_steps;
 			}
 
 			bool indirect = bool(surf->owner->base_flags & INSTANCE_DATA_FLAG_MULTIMESH_INDIRECT);
+
+			if constexpr (p_pass_mode == PASS_MODE_SHADOW_CUBE) {
+				// The faces that see the element, 3 bits each, their count in bits 18-20 (CUBE_FACE in the shader): one
+				// draw instanced once per face. Indirect draws and emulated point sizes can't multiply their instance
+				// count: one draw per face.
+				uint32_t faces = 0;
+				uint32_t face_count = 0;
+				for (uint32_t face = 0; face < 6; face++) {
+					if (element_info.cube_face_mask & (1u << face)) {
+						faces |= face << (3 * face_count);
+						face_count++;
+					}
+				}
+				if (face_count == 0) {
+					i += element_info.repeat - 1;
+					continue;
+				}
+
+				if (emulate_point_size || indirect) {
+					for (uint32_t face = 0; face < 6; face++) {
+						if (!(element_info.cube_face_mask & (1u << face))) {
+							continue;
+						}
+						push_constant.uv_offset = face | (1u << 18);
+						RD::get_singleton()->draw_list_set_push_constant(draw_list, &push_constant, push_constant_size);
+						if (emulate_point_size) {
+							RD::get_singleton()->draw_list_draw(draw_list, false, mesh_storage->mesh_surface_get_vertex_count(mesh_surface), instance_count * 6);
+						} else {
+							RD::get_singleton()->draw_list_draw_indirect(draw_list, index_array_rd.is_valid(), mesh_storage->_multimesh_get_command_buffer_rd_rid(surf->owner->data->base), surf->surface_index * sizeof(uint32_t) * mesh_storage->INDIRECT_MULTIMESH_COMMAND_STRIDE, 1, 0);
+						}
+					}
+					i += element_info.repeat - 1;
+					continue;
+				}
+
+				push_constant.uv_offset = faces | (face_count << 18);
+				instance_count *= face_count;
+			}
+
+			RD::get_singleton()->draw_list_set_push_constant(draw_list, &push_constant, push_constant_size);
 
 			if (emulate_point_size) {
 				if (indirect) {
@@ -709,6 +750,9 @@ void RenderForwardClustered::_render_list(RenderingDevice::DrawListID p_draw_lis
 		} break;
 		case PASS_MODE_SHADOW_DP: {
 			_render_list_template<PASS_MODE_SHADOW_DP>(p_draw_list, p_framebuffer_Format, p_params, p_from_element, p_to_element, p_split);
+		} break;
+		case PASS_MODE_SHADOW_CUBE: {
+			_render_list_template<PASS_MODE_SHADOW_CUBE>(p_draw_list, p_framebuffer_Format, p_params, p_from_element, p_to_element, p_split);
 		} break;
 		case PASS_MODE_DEPTH: {
 			_render_list_template<PASS_MODE_DEPTH>(p_draw_list, p_framebuffer_Format, p_params, p_from_element, p_to_element, p_split);
@@ -1251,12 +1295,13 @@ void RenderForwardClustered::_fill_instance_data_range(RenderListType p_render_l
 			const GeometryInstanceSurfaceDataCache *prev_surface = rl->elements[i - 1 + p_offset];
 			const GeometryInstanceForwardClustered *prev_inst = prev_surface->owner;
 			const bool prev_cant_repeat = prev_inst->flags_cache & INSTANCE_DATA_FLAG_MULTIMESH || prev_inst->mesh_instance.is_valid();
-			repeat = !prev_cant_repeat && prev_surface->sort.sort_key1 == surface->sort.sort_key1 && prev_surface->sort.sort_key2 == surface->sort.sort_key2 && inst->mirror == prev_inst->mirror;
+			repeat = !prev_cant_repeat && prev_surface->sort.sort_key1 == surface->sort.sort_key1 && prev_surface->sort.sort_key2 == surface->sort.sort_key2 && inst->mirror == prev_inst->mirror && inst->cube_face_mask == prev_inst->cube_face_mask;
 		}
 		fill_instance_data_repeats[i] = repeat;
 
 		RenderElementInfo &element_info = rl->element_info[p_offset + i];
 		element_info.value = uint32_t(surface->sort.sort_key1 & 0xFFF);
+		element_info.cube_face_mask = inst->cube_face_mask;
 	}
 }
 
@@ -1661,7 +1706,7 @@ void RenderForwardClustered::_fill_render_list_chunk(FillRenderListChunk &p_chun
 				if ((surf->flags & GeometryInstanceSurfaceDataCache::FLAG_USES_STENCIL) && !force_alpha && (surf->flags & (GeometryInstanceSurfaceDataCache::FLAG_PASS_DEPTH | GeometryInstanceSurfaceDataCache::FLAG_PASS_OPAQUE))) {
 					p_chunk.used |= FillRenderListChunk::USED_OPAQUE_STENCIL;
 				}
-			} else if (p_pass_mode == PASS_MODE_SHADOW || p_pass_mode == PASS_MODE_SHADOW_DP) {
+			} else if (p_pass_mode == PASS_MODE_SHADOW || p_pass_mode == PASS_MODE_SHADOW_DP || p_pass_mode == PASS_MODE_SHADOW_CUBE) {
 				if (surf->flags & GeometryInstanceSurfaceDataCache::FLAG_PASS_SHADOW) {
 					p_chunk.elements.push_back(surf);
 				}
@@ -2055,8 +2100,40 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 
 		if (p_render_data->cube_shadows.size()) {
 			RENDER_TIMESTAMP("Render OmniLight Shadows");
-			// Cube shadows are rendered in their own way.
-			for (const int &index : p_render_data->cube_shadows) {
+			// Cube shadows are rendered in their own way. In one pass per light where possible, all those lights in
+			// one shadow session; any other cube light face by face afterwards.
+			cube_shadow_rendered.resize(p_render_data->cube_shadows.size());
+			for (uint32_t i = 0; i < cube_shadow_rendered.size(); i++) {
+				cube_shadow_rendered[i] = false;
+			}
+			if (shadow_cube_one_pass) {
+				for (uint32_t i = 0; i < p_render_data->cube_shadows.size(); i++) {
+					if (!_render_shadow_cube_gather(p_render_data, i)) {
+						continue;
+					}
+					if (!cube_shadow_batching) {
+						_render_shadow_begin();
+						cube_shadow_batching = true;
+					}
+					const int index = p_render_data->cube_shadows[i];
+					_render_shadow_pass(p_render_data->render_shadows[index].light, p_render_data->shadow_atlas, CUBE_SHADOW_ALL_FACES, cube_shadow_instances, lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, true, true, true, p_render_data->render_info, viewport_size, p_render_data->scene_data->cam_transform);
+					_render_shadow_cube_release();
+					for (uint32_t face = 0; face < 6; face++) {
+						cube_shadow_rendered[i + face] = true;
+					}
+					i += 5;
+				}
+				if (cube_shadow_batching) {
+					cube_shadow_batching = false;
+					_render_shadow_process();
+					_render_shadow_end();
+				}
+			}
+			for (uint32_t i = 0; i < p_render_data->cube_shadows.size(); i++) {
+				if (cube_shadow_rendered[i]) {
+					continue;
+				}
+				const int index = p_render_data->cube_shadows[i];
 				_render_shadow_pass(p_render_data->render_shadows[index].light, p_render_data->shadow_atlas, p_render_data->render_shadows[index].pass, p_render_data->render_shadows[index].instances, lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, true, true, true, p_render_data->render_info, viewport_size, p_render_data->scene_data->cam_transform);
 			}
 		}
@@ -3261,6 +3338,7 @@ void RenderForwardClustered::_render_shadow_pass(RID p_light, RID p_shadow_atlas
 	bool use_pancake = false;
 	bool render_cubemap = false;
 	bool finalize_cubemap = false;
+	bool cube_layered = false;
 
 	bool flip_y = false;
 
@@ -3351,18 +3429,30 @@ void RenderForwardClustered::_render_shadow_pass(RID p_light, RID p_shadow_atlas
 
 			if (light_storage->light_omni_get_shadow_mode(base) == RSE::LIGHT_OMNI_SHADOW_CUBE) {
 				render_texture = light_storage->get_cubemap(shadow_size / 2);
-				render_fb = light_storage->get_cubemap_fb(shadow_size / 2, p_pass);
-
-				light_projection = light_storage->light_instance_get_shadow_camera(p_light, p_pass);
-				light_transform = light_storage->light_instance_get_shadow_transform(p_light, p_pass);
 				render_cubemap = true;
-				finalize_cubemap = p_pass == 5;
 				atlas_fb = light_storage->shadow_atlas_get_fb(p_shadow_atlas);
-
 				atlas_size = shadow_atlas_size;
 
-				if (p_pass == 0) {
-					_render_shadow_begin();
+				if (p_pass == CUBE_SHADOW_ALL_FACES) {
+					// The faces share face 0's projection; the vertex shader rotates the light's own view to each face.
+					// Face 0 is light_transform * looking_at(+X, -Y), an axis permutation: undoing it is exact.
+					render_fb = light_storage->get_cubemap_layered_fb(shadow_size / 2);
+					light_projection = light_storage->light_instance_get_shadow_camera(p_light, 0);
+					light_transform = light_storage->light_instance_get_shadow_transform(p_light, 0) * Transform3D().looking_at(Vector3(1, 0, 0), Vector3(0, -1, 0)).affine_inverse();
+					cube_layered = true;
+					finalize_cubemap = true;
+					if (!cube_shadow_batching) {
+						_render_shadow_begin();
+					}
+				} else {
+					render_fb = light_storage->get_cubemap_fb(shadow_size / 2, p_pass);
+					light_projection = light_storage->light_instance_get_shadow_camera(p_light, p_pass);
+					light_transform = light_storage->light_instance_get_shadow_transform(p_light, p_pass);
+					finalize_cubemap = p_pass == 5;
+
+					if (p_pass == 0) {
+						_render_shadow_begin();
+					}
 				}
 
 			} else {
@@ -3408,20 +3498,25 @@ void RenderForwardClustered::_render_shadow_pass(RID p_light, RID p_shadow_atlas
 
 	if (render_cubemap) {
 		//rendering to cubemap
-		_render_shadow_append(render_fb, p_instances, light_projection, light_transform, zfar, 0, 0, reverse_cull_face, false, false, use_pancake, p_lod_distance_multiplier, p_screen_mesh_lod_threshold, Rect2(), false, true, true, true, p_render_info, p_viewport_size, p_main_cam_transform);
+		_render_shadow_append(render_fb, p_instances, light_projection, light_transform, zfar, 0, 0, reverse_cull_face, false, false, use_pancake, p_lod_distance_multiplier, p_screen_mesh_lod_threshold, Rect2(), false, true, true, true, p_render_info, p_viewport_size, p_main_cam_transform, cube_layered);
 		if (finalize_cubemap) {
-			_render_shadow_process();
-			_render_shadow_end();
-			//reblit
-			Rect2 atlas_rect_norm = atlas_rect;
-			atlas_rect_norm.position /= float(atlas_size);
-			atlas_rect_norm.size /= float(atlas_size);
-			copy_effects->copy_cubemap_to_dp(render_texture, atlas_fb, atlas_rect_norm, atlas_rect.size, light_projection.get_z_near(), zfar, false);
-			atlas_rect_norm.position += Vector2(dual_paraboloid_offset) * atlas_rect_norm.size;
-			copy_effects->copy_cubemap_to_dp(render_texture, atlas_fb, atlas_rect_norm, atlas_rect.size, light_projection.get_z_near(), zfar, true);
+			// Copied into the atlas by _render_shadow_end(), right after the last face's draw list.
+			CubeShadowCopy copy;
+			copy.light = p_light;
+			copy.cubemap = render_texture;
+			copy.atlas_fb = atlas_fb;
+			copy.atlas_rect = atlas_rect;
+			copy.atlas_size = atlas_size;
+			copy.dual_paraboloid_offset = dual_paraboloid_offset;
+			copy.z_near = light_projection.get_z_near();
+			copy.z_far = zfar;
+			scene_state.shadow_passes[scene_state.shadow_passes.size() - 1].cube_copy = int32_t(cube_shadow_copies.size());
+			cube_shadow_copies.push_back(copy);
 
-			//restore transform so it can be properly used
-			light_storage->light_instance_set_shadow_transform(p_light, Projection(), light_storage->light_instance_get_base_transform(p_light), zfar, 0, 0, 0);
+			if (!cube_shadow_batching) {
+				_render_shadow_process();
+				_render_shadow_end();
+			}
 		}
 
 	} else {
@@ -3430,8 +3525,44 @@ void RenderForwardClustered::_render_shadow_pass(RID p_light, RID p_shadow_atlas
 	}
 }
 
+bool RenderForwardClustered::_render_shadow_cube_gather(const RenderDataRD *p_render_data, uint32_t p_first) {
+	// The culler gives a cube light's faces as 6 consecutive entries, passes 0 to 5.
+	const LocalVector<int> &cube_shadows = p_render_data->cube_shadows;
+	if (p_first + 6 > cube_shadows.size()) {
+		return false;
+	}
+	const RID light = p_render_data->render_shadows[cube_shadows[p_first]].light;
+	for (uint32_t face = 0; face < 6; face++) {
+		const RendererSceneRender::RenderShadowData &shadow = p_render_data->render_shadows[cube_shadows[p_first + face]];
+		if (shadow.light != light || shadow.pass != int(face)) {
+			return false;
+		}
+	}
+
+	cube_shadow_instances.clear();
+	for (uint32_t face = 0; face < 6; face++) {
+		const PagedArray<RenderGeometryInstance *> &instances = p_render_data->render_shadows[cube_shadows[p_first + face]].instances;
+		for (uint64_t i = 0; i < instances.size(); i++) {
+			GeometryInstanceForwardClustered *inst = static_cast<GeometryInstanceForwardClustered *>(instances[i]);
+			if (inst->cube_face_mask == 0) {
+				cube_shadow_instances.push_back(instances[i]);
+			}
+			inst->cube_face_mask |= uint8_t(1u << face);
+		}
+	}
+	return true;
+}
+
+void RenderForwardClustered::_render_shadow_cube_release() {
+	for (uint64_t i = 0; i < cube_shadow_instances.size(); i++) {
+		static_cast<GeometryInstanceForwardClustered *>(cube_shadow_instances[i])->cube_face_mask = 0;
+	}
+	cube_shadow_instances.clear();
+}
+
 void RenderForwardClustered::_render_shadow_begin() {
 	scene_state.shadow_passes.clear();
+	cube_shadow_copies.clear();
 	RD::get_singleton()->draw_command_begin_label("Shadow Setup");
 	_update_render_base_uniform_set();
 
@@ -3443,7 +3574,7 @@ void RenderForwardClustered::_render_shadow_begin() {
 	shadow_build_deferred = shadow_build_parallel && list_build_min_instances > 0 && list_build_max_threads > 1;
 }
 
-void RenderForwardClustered::_render_shadow_append(RID p_framebuffer, const PagedArray<RenderGeometryInstance *> &p_instances, const Projection &p_projection, const Transform3D &p_transform, float p_zfar, float p_bias, float p_normal_bias, bool p_reverse_cull_face, bool p_use_dp, bool p_use_dp_flip, bool p_use_pancake, float p_lod_distance_multiplier, float p_screen_mesh_lod_threshold, const Rect2i &p_rect, bool p_flip_y, bool p_clear_region, bool p_begin, bool p_end, RenderingServerTypes::RenderInfo *p_render_info, const Size2i &p_viewport_size, const Transform3D &p_main_cam_transform) {
+void RenderForwardClustered::_render_shadow_append(RID p_framebuffer, const PagedArray<RenderGeometryInstance *> &p_instances, const Projection &p_projection, const Transform3D &p_transform, float p_zfar, float p_bias, float p_normal_bias, bool p_reverse_cull_face, bool p_use_dp, bool p_use_dp_flip, bool p_use_pancake, float p_lod_distance_multiplier, float p_screen_mesh_lod_threshold, const Rect2i &p_rect, bool p_flip_y, bool p_clear_region, bool p_begin, bool p_end, RenderingServerTypes::RenderInfo *p_render_info, const Size2i &p_viewport_size, const Transform3D &p_main_cam_transform, bool p_cube_layered) {
 	SceneState::ShadowPass shadow_pass;
 
 	RenderSceneDataRD scene_data;
@@ -3481,7 +3612,7 @@ void RenderForwardClustered::_render_shadow_append(RID p_framebuffer, const Page
 		scene_data.screen_mesh_lod_threshold = p_screen_mesh_lod_threshold;
 	}
 
-	PassMode pass_mode = p_use_dp ? PASS_MODE_SHADOW_DP : PASS_MODE_SHADOW;
+	PassMode pass_mode = p_cube_layered ? PASS_MODE_SHADOW_CUBE : (p_use_dp ? PASS_MODE_SHADOW_DP : PASS_MODE_SHADOW);
 
 	uint32_t render_list_from = render_list[RENDER_LIST_SECONDARY].elements.size();
 	_fill_render_list(RENDER_LIST_SECONDARY, &render_data, pass_mode, false, false, false, true);
@@ -3493,7 +3624,7 @@ void RenderForwardClustered::_render_shadow_append(RID p_framebuffer, const Page
 		for (uint32_t i = render_list_from; i < render_list_from + render_list_size; i++) {
 			GeometryInstanceSurfaceDataCache *surface = render_list[RENDER_LIST_SECONDARY].elements[i];
 			const GeometryInstanceForwardClustered *inst = surface->owner;
-			shadow_elements[i] = { surface->sort.sort_key1, surface->sort.sort_key2, surface, inst->flags_cache, inst->gi_offset_cache };
+			shadow_elements[i] = { surface->sort.sort_key1, surface->sort.sort_key2, surface, inst->flags_cache, inst->gi_offset_cache, inst->cube_face_mask };
 		}
 		if (shadow_render_info) {
 			shadow_render_info[RSE::VIEWPORT_RENDER_INFO_OBJECTS_IN_FRAME] += render_list_size;
@@ -3766,10 +3897,11 @@ void RenderForwardClustered::_render_shadow_instance_range(uint32_t p_from, uint
 			const ShadowElement &prev = shadow_elements[i - 1];
 			const GeometryInstanceForwardClustered *prev_inst = prev.surface->owner;
 			const bool prev_cant_repeat = prev.flags & INSTANCE_DATA_FLAG_MULTIMESH || prev_inst->mesh_instance.is_valid();
-			repeat = !prev_cant_repeat && prev.sort_key1 == element.sort_key1 && prev.sort_key2 == element.sort_key2 && inst->mirror == prev_inst->mirror;
+			repeat = !prev_cant_repeat && prev.sort_key1 == element.sort_key1 && prev.sort_key2 == element.sort_key2 && inst->mirror == prev_inst->mirror && prev.cube_face_mask == element.cube_face_mask;
 		}
 		shadow_repeats[i] = repeat;
 		rl->element_info[i].value = uint32_t(element.sort_key1 & 0xFFF);
+		rl->element_info[i].cube_face_mask = element.cube_face_mask;
 	}
 }
 
@@ -3796,55 +3928,78 @@ void RenderForwardClustered::_render_shadow_process() {
 void RenderForwardClustered::_render_shadow_end() {
 	RD::get_singleton()->draw_command_begin_label("Shadow Render");
 
-	// The passes a draw list would record serially (too small to be split) are recorded first, all at once on several
-	// threads, each into a split reserved for its draw list; the draw lists then open one after the other and take them.
+	// Every pass is cut in parts as _render_list_split() would cut it (one part below twice the range size), all parts
+	// recorded in one parallel run, each into a split reserved for its pass's draw list; the draw lists then open one
+	// after the other and take their parts in order.
 	LocalVector<SceneState::ShadowPass> &shadow_passes = scene_state.shadow_passes;
 	const uint32_t pass_count = shadow_passes.size();
-	shadow_pass_part.resize(pass_count);
+	shadow_pass_first_part.resize(pass_count);
+	shadow_pass_part_count.resize(pass_count);
 	uint32_t part_count = 0;
-	if (shadow_passes_parallel && render_list_max_splits > 1 && pass_count > 1) {
-		shadow_part_params.clear();
+	if (shadow_passes_parallel && render_list_max_splits > 1) {
+		shadow_pass_params.clear();
+		shadow_pass_params.reserve(pass_count);
+		shadow_part_pass.clear();
 		shadow_part_viewports.clear();
 		shadow_part_formats.clear();
+		shadow_part_splits.clear();
 		for (uint32_t i = 0; i < pass_count; i++) {
 			const SceneState::ShadowPass &shadow_pass = shadow_passes[i];
-			// As _render_list_get_split_count(): a pass of twice the range size or more is split on its own.
-			const bool splits_alone = render_list_split_min_elements > 0 && shadow_pass.element_count / render_list_split_min_elements > 1;
-			if (shadow_pass.element_count == 0 || splits_alone) {
-				shadow_pass_part[i] = -1;
+			RenderListParameters render_list_parameters(render_list[RENDER_LIST_SECONDARY].elements.ptr() + shadow_pass.element_from, render_list[RENDER_LIST_SECONDARY].element_info.ptr() + shadow_pass.element_from, shadow_pass.element_count, shadow_pass.flip_cull, shadow_pass.pass_mode, 0, true, false, shadow_pass.rp_uniform_set, false, Vector2(), shadow_pass.lod_distance_multiplier, shadow_pass.screen_mesh_lod_threshold, 1, shadow_pass.element_from);
+			render_list_parameters.framebuffer_format = RD::get_singleton()->framebuffer_get_format(shadow_pass.framebuffer);
+			shadow_pass_params.push_back(render_list_parameters);
+			shadow_pass_first_part[i] = part_count;
+			shadow_pass_part_count[i] = 0;
+			if (shadow_pass.element_count == 0) {
 				continue;
 			}
 
-			RenderListParameters render_list_parameters(render_list[RENDER_LIST_SECONDARY].elements.ptr() + shadow_pass.element_from, render_list[RENDER_LIST_SECONDARY].element_info.ptr() + shadow_pass.element_from, shadow_pass.element_count, shadow_pass.flip_cull, shadow_pass.pass_mode, 0, true, false, shadow_pass.rp_uniform_set, false, Vector2(), shadow_pass.lod_distance_multiplier, shadow_pass.screen_mesh_lod_threshold, 1, shadow_pass.element_from);
-			render_list_parameters.framebuffer_format = RD::get_singleton()->framebuffer_get_format(shadow_pass.framebuffer);
-			shadow_part_params.push_back(render_list_parameters);
 			// The viewport draw_list_begin() will give the draw list: the pass's rectangle, or the whole framebuffer.
-			shadow_part_viewports.push_back(shadow_pass.rect != Rect2i() ? shadow_pass.rect : Rect2i(Point2i(), Size2i(RD::get_singleton()->framebuffer_get_size(shadow_pass.framebuffer))));
-			shadow_part_formats.push_back(render_list_parameters.framebuffer_format);
-			shadow_pass_part[i] = int32_t(part_count++);
+			const Rect2i viewport = shadow_pass.rect != Rect2i() ? shadow_pass.rect : Rect2i(Point2i(), Size2i(RD::get_singleton()->framebuffer_get_size(shadow_pass.framebuffer)));
+			const uint32_t element_count = shadow_pass.element_count;
+			const uint32_t wanted = render_list_split_min_elements > 0 ? CLAMP(element_count / render_list_split_min_elements, 1u, render_list_max_splits * 2) : 1u;
+			const RenderElementInfo *element_info = render_list_parameters.element_info;
+			uint32_t from = 0;
+			for (uint32_t k = 0; k < wanted && from < element_count; k++) {
+				// A boundary moves forward to the start of a run of repeated elements, as in _render_list_split().
+				uint32_t to = k == wanted - 1 ? element_count : uint32_t(uint64_t(element_count) * (k + 1) / wanted);
+				while (to > from && to < element_count && element_info[to - 1].repeat > 1) {
+					to++;
+				}
+				if (to <= from) {
+					continue;
+				}
+				RenderListSplit split;
+				split.from_element = from;
+				split.to_element = to;
+				shadow_part_splits.push_back(split);
+				shadow_part_pass.push_back(i);
+				shadow_part_viewports.push_back(viewport);
+				shadow_part_formats.push_back(render_list_parameters.framebuffer_format);
+				shadow_pass_part_count[i]++;
+				part_count++;
+				from = to;
+			}
 		}
 
 		if (part_count < 2) {
 			for (uint32_t i = 0; i < pass_count; i++) {
-				shadow_pass_part[i] = -1;
+				shadow_pass_part_count[i] = 0;
 			}
 			part_count = 0;
 		}
 	} else {
 		for (uint32_t i = 0; i < pass_count; i++) {
-			shadow_pass_part[i] = -1;
+			shadow_pass_part_count[i] = 0;
 		}
 	}
 
 	if (part_count > 0) {
 		const uint64_t begin_usec = render_list_split_stats.enabled ? OS::get_singleton()->get_ticks_usec() : 0;
-		shadow_part_splits.resize(part_count);
 		shadow_part_split_ids.resize(part_count);
 		RD::get_singleton()->draw_list_split_detached_begin(part_count, shadow_part_viewports.ptr(), shadow_part_formats.ptr(), shadow_part_split_ids.ptr());
 		for (uint32_t i = 0; i < part_count; i++) {
 			RenderListSplit &split = shadow_part_splits[i];
-			split.from_element = 0;
-			split.to_element = shadow_part_params[i].element_count;
 			split.draw_list = shadow_part_split_ids[i];
 			split.request_redraw = false;
 			split.used_materials.clear();
@@ -3866,7 +4021,7 @@ void RenderForwardClustered::_render_shadow_end() {
 		}
 
 		if (render_list_split_stats.enabled) {
-			render_list_split_stats.shadow_parallel_passes += part_count;
+			render_list_split_stats.shadow_parallel_passes += pass_count;
 			render_list_split_stats.shadow_parallel_usec += OS::get_singleton()->get_ticks_usec() - begin_usec;
 		}
 	}
@@ -3874,15 +4029,20 @@ void RenderForwardClustered::_render_shadow_end() {
 	for (uint32_t i = 0; i < pass_count; i++) {
 		SceneState::ShadowPass &shadow_pass = shadow_passes[i];
 		const BitField<RD::DrawFlags> draw_flags = shadow_pass.clear_depth ? RD::DRAW_CLEAR_DEPTH : RD::DRAW_DEFAULT_ALL;
-		if (shadow_pass_part[i] >= 0) {
+		if (part_count > 0) {
 			RD::get_singleton()->draw_list_begin(shadow_pass.framebuffer, draw_flags, Vector<Color>(), 0.0f, 0, shadow_pass.rect);
-			RD::get_singleton()->draw_list_split_append(shadow_part_split_ids[shadow_pass_part[i]]);
+			for (uint32_t k = 0; k < shadow_pass_part_count[i]; k++) {
+				RD::get_singleton()->draw_list_split_append(shadow_part_split_ids[shadow_pass_first_part[i] + k]);
+			}
 			RD::get_singleton()->draw_list_end();
-			continue;
+		} else {
+			RenderListParameters render_list_parameters(render_list[RENDER_LIST_SECONDARY].elements.ptr() + shadow_pass.element_from, render_list[RENDER_LIST_SECONDARY].element_info.ptr() + shadow_pass.element_from, shadow_pass.element_count, shadow_pass.flip_cull, shadow_pass.pass_mode, 0, true, false, shadow_pass.rp_uniform_set, false, Vector2(), shadow_pass.lod_distance_multiplier, shadow_pass.screen_mesh_lod_threshold, 1, shadow_pass.element_from);
+			_render_list_with_draw_list(&render_list_parameters, shadow_pass.framebuffer, draw_flags, Vector<Color>(), 0.0f, 0, shadow_pass.rect);
 		}
 
-		RenderListParameters render_list_parameters(render_list[RENDER_LIST_SECONDARY].elements.ptr() + shadow_pass.element_from, render_list[RENDER_LIST_SECONDARY].element_info.ptr() + shadow_pass.element_from, shadow_pass.element_count, shadow_pass.flip_cull, shadow_pass.pass_mode, 0, true, false, shadow_pass.rp_uniform_set, false, Vector2(), shadow_pass.lod_distance_multiplier, shadow_pass.screen_mesh_lod_threshold, 1, shadow_pass.element_from);
-		_render_list_with_draw_list(&render_list_parameters, shadow_pass.framebuffer, draw_flags, Vector<Color>(), 0.0f, 0, shadow_pass.rect);
+		if (shadow_pass.cube_copy >= 0) {
+			_render_shadow_cube_copy(cube_shadow_copies[shadow_pass.cube_copy]);
+		}
 	}
 
 	if (part_count > 0) {
@@ -3892,9 +4052,23 @@ void RenderForwardClustered::_render_shadow_end() {
 	RD::get_singleton()->draw_command_end_label();
 }
 
+void RenderForwardClustered::_render_shadow_cube_copy(const CubeShadowCopy &p_copy) {
+	// Both halves of the dual paraboloid the atlas holds for an omni light, from the cubemap.
+	Rect2 atlas_rect_norm = p_copy.atlas_rect;
+	atlas_rect_norm.position /= float(p_copy.atlas_size);
+	atlas_rect_norm.size /= float(p_copy.atlas_size);
+	copy_effects->copy_cubemap_to_dp(p_copy.cubemap, p_copy.atlas_fb, atlas_rect_norm, p_copy.atlas_rect.size, p_copy.z_near, p_copy.z_far, false);
+	atlas_rect_norm.position += Vector2(p_copy.dual_paraboloid_offset) * atlas_rect_norm.size;
+	copy_effects->copy_cubemap_to_dp(p_copy.cubemap, p_copy.atlas_fb, atlas_rect_norm, p_copy.atlas_rect.size, p_copy.z_near, p_copy.z_far, true);
+
+	// Restore transform so it can be properly used.
+	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
+	light_storage->light_instance_set_shadow_transform(p_copy.light, Projection(), light_storage->light_instance_get_base_transform(p_copy.light), p_copy.z_far, 0, 0, 0);
+}
+
 void RenderForwardClustered::_render_shadow_pass_part(uint32_t p_part) {
 	RenderListSplit &split = shadow_part_splits[p_part];
-	RenderListParameters &render_list_parameters = shadow_part_params[p_part];
+	RenderListParameters &render_list_parameters = shadow_pass_params[shadow_part_pass[p_part]];
 	_render_list(split.draw_list, render_list_parameters.framebuffer_format, &render_list_parameters, split.from_element, split.to_element, &split);
 }
 
@@ -5803,6 +5977,12 @@ void RenderForwardClustered::_mesh_compile_pipelines_for_surface(const SurfacePi
 		pipeline_key.version = SceneShaderForwardClustered::PIPELINE_VERSION_DEPTH_PASS;
 		pipeline_key.framebuffer_format_id = _get_shadow_cubemap_framebuffer_format_for_pipeline();
 		_mesh_compile_pipeline_for_surface(p_surface.shader_shadow, p_surface.mesh_surface_shadow, true, p_surface.instanced, p_source, pipeline_key, r_pipeline_pairs);
+
+		if (shadow_cube_one_pass) {
+			// Same framebuffer format: the layered framebuffer has the faces' single attachment.
+			pipeline_key.version = SceneShaderForwardClustered::PIPELINE_VERSION_DEPTH_PASS_CUBE_LAYERED;
+			_mesh_compile_pipeline_for_surface(p_surface.shader_shadow, p_surface.mesh_surface_shadow, true, p_surface.instanced, p_source, pipeline_key, r_pipeline_pairs);
+		}
 	}
 
 	// Atlas shadowmaps (omni lights) can be in both 16-bit and 32-bit versions.
@@ -6294,6 +6474,12 @@ RenderForwardClustered::RenderForwardClustered() {
 		scene_shader.init(defines);
 	}
 
+#ifndef REAL_T_IS_DOUBLE
+	// The face rotation is applied to the single-precision view; double precision splits the view origin apart.
+	shadow_cube_one_pass = scene_shader.is_cube_layered_shader_group_enabled();
+#endif
+	cube_shadow_instances.set_page_pool(&cube_shadow_instance_pool);
+
 	/* shadow sampler */
 	{
 		RD::SamplerState sampler;
@@ -6396,6 +6582,9 @@ RenderForwardClustered::RenderForwardClustered() {
 RenderForwardClustered::~RenderForwardClustered() {
 	parallel_helpers_stop.set();
 	_parallel_release_groups(true);
+
+	cube_shadow_instances.reset();
+	cube_shadow_instance_pool.reset();
 
 	if (ss_effects != nullptr) {
 		memdelete(ss_effects);

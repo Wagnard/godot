@@ -32,6 +32,7 @@
 
 #include "core/config/project_settings.h"
 #include "core/math/math_defs.h"
+#include "core/os/os.h"
 #include "servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.h"
 #include "servers/rendering/renderer_rd/renderer_compositor_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
@@ -404,6 +405,8 @@ uint16_t SceneShaderForwardClustered::ShaderData::_get_shader_version(PipelineVe
 			return ShaderVersion::SHADER_VERSION_DEPTH_PASS_WITH_MATERIAL + ubershader_base;
 		case PIPELINE_VERSION_DEPTH_PASS_WITH_SDF:
 			return ShaderVersion::SHADER_VERSION_DEPTH_PASS_WITH_SDF + ubershader_base;
+		case PIPELINE_VERSION_DEPTH_PASS_CUBE_LAYERED:
+			return ShaderVersion::SHADER_VERSION_DEPTH_PASS_CUBE_LAYERED + ubershader_base;
 		case PIPELINE_VERSION_COLOR_PASS: {
 			int shader_flags = 0;
 
@@ -583,6 +586,7 @@ void SceneShaderForwardClustered::ShaderData::_create_pipeline(PipelineKey p_pip
 			case PIPELINE_VERSION_DEPTH_PASS_DP:
 			case PIPELINE_VERSION_DEPTH_PASS_MULTIVIEW:
 			case PIPELINE_VERSION_DEPTH_PASS_WITH_SDF:
+			case PIPELINE_VERSION_DEPTH_PASS_CUBE_LAYERED:
 			default:
 				break;
 		}
@@ -767,6 +771,7 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 			shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_ADVANCED_MULTIVIEW, base_define + "\n#define USE_MULTIVIEW\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MODE_RENDER_VOXEL_GI\n", false)); // SHADER_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_AND_VOXEL_GI_MULTIVIEW
 			shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_ADVANCED, base_define + "\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_MATERIAL\n", false)); // SHADER_VERSION_DEPTH_PASS_WITH_MATERIAL
 			shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_ADVANCED, base_define + "\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_SDF\n", false)); // SHADER_VERSION_DEPTH_PASS_WITH_SDF
+			shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_CUBE_LAYERED, base_define + "\n#define MODE_RENDER_DEPTH\n#define MODE_CUBE_LAYERED\n", false)); // SHADER_VERSION_DEPTH_PASS_CUBE_LAYERED
 		}
 
 		Vector<String> color_pass_flags = {
@@ -806,6 +811,12 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 
 		if (RendererCompositorRD::get_singleton()->is_xr_enabled()) {
 			shader.enable_group(SHADER_GROUP_MULTIVIEW);
+		}
+
+		// Cube omni shadows render their 6 faces in one pass where the vertex shader can choose the layer.
+		// GODOT_SHADOW_CUBE_ONE_PASS=0 keeps the 6 passes.
+		if (RD::get_singleton()->has_feature(RD::SUPPORTS_SHADER_OUTPUT_LAYER) && OS::get_singleton()->get_environment("GODOT_SHADOW_CUBE_ONE_PASS") != "0") {
+			shader.enable_group(SHADER_GROUP_CUBE_LAYERED);
 		}
 	}
 
@@ -1147,6 +1158,10 @@ void SceneShaderForwardClustered::enable_advanced_shader_group(bool p_needs_mult
 
 bool SceneShaderForwardClustered::is_multiview_shader_group_enabled() const {
 	return shader.is_group_enabled(SHADER_GROUP_MULTIVIEW);
+}
+
+bool SceneShaderForwardClustered::is_cube_layered_shader_group_enabled() const {
+	return shader.is_group_enabled(SHADER_GROUP_CUBE_LAYERED);
 }
 
 bool SceneShaderForwardClustered::is_advanced_shader_group_enabled(bool p_multiview) const {

@@ -1038,6 +1038,8 @@ public:
 		SUPPORTS_RAY_QUERY,
 		SUPPORTS_RAYTRACING_PIPELINE,
 		SUPPORTS_HDR_OUTPUT,
+		// A vertex shader may choose the layer of a layered framebuffer it renders to (gl_Layer). Not exposed to scripts.
+		SUPPORTS_SHADER_OUTPUT_LAYER,
 	};
 
 	enum SubgroupOperations {

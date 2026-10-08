@@ -40,6 +40,7 @@ GODOT_MSVC_WARNING_IGNORE(4806) // "'&': unsafe operation: no value of type 'boo
 
 #include <nir.h>
 #include <nir_spirv.h>
+#include <spirv_info.h>
 #include <nir_to_dxil.h>
 #include <spirv_to_dxil.h>
 extern "C" {

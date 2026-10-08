@@ -331,6 +331,25 @@ uint32_t RenderingShaderContainerD3D12::_to_bytes_footer_extra_data(uint8_t *p_b
 }
 
 #if NIR_ENABLED
+// Mesa's SPIR-V options for DXIL, plus the layer written by a vertex shader (gl_Layer), which they leave out although
+// nir_to_dxil writes it as SV_RenderTargetArrayIndex. Allowing a capability changes no other shader's DXIL.
+static const spirv_to_nir_options *_dxil_spirv_options() {
+	struct Options {
+		spirv_capabilities capabilities;
+		spirv_to_nir_options options;
+
+		Options() {
+			options = *dxil_spirv_nir_get_spirv_options();
+			capabilities = *options.capabilities;
+			capabilities.ShaderLayer = true;
+			capabilities.ShaderViewportIndexLayerEXT = true;
+			options.capabilities = &capabilities;
+		}
+	};
+	static const Options options;
+	return &options.options;
+}
+
 bool RenderingShaderContainerD3D12::_convert_spirv_to_nir(Span<ReflectShaderStage> p_spirv, const nir_shader_compiler_options *p_compiler_options, HashMap<int, nir_shader *> &r_stages_nir_shaders, Vector<RenderingDeviceCommons::ShaderStage> &r_stages, BitField<RenderingDeviceCommons::ShaderStage> &r_stages_processed) {
 	r_stages_processed.clear();
 
@@ -369,7 +388,7 @@ bool RenderingShaderContainerD3D12::_convert_spirv_to_nir(Span<ReflectShaderStag
 				0,
 				SPIRV_TO_MESA_STAGES[stage],
 				entry_point,
-				dxil_spirv_nir_get_spirv_options(),
+				_dxil_spirv_options(),
 				p_compiler_options);
 
 		ERR_FAIL_NULL_V_MSG(shader, false, "Shader translation (step 1) at stage " + String(RenderingDeviceCommons::SHADER_STAGE_NAMES[stage]) + " failed.");

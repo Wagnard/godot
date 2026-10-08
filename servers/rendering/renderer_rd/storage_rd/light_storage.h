@@ -455,6 +455,7 @@ private:
 	struct ShadowCubemap {
 		RID cubemap;
 		RID side_fb[6];
+		RID layered_fb; // The 6 faces at once, the vertex shader choosing the face (RD::SUPPORTS_SHADER_OUTPUT_LAYER).
 	};
 
 	HashMap<int, ShadowCubemap> shadow_cubemaps;
@@ -1192,6 +1193,7 @@ public:
 
 	RID get_cubemap(int p_size);
 	RID get_cubemap_fb(int p_size, int p_pass);
+	RID get_cubemap_layered_fb(int p_size); // Invalid when the device can't render the faces in one pass.
 	static RD::DataFormat get_cubemap_depth_format();
 	static uint32_t get_cubemap_depth_usage_bits();
 

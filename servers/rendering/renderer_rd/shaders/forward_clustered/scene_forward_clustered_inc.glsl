@@ -165,6 +165,35 @@ layout(constant_id = 2) const bool sc_emulate_point_size = false;
 
 #endif
 
+#ifdef MODE_CUBE_LAYERED
+// The 6 faces of a cube shadow in one pass: a draw covers every face that sees its objects. draw_call.uv_offset (free in
+// depth passes) lists those faces, 3 bits each, and their count in bits 18-20; instance i of the draw is face
+// (i % count) of instance (i / count). With emulated point sizes the instance index is the vertex: one face per draw.
+#define CUBE_FACE_COUNT ((draw_call.uv_offset >> 18u) & 7u)
+#undef INSTANCE_INDEX
+#ifdef POINT_SIZE_USED
+#define INSTANCE_INDEX (sc_emulate_point_size ? uint(gl_VertexIndex / 6) : (uint(gl_InstanceIndex) / CUBE_FACE_COUNT))
+#define CUBE_FACE_SLOT (sc_emulate_point_size ? 0u : (uint(gl_InstanceIndex) % CUBE_FACE_COUNT))
+#else
+#define INSTANCE_INDEX (uint(gl_InstanceIndex) / CUBE_FACE_COUNT)
+#define CUBE_FACE_SLOT (uint(gl_InstanceIndex) % CUBE_FACE_COUNT)
+#endif
+#define CUBE_FACE ((draw_call.uv_offset >> (3u * CUBE_FACE_SLOT)) & 7u)
+
+// The scene data hold the light's own view; cube face p_face looks along the same axes as the face cameras of
+// RendererSceneCull::_light_instance_update_shadow() (view_normals, view_up): a signed axis permutation, so exact.
+mat4 cube_face_view_rotation(uint p_face) {
+	const mat3 face_views[6] = mat3[](
+			mat3(vec3(0.0, 0.0, -1.0), vec3(0.0, -1.0, 0.0), vec3(-1.0, 0.0, 0.0)),
+			mat3(vec3(0.0, 0.0, 1.0), vec3(0.0, -1.0, 0.0), vec3(1.0, 0.0, 0.0)),
+			mat3(vec3(1.0, 0.0, 0.0), vec3(0.0, 0.0, 1.0), vec3(0.0, -1.0, 0.0)),
+			mat3(vec3(1.0, 0.0, 0.0), vec3(0.0, 0.0, -1.0), vec3(0.0, 1.0, 0.0)),
+			mat3(vec3(1.0, 0.0, 0.0), vec3(0.0, -1.0, 0.0), vec3(0.0, 0.0, -1.0)),
+			mat3(vec3(-1.0, 0.0, 0.0), vec3(0.0, -1.0, 0.0), vec3(0.0, 0.0, 1.0)));
+	return mat4(face_views[p_face]);
+}
+#endif
+
 #define REFLECTION_MULTIPLIER 1.0
 
 #define SDFGI_MAX_CASCADES 8

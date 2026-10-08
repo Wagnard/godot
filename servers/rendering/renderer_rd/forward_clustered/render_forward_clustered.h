@@ -219,6 +219,7 @@ protected:
 		PASS_MODE_DEPTH_NORMAL_ROUGHNESS_VOXEL_GI,
 		PASS_MODE_DEPTH_MATERIAL,
 		PASS_MODE_SDF,
+		PASS_MODE_SHADOW_CUBE, // The 6 faces of a cube shadow in one pass, into a layered framebuffer.
 		PASS_MODE_MAX
 	};
 
@@ -287,12 +288,15 @@ protected:
 	LocalVector<RD::DrawListID> render_list_split_ids;
 	RenderListParameters *render_list_split_params = nullptr;
 
-	// The shadow passes too small to be split (_render_shadow_end()), often many (6 per omni light), each recorded whole
-	// on some thread into a split reserved ahead of its draw list (RD::draw_list_split_detached_begin()), one part per
-	// pass. GODOT_PARALLEL_SHADOW_PASSES=0 records them one after the other on the render thread.
+	// Every shadow pass of a _render_shadow_end() (often many: one per cube light, 6 per light without one-pass cubes),
+	// cut in parts as a draw list split would be, recorded in one _parallel_run into splits reserved ahead of their
+	// draw lists (RD::draw_list_split_detached_begin()); the draw lists then open in order and take their parts.
+	// GODOT_PARALLEL_SHADOW_PASSES=0 records them pass after pass, each split on its own if large.
 	bool shadow_passes_parallel = true;
-	LocalVector<int32_t> shadow_pass_part; // Per shadow pass: its part, or -1.
-	LocalVector<RenderListParameters> shadow_part_params;
+	LocalVector<uint32_t> shadow_pass_first_part; // Per shadow pass: its parts [first, first + count); count 0: none.
+	LocalVector<uint32_t> shadow_pass_part_count;
+	LocalVector<RenderListParameters> shadow_pass_params;
+	LocalVector<uint32_t> shadow_part_pass; // Per part: its pass.
 	LocalVector<Rect2i> shadow_part_viewports;
 	LocalVector<RD::FramebufferFormatID> shadow_part_formats;
 	LocalVector<RenderListSplit> shadow_part_splits;
@@ -541,6 +545,7 @@ protected:
 
 			int *render_info = nullptr; // Shadow render info of the pass, for its draw calls.
 			uint32_t draw_calls = 0;
+			int32_t cube_copy = -1; // The cube shadow to copy into the atlas once this pass is drawn (cube_shadow_copies).
 		};
 
 		LocalVector<ShadowPass> shadow_passes;
@@ -564,6 +569,7 @@ protected:
 				uint32_t uses_projector : 1;
 				uint32_t uses_forward_gi : 1;
 				uint32_t uses_lightmap : 1;
+				uint32_t cube_face_mask : 6; // PASS_MODE_SHADOW_CUBE: the faces that see the element.
 			};
 			uint32_t value;
 		};
@@ -746,6 +752,7 @@ protected:
 		//used during rendering
 
 		uint32_t gi_offset_cache = 0;
+		uint8_t cube_face_mask = 0; // Faces of the cube shadow being gathered that see it (_render_shadow_cube_gather()).
 		bool store_transform_cache = true;
 		RID transforms_uniform_set;
 		uint32_t instance_count = 0;
@@ -941,10 +948,15 @@ protected:
 		GeometryInstanceSurfaceDataCache *surface;
 		uint32_t flags;
 		uint32_t gi_offset;
+		uint32_t cube_face_mask; // PASS_MODE_SHADOW_CUBE.
 	};
 
 	struct ShadowElementByKey {
 		_FORCE_INLINE_ bool operator()(const ShadowElement &A, const ShadowElement &B) const {
+			// Equal keys then by cube face mask: only elements seen by the same faces draw instanced together.
+			if (A.sort_key2 == B.sort_key2 && A.sort_key1 == B.sort_key1) {
+				return A.cube_face_mask < B.cube_face_mask;
+			}
 			return (A.sort_key2 == B.sort_key2) ? (A.sort_key1 < B.sort_key1) : (A.sort_key2 < B.sort_key2);
 		}
 	};
@@ -1020,7 +1032,35 @@ protected:
 
 	void _render_shadow_pass(RID p_light, RID p_shadow_atlas, int p_pass, const PagedArray<RenderGeometryInstance *> &p_instances, float p_lod_distance_multiplier = 0, float p_screen_mesh_lod_threshold = 0.0, bool p_open_pass = true, bool p_close_pass = true, bool p_clear_region = true, RenderingServerTypes::RenderInfo *p_render_info = nullptr, const Size2i &p_viewport_size = Size2i(1, 1), const Transform3D &p_main_cam_transform = Transform3D());
 	void _render_shadow_begin();
-	void _render_shadow_append(RID p_framebuffer, const PagedArray<RenderGeometryInstance *> &p_instances, const Projection &p_projection, const Transform3D &p_transform, float p_zfar, float p_bias, float p_normal_bias, bool p_reverse_cull_face, bool p_use_dp, bool p_use_dp_flip, bool p_use_pancake, float p_lod_distance_multiplier = 0.0, float p_screen_mesh_lod_threshold = 0.0, const Rect2i &p_rect = Rect2i(), bool p_flip_y = false, bool p_clear_region = true, bool p_begin = true, bool p_end = true, RenderingServerTypes::RenderInfo *p_render_info = nullptr, const Size2i &p_viewport_size = Size2i(1, 1), const Transform3D &p_main_cam_transform = Transform3D());
+	void _render_shadow_append(RID p_framebuffer, const PagedArray<RenderGeometryInstance *> &p_instances, const Projection &p_projection, const Transform3D &p_transform, float p_zfar, float p_bias, float p_normal_bias, bool p_reverse_cull_face, bool p_use_dp, bool p_use_dp_flip, bool p_use_pancake, float p_lod_distance_multiplier = 0.0, float p_screen_mesh_lod_threshold = 0.0, const Rect2i &p_rect = Rect2i(), bool p_flip_y = false, bool p_clear_region = true, bool p_begin = true, bool p_end = true, RenderingServerTypes::RenderInfo *p_render_info = nullptr, const Size2i &p_viewport_size = Size2i(1, 1), const Transform3D &p_main_cam_transform = Transform3D(), bool p_cube_layered = false);
+
+	// Cube omni shadows with their 6 faces in one pass (SHADER_GROUP_CUBE_LAYERED): the culler's 6 caster lists of a
+	// light merged into cube_shadow_instances, each instance once with the faces that see it (cube_face_mask), drawn as
+	// _render_shadow_pass(CUBE_SHADOW_ALL_FACES). GODOT_SHADOW_CUBE_ONE_PASS=0 renders the faces one by one.
+	enum {
+		CUBE_SHADOW_ALL_FACES = 6,
+	};
+	bool shadow_cube_one_pass = false;
+	// The gathered cube lights share one shadow session (one _render_shadow_end(), one parallel recording); each
+	// light's cubemap is copied into the atlas right after its draw list, before the next light reuses the cubemap.
+	bool cube_shadow_batching = false;
+	struct CubeShadowCopy {
+		RID light;
+		RID cubemap;
+		RID atlas_fb;
+		Rect2i atlas_rect;
+		uint32_t atlas_size = 1;
+		Vector2i dual_paraboloid_offset;
+		float z_near = 0.0;
+		float z_far = 0.0;
+	};
+	LocalVector<CubeShadowCopy> cube_shadow_copies;
+	void _render_shadow_cube_copy(const CubeShadowCopy &p_copy);
+	PagedArrayPool<RenderGeometryInstance *> cube_shadow_instance_pool;
+	PagedArray<RenderGeometryInstance *> cube_shadow_instances;
+	LocalVector<bool> cube_shadow_rendered; // Per entry of RenderDataRD::cube_shadows, this frame.
+	bool _render_shadow_cube_gather(const RenderDataRD *p_render_data, uint32_t p_first);
+	void _render_shadow_cube_release();
 	void _render_shadow_process();
 	void _render_shadow_end();
 

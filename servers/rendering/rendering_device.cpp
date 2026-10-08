@@ -3698,7 +3698,7 @@ RID RenderingDevice::framebuffer_create_empty(const Size2i &p_size, TextureSampl
 	return id;
 }
 
-RID RenderingDevice::framebuffer_create(const Vector<RID> &p_texture_attachments, FramebufferFormatID p_format_check, uint32_t p_view_count) {
+RID RenderingDevice::framebuffer_create(const Vector<RID> &p_texture_attachments, FramebufferFormatID p_format_check, uint32_t p_view_count, uint32_t p_layers) {
 	_THREAD_SAFE_METHOD_
 
 	FramebufferPass pass;
@@ -3706,7 +3706,7 @@ RID RenderingDevice::framebuffer_create(const Vector<RID> &p_texture_attachments
 	for (int i = 0; i < p_texture_attachments.size(); i++) {
 		Texture *texture = texture_owner.get_or_null(p_texture_attachments[i]);
 
-		ERR_FAIL_COND_V_MSG(texture && texture->layers != p_view_count, RID(), "Layers of our texture doesn't match view count for this framebuffer");
+		ERR_FAIL_COND_V_MSG(texture && texture->layers != (p_layers > 1 ? p_layers : p_view_count), RID(), "Layers of our texture doesn't match view count for this framebuffer");
 
 		if (texture != nullptr) {
 			_check_transfer_worker_texture(texture);
@@ -3730,11 +3730,14 @@ RID RenderingDevice::framebuffer_create(const Vector<RID> &p_texture_attachments
 	Vector<FramebufferPass> passes;
 	passes.push_back(pass);
 
-	return framebuffer_create_multipass(p_texture_attachments, passes, p_format_check, p_view_count);
+	return framebuffer_create_multipass(p_texture_attachments, passes, p_format_check, p_view_count, p_layers);
 }
 
-RID RenderingDevice::framebuffer_create_multipass(const Vector<RID> &p_texture_attachments, const Vector<FramebufferPass> &p_passes, FramebufferFormatID p_format_check, uint32_t p_view_count) {
+RID RenderingDevice::framebuffer_create_multipass(const Vector<RID> &p_texture_attachments, const Vector<FramebufferPass> &p_passes, FramebufferFormatID p_format_check, uint32_t p_view_count, uint32_t p_layers) {
 	_THREAD_SAFE_METHOD_
+
+	ERR_FAIL_COND_V_MSG(p_layers > 1 && p_view_count != 1, RID(), "A layered framebuffer has a single view.");
+	ERR_FAIL_COND_V_MSG(p_layers > 1 && !has_feature(SUPPORTS_SHADER_OUTPUT_LAYER), RID(), "Layered framebuffers need a vertex shader able to choose the layer, which this device doesn't support.");
 
 	Vector<AttachmentFormat> attachments;
 	LocalVector<RDD::TextureID> textures;
@@ -3750,7 +3753,7 @@ RID RenderingDevice::framebuffer_create_multipass(const Vector<RID> &p_texture_a
 			af.usage_flags = AttachmentFormat::UNUSED_ATTACHMENT;
 			trackers.push_back(nullptr);
 		} else {
-			ERR_FAIL_COND_V_MSG(texture->layers != p_view_count, RID(), "Layers of our texture doesn't match view count for this framebuffer");
+			ERR_FAIL_COND_V_MSG(texture->layers != (p_layers > 1 ? p_layers : p_view_count), RID(), "Layers of our texture doesn't match view count for this framebuffer");
 
 			_check_transfer_worker_texture(texture);
 
@@ -3803,6 +3806,7 @@ RID RenderingDevice::framebuffer_create_multipass(const Vector<RID> &p_texture_a
 	RDG::FramebufferCache *framebuffer_cache = RDG::framebuffer_cache_create();
 	framebuffer_cache->width = size.width;
 	framebuffer_cache->height = size.height;
+	framebuffer_cache->layers = p_layers;
 	framebuffer_cache->textures = textures;
 	framebuffer_cache->trackers = trackers;
 	framebuffer.framebuffer_cache = framebuffer_cache;

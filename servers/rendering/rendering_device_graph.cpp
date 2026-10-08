@@ -909,7 +909,7 @@ void RenderingDeviceGraph::_get_draw_list_render_pass_and_framebuffer(const Reco
 		storage.render_pass = render_pass_creation_function(driver, load_ops_view, store_ops_view, framebuffer_cache->render_pass_creation_user_data);
 		ERR_FAIL_COND(!storage.render_pass);
 
-		storage.framebuffer = driver->framebuffer_create(storage.render_pass, framebuffer_cache->textures, framebuffer_cache->width, framebuffer_cache->height);
+		storage.framebuffer = driver->framebuffer_create(storage.render_pass, framebuffer_cache->textures, framebuffer_cache->width, framebuffer_cache->height, framebuffer_cache->layers);
 		ERR_FAIL_COND(!storage.framebuffer);
 
 		it = framebuffer_cache->storage_map.insert(key, storage);

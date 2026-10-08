@@ -4,6 +4,10 @@
 
 #VERSION_DEFINES
 
+#ifdef MODE_CUBE_LAYERED
+#extension GL_ARB_shader_viewport_layer_array : enable
+#endif
+
 /* Include half precision types. */
 #include "../half_inc.glsl"
 
@@ -136,6 +140,10 @@ layout(location = 9) out float dp_clip;
 
 layout(location = 10) out flat uint instance_index_interp;
 
+#ifdef MODE_CUBE_LAYERED
+layout(location = 15) out flat uint cube_face_interp;
+#endif
+
 #ifdef USE_MULTIVIEW
 #extension GL_EXT_multiview : enable
 #define ViewIndex gl_ViewIndex
@@ -243,6 +251,15 @@ void vertex_shader(vec3 vertex_input,
 			scene_data.inv_view_matrix[1],
 			scene_data.inv_view_matrix[2],
 			vec4(0.0, 0.0, 0.0, 1.0)));
+
+#ifdef MODE_CUBE_LAYERED
+	// Every view-space computation below, the material's included, sees the face's view.
+	const uint cube_face = CUBE_FACE;
+	mat4 cube_face_view = cube_face_view_rotation(cube_face);
+	inv_view_matrix = inv_view_matrix * transpose(cube_face_view);
+	gl_Layer = int(cube_face);
+	cube_face_interp = cube_face;
+#endif
 
 	mat4 model_matrix = transpose(mat4(in_model_matrix[0],
 			in_model_matrix[1],
@@ -418,6 +435,9 @@ void vertex_shader(vec3 vertex_input,
 			scene_data.view_matrix[1],
 			scene_data.view_matrix[2],
 			vec4(0.0, 0.0, 0.0, 1.0)));
+#ifdef MODE_CUBE_LAYERED
+	read_view_matrix = cube_face_view * read_view_matrix;
+#endif
 
 #ifdef USE_DOUBLE_PRECISION
 	mat4 modelview = read_view_matrix * model_matrix;
@@ -920,6 +940,10 @@ layout(location = 9) in float dp_clip;
 
 layout(location = 10) in flat uint instance_index_interp;
 
+#ifdef MODE_CUBE_LAYERED
+layout(location = 15) in flat uint cube_face_interp;
+#endif
+
 #ifdef USE_LIGHTMAP
 // w0, w1, w2, and w3 are the four cubic B-spline basis functions
 float w0(float a) {
@@ -1301,6 +1325,13 @@ void fragment_shader(in SceneData scene_data) {
 			scene_data.view_matrix[1],
 			scene_data.view_matrix[2],
 			vec4(0.0, 0.0, 0.0, 1.0)));
+#ifdef MODE_CUBE_LAYERED
+	{
+		mat4 cube_face_view = cube_face_view_rotation(cube_face_interp);
+		read_view_matrix = cube_face_view * read_view_matrix;
+		inv_view_matrix = inv_view_matrix * transpose(cube_face_view);
+	}
+#endif
 	vec2 read_viewport_size = scene_data.viewport_size;
 
 #ifdef POINT_COORD_USED

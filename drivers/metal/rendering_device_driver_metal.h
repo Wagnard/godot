@@ -322,7 +322,7 @@ public:
 
 #pragma mark - Frame Buffer
 
-	virtual FramebufferID framebuffer_create(RenderPassID p_render_pass, VectorView<TextureID> p_attachments, uint32_t p_width, uint32_t p_height) override final;
+	virtual FramebufferID framebuffer_create(RenderPassID p_render_pass, VectorView<TextureID> p_attachments, uint32_t p_width, uint32_t p_height, uint32_t p_layers = 1) override final;
 	virtual void framebuffer_free(FramebufferID p_framebuffer) override final;
 
 #pragma mark - Shader
