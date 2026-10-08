@@ -3073,6 +3073,9 @@ Error Main::setup2(bool p_show_boot_logo) {
 
 	Thread::make_main_thread(); // Make whatever thread call this the main thread.
 	set_current_thread_safe_for_nodes(true);
+	// The thread of the scene tree, scripts and physics steps (Main::iteration()), named as other engines name theirs
+	// (Unreal's "GameThread") next to the render thread's "RenderThread".
+	Thread::set_name("GameThread");
 
 	// Don't use rich formatting to prevent ANSI escape codes from being written to log files.
 	print_header(false);
