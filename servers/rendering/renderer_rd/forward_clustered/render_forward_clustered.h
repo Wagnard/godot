@@ -250,6 +250,7 @@ protected:
 		bool use_directional_soft_shadow = false;
 		SceneShaderForwardClustered::ShaderSpecialization base_specialization = {};
 
+		RenderListParameters() = default;
 		RenderListParameters(GeometryInstanceSurfaceDataCache **p_elements, RenderElementInfo *p_element_info, int p_element_count, bool p_reverse_cull, PassMode p_pass_mode, uint32_t p_color_pass_flags, bool p_no_gi, bool p_use_directional_soft_shadows, RID p_render_pass_uniform_set, bool p_force_wireframe = false, const Vector2 &p_uv_offset = Vector2(), float p_lod_distance_multiplier = 0.0, float p_screen_mesh_lod_threshold = 0.0, uint32_t p_view_count = 1, uint32_t p_element_offset = 0, SceneShaderForwardClustered::ShaderSpecialization p_base_specialization = {}) {
 			elements = p_elements;
 			element_info = p_element_info;
@@ -285,6 +286,19 @@ protected:
 	LocalVector<RenderListSplit> render_list_splits;
 	LocalVector<RD::DrawListID> render_list_split_ids;
 	RenderListParameters *render_list_split_params = nullptr;
+
+	// The shadow passes too small to be split (_render_shadow_end()), often many (6 per omni light), each recorded whole
+	// on some thread into a split reserved ahead of its draw list (RD::draw_list_split_detached_begin()), one part per
+	// pass. GODOT_PARALLEL_SHADOW_PASSES=0 records them one after the other on the render thread.
+	bool shadow_passes_parallel = true;
+	LocalVector<int32_t> shadow_pass_part; // Per shadow pass: its part, or -1.
+	LocalVector<RenderListParameters> shadow_part_params;
+	LocalVector<Rect2i> shadow_part_viewports;
+	LocalVector<RD::FramebufferFormatID> shadow_part_formats;
+	LocalVector<RenderListSplit> shadow_part_splits;
+	LocalVector<RD::DrawListID> shadow_part_split_ids;
+
+	void _render_shadow_pass_part(uint32_t p_part);
 
 	// Work cut in parts that helper threads and the render thread take in turn (_parallel_run()). The claim holds the
 	// run's generation (high 32 bits) and the next part (low 32 bits); a run is closed (low bits all set) while the
@@ -333,6 +347,8 @@ protected:
 		uint64_t shadow_usec = 0; // Sorting the shadow passes and writing their instance data, either path.
 		uint64_t shadow_draw_calls = 0; // Deferred builds only.
 		uint64_t sort_usec = 0; // Sorting the main view's opaque, motion and alpha lists, either path.
+		uint32_t shadow_parallel_passes = 0; // Shadow passes recorded together ahead of their draw lists, and the time it took.
+		uint64_t shadow_parallel_usec = 0;
 		// _parallel_run(), all uses: parts, those run by the calling thread, sum of the parts' durations, wall time.
 		SafeNumeric<uint64_t> run_parts;
 		SafeNumeric<uint64_t> run_parts_on_caller;

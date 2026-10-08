@@ -761,8 +761,8 @@ uint32_t RenderForwardClustered::_render_list_get_split_count(const RenderListPa
 			render_list_split_stats.frames++;
 			if (render_list_split_stats.frames == 240) {
 				const RenderListSplitStats &st = render_list_split_stats;
-				print_line(vformat("Parallel draw lists, per frame: %.1f lists split in %.1f parts (%.0f elements, %.0f us, of which waiting %.0f us, joining %.0f us; parts %.0f us in total, last part started after %.0f us), %.1f lists recorded serially (%.0f elements, %.0f us).",
-						st.split_lists / 240.0, st.splits / 240.0, st.split_elements / 240.0, st.split_usec / 240.0, st.split_wait_usec / 240.0, st.split_join_usec / 240.0, st.split_parts_usec / 240.0, st.split_start_usec / 240.0, st.serial_lists / 240.0, st.serial_elements / 240.0, st.serial_usec / 240.0));
+				print_line(vformat("Parallel draw lists, per frame: %.1f lists split in %.1f parts (%.0f elements, %.0f us, of which waiting %.0f us, joining %.0f us; parts %.0f us in total, last part started after %.0f us), %.1f shadow passes recorded together (%.0f us), %.1f lists recorded serially (%.0f elements, %.0f us).",
+						st.split_lists / 240.0, st.splits / 240.0, st.split_elements / 240.0, st.split_usec / 240.0, st.split_wait_usec / 240.0, st.split_join_usec / 240.0, st.split_parts_usec / 240.0, st.split_start_usec / 240.0, st.shadow_parallel_passes / 240.0, st.shadow_parallel_usec / 240.0, st.serial_lists / 240.0, st.serial_elements / 240.0, st.serial_usec / 240.0));
 				print_line(vformat("List building, per frame: filling %.0f us, instance data %.0f us, %.1f of them on several threads; shadow sort + instance data %.0f us (%.1f deferred builds of %.1f passes, %.0f elements, %.0f draw calls); main lists sort %.0f us.",
 						st.fill_usec / 240.0, st.instance_data_usec / 240.0, st.parallel_builds / 240.0, st.shadow_usec / 240.0, st.shadow_builds / 240.0, st.shadow_passes / 240.0, st.shadow_elements / 240.0, st.shadow_draw_calls / 240.0, st.sort_usec / 240.0));
 				print_line(vformat("Parallel runs, per frame: %.1f runs, %.1f helpers woken, %.0f parts, %.0f of them on the calling thread, %.0f us of parts in total, %.0f us of wall time.",
@@ -3796,12 +3796,106 @@ void RenderForwardClustered::_render_shadow_process() {
 void RenderForwardClustered::_render_shadow_end() {
 	RD::get_singleton()->draw_command_begin_label("Shadow Render");
 
-	for (SceneState::ShadowPass &shadow_pass : scene_state.shadow_passes) {
+	// The passes a draw list would record serially (too small to be split) are recorded first, all at once on several
+	// threads, each into a split reserved for its draw list; the draw lists then open one after the other and take them.
+	LocalVector<SceneState::ShadowPass> &shadow_passes = scene_state.shadow_passes;
+	const uint32_t pass_count = shadow_passes.size();
+	shadow_pass_part.resize(pass_count);
+	uint32_t part_count = 0;
+	if (shadow_passes_parallel && render_list_max_splits > 1 && pass_count > 1) {
+		shadow_part_params.clear();
+		shadow_part_viewports.clear();
+		shadow_part_formats.clear();
+		for (uint32_t i = 0; i < pass_count; i++) {
+			const SceneState::ShadowPass &shadow_pass = shadow_passes[i];
+			// As _render_list_get_split_count(): a pass of twice the range size or more is split on its own.
+			const bool splits_alone = render_list_split_min_elements > 0 && shadow_pass.element_count / render_list_split_min_elements > 1;
+			if (shadow_pass.element_count == 0 || splits_alone) {
+				shadow_pass_part[i] = -1;
+				continue;
+			}
+
+			RenderListParameters render_list_parameters(render_list[RENDER_LIST_SECONDARY].elements.ptr() + shadow_pass.element_from, render_list[RENDER_LIST_SECONDARY].element_info.ptr() + shadow_pass.element_from, shadow_pass.element_count, shadow_pass.flip_cull, shadow_pass.pass_mode, 0, true, false, shadow_pass.rp_uniform_set, false, Vector2(), shadow_pass.lod_distance_multiplier, shadow_pass.screen_mesh_lod_threshold, 1, shadow_pass.element_from);
+			render_list_parameters.framebuffer_format = RD::get_singleton()->framebuffer_get_format(shadow_pass.framebuffer);
+			shadow_part_params.push_back(render_list_parameters);
+			// The viewport draw_list_begin() will give the draw list: the pass's rectangle, or the whole framebuffer.
+			shadow_part_viewports.push_back(shadow_pass.rect != Rect2i() ? shadow_pass.rect : Rect2i(Point2i(), Size2i(RD::get_singleton()->framebuffer_get_size(shadow_pass.framebuffer))));
+			shadow_part_formats.push_back(render_list_parameters.framebuffer_format);
+			shadow_pass_part[i] = int32_t(part_count++);
+		}
+
+		if (part_count < 2) {
+			for (uint32_t i = 0; i < pass_count; i++) {
+				shadow_pass_part[i] = -1;
+			}
+			part_count = 0;
+		}
+	} else {
+		for (uint32_t i = 0; i < pass_count; i++) {
+			shadow_pass_part[i] = -1;
+		}
+	}
+
+	if (part_count > 0) {
+		const uint64_t begin_usec = render_list_split_stats.enabled ? OS::get_singleton()->get_ticks_usec() : 0;
+		shadow_part_splits.resize(part_count);
+		shadow_part_split_ids.resize(part_count);
+		RD::get_singleton()->draw_list_split_detached_begin(part_count, shadow_part_viewports.ptr(), shadow_part_formats.ptr(), shadow_part_split_ids.ptr());
+		for (uint32_t i = 0; i < part_count; i++) {
+			RenderListSplit &split = shadow_part_splits[i];
+			split.from_element = 0;
+			split.to_element = shadow_part_params[i].element_count;
+			split.draw_list = shadow_part_split_ids[i];
+			split.request_redraw = false;
+			split.used_materials.clear();
+		}
+
+		_parallel_run(part_count, render_list_max_splits, &RenderForwardClustered::_render_shadow_pass_part);
+
+		bool request_redraw = false;
+		for (uint32_t i = 0; i < part_count; i++) {
+			RenderListSplit &split = shadow_part_splits[i];
+			request_redraw = request_redraw || split.request_redraw;
+			for (RendererRD::MaterialStorage::MaterialData *material : split.used_materials) {
+				material->set_as_used();
+			}
+		}
+
+		if (request_redraw) {
+			RenderingServerDefault::redraw_request();
+		}
+
+		if (render_list_split_stats.enabled) {
+			render_list_split_stats.shadow_parallel_passes += part_count;
+			render_list_split_stats.shadow_parallel_usec += OS::get_singleton()->get_ticks_usec() - begin_usec;
+		}
+	}
+
+	for (uint32_t i = 0; i < pass_count; i++) {
+		SceneState::ShadowPass &shadow_pass = shadow_passes[i];
+		const BitField<RD::DrawFlags> draw_flags = shadow_pass.clear_depth ? RD::DRAW_CLEAR_DEPTH : RD::DRAW_DEFAULT_ALL;
+		if (shadow_pass_part[i] >= 0) {
+			RD::get_singleton()->draw_list_begin(shadow_pass.framebuffer, draw_flags, Vector<Color>(), 0.0f, 0, shadow_pass.rect);
+			RD::get_singleton()->draw_list_split_append(shadow_part_split_ids[shadow_pass_part[i]]);
+			RD::get_singleton()->draw_list_end();
+			continue;
+		}
+
 		RenderListParameters render_list_parameters(render_list[RENDER_LIST_SECONDARY].elements.ptr() + shadow_pass.element_from, render_list[RENDER_LIST_SECONDARY].element_info.ptr() + shadow_pass.element_from, shadow_pass.element_count, shadow_pass.flip_cull, shadow_pass.pass_mode, 0, true, false, shadow_pass.rp_uniform_set, false, Vector2(), shadow_pass.lod_distance_multiplier, shadow_pass.screen_mesh_lod_threshold, 1, shadow_pass.element_from);
-		_render_list_with_draw_list(&render_list_parameters, shadow_pass.framebuffer, shadow_pass.clear_depth ? RD::DRAW_CLEAR_DEPTH : RD::DRAW_DEFAULT_ALL, Vector<Color>(), 0.0f, 0, shadow_pass.rect);
+		_render_list_with_draw_list(&render_list_parameters, shadow_pass.framebuffer, draw_flags, Vector<Color>(), 0.0f, 0, shadow_pass.rect);
+	}
+
+	if (part_count > 0) {
+		RD::get_singleton()->draw_list_split_detached_end();
 	}
 
 	RD::get_singleton()->draw_command_end_label();
+}
+
+void RenderForwardClustered::_render_shadow_pass_part(uint32_t p_part) {
+	RenderListSplit &split = shadow_part_splits[p_part];
+	RenderListParameters &render_list_parameters = shadow_part_params[p_part];
+	_render_list(split.draw_list, render_list_parameters.framebuffer_format, &render_list_parameters, split.from_element, split.to_element, &split);
 }
 
 void RenderForwardClustered::_render_particle_collider_heightfield(RID p_fb, const Transform3D &p_cam_transform, const Projection &p_cam_projection, const PagedArray<RenderGeometryInstance *> &p_instances) {
@@ -6150,6 +6244,7 @@ RenderForwardClustered::RenderForwardClustered() {
 		shadow_build_parallel = OS::get_singleton()->get_environment("GODOT_PARALLEL_SHADOW_BUILD") != "0";
 		shadow_build_merge = OS::get_singleton()->get_environment("GODOT_PARALLEL_SHADOW_MERGE") != "0";
 		list_sort_parallel = OS::get_singleton()->get_environment("GODOT_PARALLEL_SORT") != "0";
+		shadow_passes_parallel = OS::get_singleton()->get_environment("GODOT_PARALLEL_SHADOW_PASSES") != "0";
 	}
 
 	/* SCENE SHADER */

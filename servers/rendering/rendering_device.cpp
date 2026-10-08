@@ -5828,7 +5828,11 @@ void RenderingDevice::draw_list_bind_render_pipeline(DrawListID p_list, RID p_re
 	const RenderPipeline *pipeline = render_pipeline_owner.get_or_null(p_render_pipeline);
 	ERR_FAIL_NULL(pipeline);
 #ifdef DEBUG_ENABLED
-	ERR_FAIL_COND(pipeline->validation.framebuffer_format != draw_list_framebuffer_format && pipeline->validation.render_pass != draw_list_current_subpass);
+	if (split != nullptr) {
+		ERR_FAIL_COND(pipeline->validation.framebuffer_format != split->framebuffer_format && pipeline->validation.render_pass != 0);
+	} else {
+		ERR_FAIL_COND(pipeline->validation.framebuffer_format != draw_list_framebuffer_format && pipeline->validation.render_pass != draw_list_current_subpass);
+	}
 #endif
 
 	if (p_render_pipeline == dl->state.pipeline) {
@@ -6509,7 +6513,7 @@ RenderingDevice::DrawList *RenderingDevice::_get_draw_list(DrawListID p_list, Dr
 	}
 
 	uint64_t index = uint64_t(p_list) & ((uint64_t(1) << ID_BASE_SHIFT) - 1);
-	ERR_FAIL_COND_V(index < draw_list_split_base || index >= draw_list_split_base + draw_list_split_count, nullptr);
+	ERR_FAIL_COND_V(index >= draw_list_splits_detached && (index < draw_list_split_base || index >= draw_list_split_base + draw_list_split_count), nullptr);
 	r_split = &draw_list_splits[index];
 	return &r_split->draw_list;
 }
@@ -6571,10 +6575,36 @@ void RenderingDevice::draw_list_split_begin(uint32_t p_count, DrawListID *r_spli
 		split.transfer_buffers.clear();
 		split.transfer_vertex_arrays.clear();
 		split.transfer_index_arrays.clear();
+#ifdef DEBUG_ENABLED
+		split.framebuffer_format = draw_list_framebuffer_format;
+#endif
 		r_split_ids[i - draw_list_split_base] = (int64_t(ID_TYPE_SPLIT_DRAW_LIST) << ID_BASE_SHIFT) | int64_t(i);
 	}
 
 	draw_list_split_count = p_count;
+}
+
+void RenderingDevice::_draw_list_split_merge(DrawListSplit &p_split) {
+	draw_graph.add_draw_list_split(p_split.graph);
+
+	for (UniformSet *uniform_set : p_split.uniform_sets_to_update) {
+		_uniform_set_update_shared(uniform_set);
+		_uniform_set_update_clears(uniform_set);
+	}
+
+	for (Buffer *buffer : p_split.transfer_buffers) {
+		_check_transfer_worker_buffer(buffer);
+	}
+
+	for (VertexArray *vertex_array : p_split.transfer_vertex_arrays) {
+		_check_transfer_worker_vertex_array(vertex_array);
+	}
+
+	for (IndexArray *index_array : p_split.transfer_index_arrays) {
+		_check_transfer_worker_index_array(index_array);
+	}
+
+	draw_list.state.draw_count += p_split.draw_list.state.draw_count;
 }
 
 void RenderingDevice::draw_list_split_end() {
@@ -6583,27 +6613,7 @@ void RenderingDevice::draw_list_split_end() {
 	ERR_FAIL_COND_MSG(draw_list_split_count == 0, "The draw list is not split.");
 
 	for (uint32_t i = draw_list_split_base; i < draw_list_split_base + draw_list_split_count; i++) {
-		DrawListSplit &split = draw_list_splits[i];
-		draw_graph.add_draw_list_split(split.graph);
-
-		for (UniformSet *uniform_set : split.uniform_sets_to_update) {
-			_uniform_set_update_shared(uniform_set);
-			_uniform_set_update_clears(uniform_set);
-		}
-
-		for (Buffer *buffer : split.transfer_buffers) {
-			_check_transfer_worker_buffer(buffer);
-		}
-
-		for (VertexArray *vertex_array : split.transfer_vertex_arrays) {
-			_check_transfer_worker_vertex_array(vertex_array);
-		}
-
-		for (IndexArray *index_array : split.transfer_index_arrays) {
-			_check_transfer_worker_index_array(index_array);
-		}
-
-		draw_list.state.draw_count += split.draw_list.state.draw_count;
+		_draw_list_split_merge(draw_list_splits[i]);
 	}
 
 	draw_list_splits_used = draw_list_split_base + draw_list_split_count;
@@ -6614,6 +6624,68 @@ void RenderingDevice::draw_list_split_end() {
 	draw_list.state = DrawList::State();
 	draw_list.state.draw_count = draw_count;
 	draw_list.validation = DrawList::Validation();
+}
+
+void RenderingDevice::draw_list_split_detached_begin(uint32_t p_count, const Rect2i *p_viewports, const FramebufferFormatID *p_formats, DrawListID *r_split_ids) {
+	ERR_RENDER_THREAD_GUARD();
+
+	ERR_FAIL_COND_MSG(draw_list.active, "Splits recorded ahead of their draw lists are reserved while no draw list is open.");
+	ERR_FAIL_COND_MSG(draw_list_splits_detached > 0, "Splits are already reserved ahead of their draw lists.");
+	ERR_FAIL_COND(p_count == 0);
+
+	// No draw list is open, so no split is in use: they take the first ones, and the splits of the draw lists that open
+	// meanwhile come after them (draw_list_splits_used).
+	if (draw_list_splits.size() < p_count) {
+		draw_list_splits.resize(p_count);
+	}
+
+	for (uint32_t i = 0; i < p_count; i++) {
+		DrawListSplit &split = draw_list_splits[i];
+		split.draw_list = DrawList();
+		split.draw_list.viewport = p_viewports[i];
+		split.draw_list.active = true;
+		split.graph.clear();
+		split.uniform_sets_to_update.clear();
+		split.transfer_buffers.clear();
+		split.transfer_vertex_arrays.clear();
+		split.transfer_index_arrays.clear();
+#ifdef DEBUG_ENABLED
+		split.framebuffer_format = p_formats[i];
+#endif
+		r_split_ids[i] = (int64_t(ID_TYPE_SPLIT_DRAW_LIST) << ID_BASE_SHIFT) | int64_t(i);
+	}
+
+	draw_list_splits_detached = p_count;
+	draw_list_splits_used = p_count;
+}
+
+void RenderingDevice::draw_list_split_append(DrawListID p_split) {
+	ERR_RENDER_THREAD_GUARD();
+
+	ERR_FAIL_COND_MSG(!draw_list.active, "A draw list must be active to take a split.");
+	ERR_FAIL_COND_MSG(draw_list_split_count > 0, "The draw list is still split, call draw_list_split_end() first.");
+	ERR_FAIL_COND(!_is_split_draw_list(p_split));
+	const uint64_t index = uint64_t(p_split) & ((uint64_t(1) << ID_BASE_SHIFT) - 1);
+	ERR_FAIL_COND_MSG(index >= draw_list_splits_detached, "Only a split reserved by draw_list_split_detached_begin() can be appended.");
+	ERR_FAIL_COND_MSG(draw_list_subpass_count > 1, "A draw list with subpasses can't take a split.");
+
+	_draw_list_split_merge(draw_list_splits[index]);
+
+	// The split bound its own state, as in draw_list_split_end().
+	uint32_t draw_count = draw_list.state.draw_count;
+	draw_list.state = DrawList::State();
+	draw_list.state.draw_count = draw_count;
+	draw_list.validation = DrawList::Validation();
+}
+
+void RenderingDevice::draw_list_split_detached_end() {
+	ERR_RENDER_THREAD_GUARD();
+
+	ERR_FAIL_COND_MSG(draw_list.active, "The draw lists holding the splits must have ended.");
+	ERR_FAIL_COND_MSG(draw_list_splits_detached == 0, "No split is reserved ahead of its draw list.");
+
+	draw_list_splits_detached = 0;
+	draw_list_splits_used = 0;
 }
 
 uint32_t RenderingDevice::draw_list_get_current_pass() {
@@ -6666,7 +6738,7 @@ void RenderingDevice::draw_list_end() {
 	ERR_FAIL_COND_MSG(draw_list_split_count > 0, "The draw list is still split, call draw_list_split_end() first.");
 
 	draw_graph.add_draw_list_end();
-	draw_list_splits_used = 0;
+	draw_list_splits_used = draw_list_splits_detached;
 
 	_draw_list_end();
 

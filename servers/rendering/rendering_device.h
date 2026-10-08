@@ -1575,12 +1575,18 @@ private:
 		LocalVector<Buffer *> transfer_buffers;
 		LocalVector<VertexArray *> transfer_vertex_arrays;
 		LocalVector<IndexArray *> transfer_index_arrays;
+#ifdef DEBUG_ENABLED
+		FramebufferFormatID framebuffer_format = INVALID_ID; // The format its pipelines are validated against.
+#endif
 	};
 
 	LocalVector<DrawListSplit> draw_list_splits;
 	uint32_t draw_list_split_count = 0;
 	uint32_t draw_list_split_base = 0; // The splits in use: [base, base + count).
 	uint32_t draw_list_splits_used = 0; // Splits whose instructions the open draw list still references, until it ends.
+	uint32_t draw_list_splits_detached = 0; // Splits recorded ahead of their draw lists: [0, detached), see draw_list_split_detached_begin().
+
+	void _draw_list_split_merge(DrawListSplit &p_split);
 
 	DrawList *_get_draw_list(DrawListID p_list, DrawListSplit *&r_split);
 	_FORCE_INLINE_ bool _is_split_draw_list(DrawListID p_list) const { return (p_list >> ID_BASE_SHIFT) == ID_TYPE_SPLIT_DRAW_LIST; }
@@ -1659,6 +1665,14 @@ public:
 	// draw_list_split_end(), on the render thread once every part is recorded, appends them to the draw list in order.
 	void draw_list_split_begin(uint32_t p_count, DrawListID *r_split_ids);
 	void draw_list_split_end();
+
+	// p_count splits recorded before the draw lists that will hold them exist, by other threads as above: split i for a
+	// draw list on a framebuffer of format p_formats[i] whose viewport is p_viewports[i]. Each draw list, once begun on
+	// the render thread, takes its split with draw_list_split_append(). draw_list_split_detached_end() releases them
+	// all, when no draw list is open any more.
+	void draw_list_split_detached_begin(uint32_t p_count, const Rect2i *p_viewports, const FramebufferFormatID *p_formats, DrawListID *r_split_ids);
+	void draw_list_split_append(DrawListID p_split);
+	void draw_list_split_detached_end();
 
 private:
 	/**************************/
