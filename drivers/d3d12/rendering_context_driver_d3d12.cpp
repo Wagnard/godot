@@ -144,6 +144,15 @@ Error RenderingContextDriverD3D12::_initialize_debug_layers() {
 
 	ERR_FAIL_COND_V(!SUCCEEDED(res), ERR_QUERY_FAILED);
 	debug_controller->EnableDebugLayer();
+
+	// GODOT_D3D12_GBV=1 adds GPU-based validation: resource states and descriptors checked as the GPU executes (slow).
+	if (OS::get_singleton()->get_environment("GODOT_D3D12_GBV") == "1") {
+		ComPtr<ID3D12Debug1> debug_controller_1;
+		if (SUCCEEDED(debug_controller.As(&debug_controller_1))) {
+			debug_controller_1->SetEnableGPUBasedValidation(TRUE);
+			print_line("D3D12: GPU-based validation enabled.");
+		}
+	}
 	return OK;
 }
 
