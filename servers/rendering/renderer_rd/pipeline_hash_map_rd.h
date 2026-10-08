@@ -31,6 +31,7 @@
 #pragma once
 
 #include "core/object/worker_thread_pool.h"
+#include "core/os/condition_variable.h"
 #include "core/os/mutex.h"
 #include "core/os/rw_lock.h"
 #include "core/templates/hash_map.h"
@@ -57,7 +58,78 @@ private:
 	Mutex compiled_queue_mutex;
 	RBSet<uint32_t> compilation_set;
 	HashMap<uint32_t, WorkerThreadPool::TaskID> compilation_tasks;
-	Mutex local_mutex;
+	// A compilation is started once, by its background task or by a thread that needs the pipeline before the task ran
+	// (it compiles it itself); the task then does nothing. Threads needing a pipeline being compiled wait for the
+	// compilation itself, never for a queued task: with parallel draw lists several pool threads can need the same
+	// pipeline, and blocking them all on a task still queued would leave no thread to run it.
+	RBSet<uint32_t> started_compilations;
+	RBSet<uint32_t> running_compilations;
+	// Compiled by the thread that needed them: their task is still to run (and do nothing), so it stays in
+	// compilation_tasks for clear_pipelines() to wait for before the map can go.
+	RBSet<uint32_t> inline_compilations;
+	ConditionVariable running_compilations_condition; // With local_mutex.
+	BinaryMutex local_mutex;
+
+	void _compile_task(Key p_key) {
+		const uint32_t key_hash = p_key.hash();
+		{
+			MutexLock local_lock(local_mutex);
+			if (started_compilations.has(key_hash)) {
+				return; // Compiled by the thread that needed it.
+			}
+			started_compilations.insert(key_hash);
+			running_compilations.insert(key_hash);
+		}
+		_compile_and_finish(p_key, key_hash);
+	}
+
+	void _compile_and_finish(const Key &p_key, uint32_t p_key_hash) {
+		(creation_object->*creation_function)(p_key);
+		{
+			MutexLock local_lock(local_mutex);
+			running_compilations.erase(p_key_hash);
+		}
+		running_compilations_condition.notify_all();
+	}
+
+	// Waits for a submitted pipeline: compiles it here if its task hasn't started yet, else waits for the compilation
+	// running on another thread. Without a key, a task not started yet is waited for (the original behavior, for
+	// callers on the render thread).
+	void _wait_for_compilation(uint32_t p_key_hash, const Key *p_key) {
+		WorkerThreadPool::TaskID task_id_to_wait = WorkerThreadPool::INVALID_TASK_ID;
+		{
+			MutexLock local_lock(local_mutex);
+			if (!compilation_set.has(p_key_hash)) {
+				// The pipeline was never submitted, we can't wait for it.
+				return;
+			}
+
+			if (!started_compilations.has(p_key_hash)) {
+				if (p_key != nullptr) {
+					started_compilations.insert(p_key_hash);
+					running_compilations.insert(p_key_hash);
+					inline_compilations.insert(p_key_hash);
+				} else {
+					HashMap<uint32_t, WorkerThreadPool::TaskID>::Iterator task_it = compilation_tasks.find(p_key_hash);
+					if (task_it != compilation_tasks.end()) {
+						task_id_to_wait = task_it->value;
+						compilation_tasks.remove(task_it);
+					}
+				}
+			} else {
+				while (running_compilations.has(p_key_hash)) {
+					running_compilations_condition.wait(local_lock);
+				}
+				return;
+			}
+		}
+
+		if (p_key != nullptr) {
+			_compile_and_finish(*p_key, p_key_hash);
+		} else if (task_id_to_wait != WorkerThreadPool::INVALID_TASK_ID) {
+			WorkerThreadPool::get_singleton()->wait_for_task_completion(task_id_to_wait);
+		}
+	}
 
 	bool _add_new_pipelines_to_map() {
 		thread_local Vector<uint32_t> hashes_added;
@@ -81,6 +153,9 @@ private:
 		{
 			MutexLock local_lock(local_mutex);
 			for (uint32_t hash : hashes_added) {
+				if (inline_compilations.has(hash)) {
+					continue;
+				}
 				HashMap<uint32_t, WorkerThreadPool::TaskID>::Iterator task_it = compilation_tasks.find(hash);
 				if (task_it != compilation_tasks.end()) {
 					compilation_tasks.remove(task_it);
@@ -166,31 +241,12 @@ public:
 #endif
 
 		// Queue a background compilation task.
-		WorkerThreadPool::TaskID task_id = WorkerThreadPool::get_singleton()->add_template_task(creation_object, creation_function, p_key, p_high_priority, "PipelineCompilation");
+		WorkerThreadPool::TaskID task_id = WorkerThreadPool::get_singleton()->add_template_task(this, &PipelineHashMapRD::_compile_task, p_key, p_high_priority, "PipelineCompilation");
 		compilation_tasks.insert(p_key_hash, task_id);
 	}
 
 	void wait_for_pipeline(uint32_t p_key_hash) {
-		WorkerThreadPool::TaskID task_id_to_wait = WorkerThreadPool::INVALID_TASK_ID;
-
-		{
-			MutexLock local_lock(local_mutex);
-			if (!compilation_set.has(p_key_hash)) {
-				// The pipeline was never submitted, we can't wait for it.
-				return;
-			}
-
-			HashMap<uint32_t, WorkerThreadPool::TaskID>::Iterator task_it = compilation_tasks.find(p_key_hash);
-			if (task_it != compilation_tasks.end()) {
-				// Wait for and remove the compilation task if it exists.
-				task_id_to_wait = task_it->value;
-				compilation_tasks.remove(task_it);
-			}
-		}
-
-		if (task_id_to_wait != WorkerThreadPool::INVALID_TASK_ID) {
-			WorkerThreadPool::get_singleton()->wait_for_task_completion(task_id_to_wait);
-		}
+		_wait_for_compilation(p_key_hash, nullptr);
 	}
 
 	// Retrieve a pipeline. It'll return an empty pipeline if it's not available yet, but it'll be guaranteed to succeed if 'wait for compilation' is true and stall as necessary. Source is just an optional number to aid debugging.
@@ -212,7 +268,7 @@ public:
 			return RID();
 		}
 
-		wait_for_pipeline(p_key_hash);
+		_wait_for_compilation(p_key_hash, &p_key);
 		_add_new_pipelines_to_map();
 
 		if (!_find_pipeline(p_key_hash, pipeline)) {
@@ -238,6 +294,12 @@ public:
 
 		hash_map.clear();
 		compilation_set.clear();
+		{
+			MutexLock local_lock(local_mutex);
+			started_compilations.clear();
+			inline_compilations.clear();
+			compilation_tasks.clear();
+		}
 	}
 
 	// Set the external pipeline compilations array to increase the counters on every time a pipeline is compiled.
