@@ -431,6 +431,10 @@ void RenderingServerDefault::_thread_exit() {
 }
 
 void RenderingServerDefault::_thread_loop() {
+	// A pool thread taken for good: named as other engines name theirs (Unreal's "RenderThread 0"), not "WorkerThread N",
+	// so profilers and debuggers tell it apart.
+	Thread::set_name("RenderThread");
+
 	DisplayServer::get_singleton()->gl_window_make_current(DisplayServerEnums::MAIN_WINDOW_ID); // Move GL to this thread.
 
 	while (!exit) {
