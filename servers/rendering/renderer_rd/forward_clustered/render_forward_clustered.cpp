@@ -1208,9 +1208,18 @@ void RenderForwardClustered::_fill_instance_data(RenderListType p_render_list, i
 	scene_state.grow_instance_buffer(p_render_list, p_offset + element_total, p_offset != 0u);
 	if (!scene_state.curr_gpu_ptr[p_render_list] && element_total > 0u) {
 		// The old buffer was replaced for another larger one. We must start copying from scratch.
-		element_total += p_offset;
-		p_offset = 0u;
 		scene_state.curr_gpu_ptr[p_render_list] = reinterpret_cast<SceneState::InstanceData *>(scene_state.instance_buffer[p_render_list].map_raw_for_upload(0u));
+		if (p_offset > 0u) {
+			// The elements before p_offset belong to earlier calls (the previous shadow passes): only their instance data
+			// is written again. Their element info (instancing repeats) stays as it was computed for each of them;
+			// computing it again in one go would join the repeats of consecutive passes across their boundary.
+			thread_local LocalVector<RenderElementInfo> earlier_element_info;
+			earlier_element_info.resize(p_offset);
+			memcpy(earlier_element_info.ptr(), rl->element_info.ptr(), p_offset * sizeof(RenderElementInfo));
+			fill_instance_data_repeats.resize(p_offset);
+			_fill_instance_data_range(p_render_list, 0u, 0u, p_offset);
+			memcpy(rl->element_info.ptr(), earlier_element_info.ptr(), p_offset * sizeof(RenderElementInfo));
+		}
 	}
 
 	if (p_render_info) {
