@@ -144,10 +144,14 @@ class RenderingDeviceDriverD3D12 : public RenderingDeviceDriver {
 		uint32_t increment_size = 0;
 
 		Microsoft::WRL::ComPtr<D3D12MA::VirtualBlock> virtual_block;
+		// D3D12MA virtual blocks are not synchronized. The shader-visible heaps are allocated from by the render
+		// thread (uniform sets) and by the graph replay (clears), which may run on another thread: they lock this.
+		Mutex *mutex = nullptr;
 
 		Error initialize(ID3D12Device *p_device, D3D12_DESCRIPTOR_HEAP_TYPE p_type, uint32_t p_num_descriptors, bool p_shader_visible);
 
 		Error allocate(uint32_t p_descriptor_count, Allocation &r_allocation);
+		Error _allocate(uint32_t p_descriptor_count, Allocation &r_allocation);
 		void free(const Allocation &p_allocation);
 	};
 
@@ -528,6 +532,12 @@ private:
 		CPUDescriptorHeapPool::Allocation uav_alloc;
 		CPUDescriptorHeapPool::Allocation rtv_alloc;
 		CPUDescriptorHeapPool::Allocation dsv_alloc;
+
+		// Shader-visible descriptors of the clears recorded into this command buffer, reused from the start once it is
+		// begun again (the GPU is done with it by then): no need to know which frame is being recorded, which another
+		// thread may be on (RHI-THREAD-STUDY.md, step 1c).
+		LocalVector<DescriptorHeap::Allocation> clear_descriptor_allocations;
+		uint32_t clear_descriptor_allocation_count = 0;
 	};
 
 public:
@@ -713,8 +723,8 @@ public:
 private:
 	void _command_check_descriptor_sets(CommandBufferID p_cmd_buffer);
 	// Locked: command buffers may be recorded on several threads at once.
-	Mutex per_frame_descriptor_mutex;
-	DescriptorHeap::Allocation _command_allocate_per_frame_descriptor();
+	Mutex shader_visible_heaps_mutex; // See DescriptorHeap::mutex.
+	DescriptorHeap::Allocation _command_allocate_clear_descriptor(CommandBufferInfo *p_cmd_buf_info);
 
 public:
 	/******************/
@@ -929,8 +939,6 @@ public:
 	/********************/
 private:
 	struct FrameInfo {
-		LocalVector<DescriptorHeap::Allocation> descriptor_allocations;
-		uint32_t descriptor_allocation_count = 0;
 	};
 	TightLocalVector<FrameInfo> frames;
 	uint32_t frame_idx = 0;

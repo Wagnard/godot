@@ -373,6 +373,14 @@ Error RenderingDeviceDriverD3D12::DescriptorHeap::initialize(ID3D12Device *p_dev
 }
 
 Error RenderingDeviceDriverD3D12::DescriptorHeap::allocate(uint32_t p_descriptor_count, Allocation &r_allocation) {
+	if (mutex != nullptr) {
+		MutexLock lock(*mutex);
+		return _allocate(p_descriptor_count, r_allocation);
+	}
+	return _allocate(p_descriptor_count, r_allocation);
+}
+
+Error RenderingDeviceDriverD3D12::DescriptorHeap::_allocate(uint32_t p_descriptor_count, Allocation &r_allocation) {
 	D3D12MA::VIRTUAL_ALLOCATION_DESC desc = {};
 	desc.Size = p_descriptor_count;
 
@@ -398,7 +406,12 @@ void RenderingDeviceDriverD3D12::DescriptorHeap::free(const Allocation &p_alloca
 	D3D12MA::VirtualAllocation virtual_alloc = {};
 	virtual_alloc.AllocHandle = p_allocation.virtual_alloc_handle;
 
-	virtual_block->FreeAllocation(virtual_alloc);
+	if (mutex != nullptr) {
+		MutexLock lock(*mutex);
+		virtual_block->FreeAllocation(virtual_alloc);
+	} else {
+		virtual_block->FreeAllocation(virtual_alloc);
+	}
 }
 
 void RenderingDeviceDriverD3D12::CPUDescriptorHeapPool::initialize(ID3D12Device *p_device, D3D12_DESCRIPTOR_HEAP_TYPE p_type) {
@@ -2714,6 +2727,9 @@ void RenderingDeviceDriverD3D12::command_pool_free(CommandPoolID p_cmd_pool) {
 		resource_descriptor_heap_pool.free(cmd_buf_info->uav_alloc);
 		rtv_descriptor_heap_pool.free(cmd_buf_info->rtv_alloc);
 		dsv_descriptor_heap_pool.free(cmd_buf_info->dsv_alloc);
+		for (const DescriptorHeap::Allocation &allocation : cmd_buf_info->clear_descriptor_allocations) {
+			resource_descriptor_heap.free(allocation);
+		}
 
 		VersatileResource::free(resources_allocator, cmd_buf_info);
 	}
@@ -2791,7 +2807,8 @@ RDD::CommandBufferID RenderingDeviceDriverD3D12::command_buffer_create(CommandPo
 }
 
 bool RenderingDeviceDriverD3D12::command_buffer_begin(CommandBufferID p_cmd_buffer) {
-	const CommandBufferInfo *cmd_buf_info = (const CommandBufferInfo *)p_cmd_buffer.id;
+	CommandBufferInfo *cmd_buf_info = (CommandBufferInfo *)p_cmd_buffer.id;
+	cmd_buf_info->clear_descriptor_allocation_count = 0;
 	HRESULT res = cmd_buf_info->cmd_allocator->Reset();
 	ERR_FAIL_COND_V_MSG(!SUCCEEDED(res), false, "Reset failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
 	res = cmd_buf_info->cmd_list->Reset(cmd_buf_info->cmd_allocator.Get(), nullptr);
@@ -2800,7 +2817,8 @@ bool RenderingDeviceDriverD3D12::command_buffer_begin(CommandBufferID p_cmd_buff
 }
 
 bool RenderingDeviceDriverD3D12::command_buffer_begin_secondary(CommandBufferID p_cmd_buffer, RenderPassID p_render_pass, uint32_t p_subpass, FramebufferID p_framebuffer) {
-	const CommandBufferInfo *cmd_buf_info = (const CommandBufferInfo *)p_cmd_buffer.id;
+	CommandBufferInfo *cmd_buf_info = (CommandBufferInfo *)p_cmd_buffer.id;
+	cmd_buf_info->clear_descriptor_allocation_count = 0;
 	HRESULT res = cmd_buf_info->cmd_allocator->Reset();
 	ERR_FAIL_COND_V_MSG(!SUCCEEDED(res), false, "Reset failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
 	res = cmd_buf_info->cmd_list->Reset(cmd_buf_info->cmd_allocator.Get(), nullptr);
@@ -3993,13 +4011,9 @@ void RenderingDeviceDriverD3D12::_command_check_descriptor_sets(CommandBufferID 
 /**** TRANSFER ****/
 /******************/
 
-RenderingDeviceDriverD3D12::DescriptorHeap::Allocation RenderingDeviceDriverD3D12::_command_allocate_per_frame_descriptor() {
-	MutexLock lock(per_frame_descriptor_mutex);
-	FrameInfo &f = frames[frame_idx];
-	if (f.descriptor_allocation_count < f.descriptor_allocations.size()) {
-		uint32_t allocation_index = f.descriptor_allocation_count;
-		++f.descriptor_allocation_count;
-		return f.descriptor_allocations[allocation_index];
+RenderingDeviceDriverD3D12::DescriptorHeap::Allocation RenderingDeviceDriverD3D12::_command_allocate_clear_descriptor(CommandBufferInfo *p_cmd_buf_info) {
+	if (p_cmd_buf_info->clear_descriptor_allocation_count < p_cmd_buf_info->clear_descriptor_allocations.size()) {
+		return p_cmd_buf_info->clear_descriptor_allocations[p_cmd_buf_info->clear_descriptor_allocation_count++];
 	} else {
 		DescriptorHeap::Allocation descriptor_allocation = {};
 
@@ -4009,8 +4023,8 @@ RenderingDeviceDriverD3D12::DescriptorHeap::Allocation RenderingDeviceDriverD3D1
 
 		ERR_FAIL_COND_V_MSG(err != OK, DescriptorHeap::Allocation(), "Failed to allocate per frame descriptor.");
 
-		f.descriptor_allocations.push_back(descriptor_allocation);
-		f.descriptor_allocation_count = f.descriptor_allocations.size();
+		p_cmd_buf_info->clear_descriptor_allocations.push_back(descriptor_allocation);
+		p_cmd_buf_info->clear_descriptor_allocation_count = p_cmd_buf_info->clear_descriptor_allocations.size();
 
 		return descriptor_allocation;
 	}
@@ -4041,7 +4055,7 @@ void RenderingDeviceDriverD3D12::command_clear_buffer(CommandBufferID p_cmd_buff
 			&uav_desc,
 			cmd_buf_info->uav_alloc.cpu_handle);
 
-	DescriptorHeap::Allocation shader_visible_descriptor_allocation = _command_allocate_per_frame_descriptor();
+	DescriptorHeap::Allocation shader_visible_descriptor_allocation = _command_allocate_clear_descriptor(cmd_buf_info);
 	ERR_FAIL_COND(shader_visible_descriptor_allocation.virtual_alloc_handle == 0);
 
 	device->CopyDescriptorsSimple(
@@ -4192,7 +4206,7 @@ void RenderingDeviceDriverD3D12::command_clear_color_texture(CommandBufferID p_c
 					&uav_desc,
 					cmd_buf_info->uav_alloc.cpu_handle);
 
-			DescriptorHeap::Allocation shader_visible_descriptor_allocation = _command_allocate_per_frame_descriptor();
+			DescriptorHeap::Allocation shader_visible_descriptor_allocation = _command_allocate_clear_descriptor(cmd_buf_info);
 			ERR_FAIL_COND(shader_visible_descriptor_allocation.virtual_alloc_handle == 0);
 
 			device->CopyDescriptorsSimple(
@@ -5981,7 +5995,6 @@ void RenderingDeviceDriverD3D12::command_buffer_invalidate_state_cache(CommandBu
 
 void RenderingDeviceDriverD3D12::begin_segment(uint32_t p_frame_index, uint32_t p_frames_drawn) {
 	frame_idx = p_frame_index;
-	frames[frame_idx].descriptor_allocation_count = 0;
 
 	frames_drawn = p_frames_drawn;
 	allocator->SetCurrentFrameIndex(p_frames_drawn);
@@ -5990,14 +6003,6 @@ void RenderingDeviceDriverD3D12::begin_segment(uint32_t p_frame_index, uint32_t 
 }
 
 void RenderingDeviceDriverD3D12::end_segment() {
-	FrameInfo &f = frames[frame_idx];
-
-	// Free leftover descriptors.
-	for (uint32_t i = f.descriptor_allocation_count; i < f.descriptor_allocations.size(); i++) {
-		resource_descriptor_heap.free(f.descriptor_allocations[i]);
-	}
-	f.descriptor_allocations.resize(f.descriptor_allocation_count);
-
 	segment_begun = false;
 }
 
@@ -6291,11 +6296,6 @@ RenderingDeviceDriverD3D12::RenderingDeviceDriverD3D12(RenderingContextDriverD3D
 RenderingDeviceDriverD3D12::~RenderingDeviceDriverD3D12() {
 	rtv_descriptor_heap_pool.free(null_rtv_alloc);
 
-	for (FrameInfo &f : frames) {
-		for (DescriptorHeap::Allocation &alloc : f.descriptor_allocations) {
-			resource_descriptor_heap.free(alloc);
-		}
-	}
 
 	if (Streamline::get_singleton()) {
 		Streamline::get_singleton()->emit_marker(STREAMLINE_MARKER_BEFORE_DEVICE_DESTROY);
@@ -6706,6 +6706,8 @@ Error RenderingDeviceDriverD3D12::_initialize_frames(uint32_t p_frame_count) {
 	uint32_t num_resource_descriptors = GLOBAL_GET("rendering/rendering_device/d3d12/max_resource_descriptors");
 	uint32_t num_sampler_descriptors = GLOBAL_GET("rendering/rendering_device/d3d12/max_sampler_descriptors");
 
+	resource_descriptor_heap.mutex = &shader_visible_heaps_mutex;
+	sampler_descriptor_heap.mutex = &shader_visible_heaps_mutex;
 	Error err = resource_descriptor_heap.initialize(device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, num_resource_descriptors, true);
 	ERR_FAIL_COND_V(err != OK, ERR_CANT_CREATE);
 	resource_descriptor_heap_capacity = num_resource_descriptors;
