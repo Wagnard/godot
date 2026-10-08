@@ -172,10 +172,10 @@ layout(constant_id = 2) const bool sc_emulate_point_size = false;
 #define CUBE_FACE_COUNT ((draw_call.uv_offset >> 18u) & 7u)
 #undef INSTANCE_INDEX
 #ifdef POINT_SIZE_USED
-#define INSTANCE_INDEX (sc_emulate_point_size ? uint(gl_VertexIndex / 6) : (uint(gl_InstanceIndex) / CUBE_FACE_COUNT))
+#define INSTANCE_INDEX (sc_emulate_point_size ? (gl_VertexIndex / 6) : int(uint(gl_InstanceIndex) / CUBE_FACE_COUNT))
 #define CUBE_FACE_SLOT (sc_emulate_point_size ? 0u : (uint(gl_InstanceIndex) % CUBE_FACE_COUNT))
 #else
-#define INSTANCE_INDEX (uint(gl_InstanceIndex) / CUBE_FACE_COUNT)
+#define INSTANCE_INDEX int(uint(gl_InstanceIndex) / CUBE_FACE_COUNT) // An int, as gl_InstanceIndex: materials read it as INSTANCE_ID.
 #define CUBE_FACE_SLOT (uint(gl_InstanceIndex) % CUBE_FACE_COUNT)
 #endif
 #define CUBE_FACE ((draw_call.uv_offset >> (3u * CUBE_FACE_SLOT)) & 7u)

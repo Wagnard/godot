@@ -138,11 +138,8 @@ layout(location = 9) out float dp_clip;
 
 #endif
 
+// With MODE_CUBE_LAYERED, the cube face in the top 3 bits: no varying of its own, the material's start at 15.
 layout(location = 10) out flat uint instance_index_interp;
-
-#ifdef MODE_CUBE_LAYERED
-layout(location = 15) out flat uint cube_face_interp;
-#endif
 
 #ifdef USE_MULTIVIEW
 #extension GL_EXT_multiview : enable
@@ -258,7 +255,6 @@ void vertex_shader(vec3 vertex_input,
 	mat4 cube_face_view = cube_face_view_rotation(cube_face);
 	inv_view_matrix = inv_view_matrix * transpose(cube_face_view);
 	gl_Layer = int(cube_face);
-	cube_face_interp = cube_face;
 #endif
 
 	mat4 model_matrix = transpose(mat4(in_model_matrix[0],
@@ -793,7 +789,11 @@ void main() {
 		instance_index += INSTANCE_INDEX;
 	}
 
+#ifdef MODE_CUBE_LAYERED
+	instance_index_interp = instance_index | (CUBE_FACE << 29u);
+#else
 	instance_index_interp = instance_index;
+#endif
 
 #ifdef MOTION_VECTORS
 	// Previous vertex.
@@ -938,11 +938,8 @@ layout(location = 9) in float dp_clip;
 
 #endif
 
+// With MODE_CUBE_LAYERED, the cube face in the top 3 bits.
 layout(location = 10) in flat uint instance_index_interp;
-
-#ifdef MODE_CUBE_LAYERED
-layout(location = 15) in flat uint cube_face_interp;
-#endif
 
 #ifdef USE_LIGHTMAP
 // w0, w1, w2, and w3 are the four cubic B-spline basis functions
@@ -1196,7 +1193,11 @@ vec3 encode24(vec3 v) {
 #endif // MODE_RENDER_NORMAL_ROUGHNESS
 
 void fragment_shader(in SceneData scene_data) {
+#ifdef MODE_CUBE_LAYERED
+	uint instance_index = instance_index_interp & 0x1FFFFFFFu;
+#else
 	uint instance_index = instance_index_interp;
+#endif
 
 #ifdef PREMUL_ALPHA_USED
 	float premul_alpha = 1.0;
@@ -1327,7 +1328,7 @@ void fragment_shader(in SceneData scene_data) {
 			vec4(0.0, 0.0, 0.0, 1.0)));
 #ifdef MODE_CUBE_LAYERED
 	{
-		mat4 cube_face_view = cube_face_view_rotation(cube_face_interp);
+		mat4 cube_face_view = cube_face_view_rotation(instance_index_interp >> 29u);
 		read_view_matrix = cube_face_view * read_view_matrix;
 		inv_view_matrix = inv_view_matrix * transpose(cube_face_view);
 	}
