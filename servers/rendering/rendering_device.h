@@ -116,6 +116,37 @@ private:
 	void _submit_thread_wait(uint64_t p_job);
 	void _submit_thread_drain();
 
+	// Where the render thread's time goes around the graph, and every synchronization with the GPU (RHI-THREAD-STUDY.md,
+	// step 0). Main instance only; GODOT_RHI_STATS=1 (or GODOT_PARALLEL_DRAW_LISTS_STATS=1) prints it every 240 frames.
+	// A frame runs from one RenderingServer draw (frame_stats_draw_begin()) to the end of its swap_buffers().
+	struct FrameStats {
+		bool enabled = false;
+		uint32_t frames = 0;
+		uint64_t draw_begin_usec = 0; // Of the frame being recorded.
+		uint64_t last_swap_end_usec = 0;
+		uint64_t recording_usec = 0; // Draw begin to swap_buffers(): culling, list building, recording.
+		uint64_t end_frame_usec = 0; // _end_frame(): transfer workers, graph replay, command buffer end.
+		uint64_t hand_off_usec = 0; // Submit job pushed, or _execute_frame() without the submission thread.
+		uint64_t begin_frame_usec = 0; // _begin_frame(), the slot stall included.
+		uint64_t slot_wait_usec = 0; // Waiting in _begin_frame()'s _stall_for_frame() for the slot's submission and fence.
+		bool in_begin_frame = false;
+		uint64_t between_frames_usec = 0; // swap_buffers() end to the next draw: other commands, or idle.
+		uint64_t screen_drain_usec = 0; // screen_prepare_for_drawing() waiting for the submission thread.
+		uint32_t flushes = 0; // _flush_and_stall_for_all_frames().
+		uint64_t flush_usec = 0;
+		uint32_t staging_stalls = 0; // Staging rings full: STALL_PREVIOUS.
+		uint64_t staging_stall_usec = 0;
+		HashMap<String, uint32_t> sync_callers; // "kind <- caller": count, over the 240 frames.
+	} frame_stats;
+	void _frame_stats_sync(const char *p_kind, const char *p_caller, uint64_t p_usec);
+	void _frame_stats_print();
+
+public:
+	// Marks the start of a RenderingServer draw for the frame stats (cheap no-op when they are off).
+	void frame_stats_draw_begin();
+
+private:
+
 protected:
 	static void _bind_methods();
 
@@ -203,7 +234,7 @@ private:
 	};
 
 	Error _staging_buffer_allocate(StagingBuffers &p_staging_buffers, uint32_t p_amount, uint32_t p_required_align, uint32_t &r_alloc_offset, uint32_t &r_alloc_size, StagingRequiredAction &r_required_action, bool p_can_segment = true);
-	void _staging_buffer_execute_required_action(StagingBuffers &p_staging_buffers, StagingRequiredAction p_required_action);
+	void _staging_buffer_execute_required_action(StagingBuffers &p_staging_buffers, StagingRequiredAction p_required_action, const char *p_caller = "");
 	Error _insert_staging_block(StagingBuffers &p_staging_buffers);
 
 	StagingBuffers upload_staging_buffers;
@@ -1991,7 +2022,7 @@ public:
 	void _execute_frame_slot(uint32_t p_frame, bool p_present);
 	void _stall_for_frame(uint32_t p_frame);
 	void _stall_for_previous_frames();
-	void _flush_and_stall_for_all_frames(bool p_begin_frame = true);
+	void _flush_and_stall_for_all_frames(bool p_begin_frame = true, const char *p_caller = "");
 
 	template <typename T>
 	void _free_rids(T &p_owner, const char *p_type);

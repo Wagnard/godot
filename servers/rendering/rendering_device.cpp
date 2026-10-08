@@ -1076,13 +1076,13 @@ Error RenderingDevice::_staging_buffer_allocate(StagingBuffers &p_staging_buffer
 	return OK;
 }
 
-void RenderingDevice::_staging_buffer_execute_required_action(StagingBuffers &p_staging_buffers, StagingRequiredAction p_required_action) {
+void RenderingDevice::_staging_buffer_execute_required_action(StagingBuffers &p_staging_buffers, StagingRequiredAction p_required_action, const char *p_caller) {
 	switch (p_required_action) {
 		case STAGING_REQUIRED_ACTION_NONE: {
 			// Do nothing.
 		} break;
 		case STAGING_REQUIRED_ACTION_FLUSH_AND_STALL_ALL: {
-			_flush_and_stall_for_all_frames();
+			_flush_and_stall_for_all_frames(true, p_caller);
 
 			// Clear the whole staging buffer.
 			for (int i = 0; i < p_staging_buffers.blocks.size(); i++) {
@@ -1094,7 +1094,11 @@ void RenderingDevice::_staging_buffer_execute_required_action(StagingBuffers &p_
 			p_staging_buffers.blocks.write[p_staging_buffers.current].frame_used = frames_drawn;
 		} break;
 		case STAGING_REQUIRED_ACTION_STALL_PREVIOUS: {
+			const uint64_t stall_begin_usec = frame_stats.enabled ? OS::get_singleton()->get_ticks_usec() : 0;
 			_stall_for_previous_frames();
+			if (frame_stats.enabled) {
+				_frame_stats_sync("staging stall", p_caller, OS::get_singleton()->get_ticks_usec() - stall_begin_usec);
+			}
 
 			for (int i = 0; i < p_staging_buffers.blocks.size(); i++) {
 				// Clear all blocks but the ones from this frame.
@@ -1202,7 +1206,7 @@ Error RenderingDevice::_buffer_update(Buffer *p_buffer, RID p_buffer_id, uint32_
 			command_buffer_copies_vector.clear();
 		}
 
-		_staging_buffer_execute_required_action(upload_staging_buffers, required_action);
+		_staging_buffer_execute_required_action(upload_staging_buffers, required_action, __func__);
 
 		// Copy to staging buffer.
 		memcpy(upload_staging_buffers.blocks[upload_staging_buffers.current].data_ptr + block_write_offset, src_data + submit_from, block_write_amount);
@@ -1393,7 +1397,7 @@ Vector<uint8_t> RenderingDevice::buffer_get_data(RID p_buffer, uint32_t p_offset
 	draw_graph.add_buffer_get_data(buffer->driver_id, buffer->draw_tracker, tmp_buffer, region);
 
 	// Flush everything so memory can be safely mapped.
-	_flush_and_stall_for_all_frames();
+	_flush_and_stall_for_all_frames(true, __func__);
 
 	uint8_t *buffer_mem = driver->buffer_map(tmp_buffer);
 	ERR_FAIL_NULL_V(buffer_mem, Vector<uint8_t>());
@@ -1459,7 +1463,7 @@ Error RenderingDevice::buffer_get_data_async(RID p_buffer, const Callable &p_cal
 			}
 		}
 
-		_staging_buffer_execute_required_action(download_staging_buffers, required_action);
+		_staging_buffer_execute_required_action(download_staging_buffers, required_action, __func__);
 
 		if (flush_frames) {
 			get_data_request.frame_local_count = 0;
@@ -2420,7 +2424,7 @@ Error RenderingDevice::texture_update(RID p_texture, uint32_t p_layer, const Vec
 						command_buffer_to_texture_copies_vector.clear();
 					}
 
-					_staging_buffer_execute_required_action(upload_staging_buffers, required_action);
+					_staging_buffer_execute_required_action(upload_staging_buffers, required_action, __func__);
 
 					uint8_t *write_ptr = upload_staging_buffers.blocks[upload_staging_buffers.current].data_ptr + alloc_offset;
 
@@ -2807,7 +2811,7 @@ Vector<uint8_t> RenderingDevice::texture_get_data(RID p_texture, uint32_t p_laye
 		draw_graph.add_texture_get_data(tex->driver_id, tex->draw_tracker, tmp_buffer, copy_regions);
 
 		// Flush everything so memory can be safely mapped.
-		_flush_and_stall_for_all_frames();
+		_flush_and_stall_for_all_frames(true, __func__);
 
 		const uint8_t *read_ptr = driver->buffer_map(tmp_buffer);
 		ERR_FAIL_NULL_V(read_ptr, Vector<uint8_t>());
@@ -2933,7 +2937,7 @@ Error RenderingDevice::texture_get_data_async(RID p_texture, uint32_t p_layer, c
 						}
 					}
 
-					_staging_buffer_execute_required_action(download_staging_buffers, required_action);
+					_staging_buffer_execute_required_action(download_staging_buffers, required_action, __func__);
 
 					if (flush_frames) {
 						get_data_request.frame_local_count = 0;
@@ -5501,7 +5505,11 @@ Error RenderingDevice::screen_prepare_for_drawing(DisplayServerEnums::WindowID p
 
 	// The previous frame's present moves the back buffer index the acquisition reads, and nothing may use the main
 	// queue or the swap chain behind the submission thread's back.
+	const uint64_t drain_begin_usec = frame_stats.enabled ? OS::get_singleton()->get_ticks_usec() : 0;
 	_submit_thread_drain();
+	if (frame_stats.enabled) {
+		frame_stats.screen_drain_usec += OS::get_singleton()->get_ticks_usec() - drain_begin_usec;
+	}
 
 	// If this frame has already queued this swap chain for presentation, we present it and remove it from the pending list.
 	uint32_t to_present_index = 0;
@@ -5518,7 +5526,7 @@ Error RenderingDevice::screen_prepare_for_drawing(DisplayServerEnums::WindowID p
 	RDD::FramebufferID framebuffer = driver->swap_chain_acquire_framebuffer(main_queue, it->value, resize_required);
 	if (resize_required) {
 		// Flush everything so nothing can be using the swap chain before resizing it.
-		_flush_and_stall_for_all_frames();
+		_flush_and_stall_for_all_frames(true, __func__);
 
 		Error err = driver->swap_chain_resize(main_queue, it->value, _get_swap_chain_desired_count());
 		if (err != OK) {
@@ -5622,7 +5630,7 @@ Error RenderingDevice::screen_free(DisplayServerEnums::WindowID p_screen) {
 	ERR_FAIL_COND_V_MSG(it == screen_swap_chains.end(), FAILED, "Screen was never created.");
 
 	// Flush everything so nothing can be using the swap chain before erasing it.
-	_flush_and_stall_for_all_frames();
+	_flush_and_stall_for_all_frames(true, __func__);
 
 	const DisplayServerEnums::WindowID screen = it->key;
 	const RDD::SwapChainID swap_chain = it->value;
@@ -8296,8 +8304,22 @@ RenderingDevice::DriverWorkarounds RenderingDevice::get_driver_workarounds() con
 void RenderingDevice::swap_buffers(bool p_present) {
 	ERR_RENDER_THREAD_GUARD();
 
+	uint64_t stats_usec = 0;
+	if (frame_stats.enabled) {
+		stats_usec = OS::get_singleton()->get_ticks_usec();
+		if (frame_stats.draw_begin_usec) {
+			frame_stats.recording_usec += stats_usec - frame_stats.draw_begin_usec;
+		}
+	}
+
 	GodotProfileZoneGroupedFirst(_profile_zone, "_end_frame");
 	_end_frame();
+
+	if (frame_stats.enabled) {
+		const uint64_t now = OS::get_singleton()->get_ticks_usec();
+		frame_stats.end_frame_usec += now - stats_usec;
+		stats_usec = now;
+	}
 
 	if (submit_after_previous_frame) {
 		// The CPU has recorded this frame while the GPU rendered the previous one; submit it only once that one
@@ -8321,8 +8343,28 @@ void RenderingDevice::swap_buffers(bool p_present) {
 	// Advance to the next frame and begin recording again.
 	frame = (frame + 1) % frames.size();
 
+	if (frame_stats.enabled) {
+		const uint64_t now = OS::get_singleton()->get_ticks_usec();
+		frame_stats.hand_off_usec += now - stats_usec;
+		stats_usec = now;
+	}
+
 	GodotProfileZoneGrouped(_profile_zone, "_begin_frame");
 	_begin_frame(true);
+
+	if (frame_stats.enabled) {
+		const uint64_t now = OS::get_singleton()->get_ticks_usec();
+		frame_stats.begin_frame_usec += now - stats_usec;
+		frame_stats.last_swap_end_usec = now;
+		frame_stats.draw_begin_usec = 0;
+		if (++frame_stats.frames == 240) {
+			_frame_stats_print();
+			frame_stats.~FrameStats();
+			memnew_placement(&frame_stats, FrameStats);
+			frame_stats.enabled = true;
+			frame_stats.last_swap_end_usec = now;
+		}
+	}
 }
 
 void RenderingDevice::submit() {
@@ -8486,7 +8528,9 @@ uint64_t RenderingDevice::get_memory_usage(MemoryType p_type) const {
 void RenderingDevice::_begin_frame(bool p_presented) {
 	GodotProfileZoneGroupedFirst(_profile_zone, "_stall_for_frame");
 	// Before writing to this frame, wait for it to be finished.
+	frame_stats.in_begin_frame = frame_stats.enabled;
 	_stall_for_frame(frame);
+	frame_stats.in_begin_frame = false;
 
 	if (command_pool_reset_enabled) {
 		GodotProfileZoneGrouped(_profile_zone, "driver->command_pool_reset");
@@ -8711,15 +8755,23 @@ void RenderingDevice::_submit_thread_drain() {
 void RenderingDevice::_stall_for_frame(uint32_t p_frame) {
 	thread_local PackedByteArray packed_byte_array;
 
+	const uint64_t wait_begin_usec = frame_stats.enabled ? OS::get_singleton()->get_ticks_usec() : 0;
 	if (submit_thread_enabled) {
 		// The slot's fence is only signaled once its submission has run.
 		_submit_thread_wait(submit_frame_job[p_frame]);
 	}
 
-	if (frames[p_frame].fence_signaled) {
+	const bool fence_signaled = frames[p_frame].fence_signaled;
+	if (fence_signaled) {
 		GodotProfileZoneGroupedFirst(_profile_zone, "driver->fence_wait");
 		driver->fence_wait(frames[p_frame].fence);
 		frames[p_frame].fence_signaled = false;
+	}
+	if (frame_stats.in_begin_frame) {
+		frame_stats.slot_wait_usec += OS::get_singleton()->get_ticks_usec() - wait_begin_usec;
+	}
+
+	if (fence_signaled) {
 
 		// Flush any pending requests for asynchronous buffer downloads.
 		if (!frames[p_frame].download_buffer_get_data_requests.is_empty()) {
@@ -8807,7 +8859,8 @@ void RenderingDevice::_stall_for_previous_frames() {
 	}
 }
 
-void RenderingDevice::_flush_and_stall_for_all_frames(bool p_begin_frame) {
+void RenderingDevice::_flush_and_stall_for_all_frames(bool p_begin_frame, const char *p_caller) {
+	const uint64_t flush_begin_usec = frame_stats.enabled ? OS::get_singleton()->get_ticks_usec() : 0;
 	_submit_thread_drain();
 	_stall_for_previous_frames();
 	_end_frame();
@@ -8818,6 +8871,52 @@ void RenderingDevice::_flush_and_stall_for_all_frames(bool p_begin_frame) {
 	} else {
 		_stall_for_frame(frame);
 	}
+
+	if (frame_stats.enabled) {
+		_frame_stats_sync("flush and stall", p_caller, OS::get_singleton()->get_ticks_usec() - flush_begin_usec);
+	}
+}
+
+void RenderingDevice::_frame_stats_sync(const char *p_kind, const char *p_caller, uint64_t p_usec) {
+	if (String(p_kind) == "flush and stall") {
+		frame_stats.flushes++;
+		frame_stats.flush_usec += p_usec;
+	} else {
+		frame_stats.staging_stalls++;
+		frame_stats.staging_stall_usec += p_usec;
+	}
+	const String key = String(p_kind) + " <- " + String(p_caller);
+	HashMap<String, uint32_t>::Iterator it = frame_stats.sync_callers.find(key);
+	if (it) {
+		it->value++;
+	} else {
+		frame_stats.sync_callers.insert(key, 1);
+	}
+}
+
+void RenderingDevice::frame_stats_draw_begin() {
+	if (!frame_stats.enabled) {
+		return;
+	}
+	const uint64_t now = OS::get_singleton()->get_ticks_usec();
+	frame_stats.draw_begin_usec = now;
+	if (frame_stats.last_swap_end_usec) {
+		frame_stats.between_frames_usec += now - frame_stats.last_swap_end_usec;
+	}
+}
+
+void RenderingDevice::_frame_stats_print() {
+	const FrameStats &st = frame_stats;
+	const double n = st.frames;
+	const uint64_t total = st.recording_usec + st.end_frame_usec + st.hand_off_usec + st.begin_frame_usec + st.between_frames_usec;
+	print_line(vformat("RenderingDevice frame, render thread per frame: %.0f us = recording %.0f + end() %.0f + hand-off %.0f + begin %.0f (slot wait %.0f) + between frames %.0f; screen acquire waiting for the submission thread %.0f us.",
+			total / n, st.recording_usec / n, st.end_frame_usec / n, st.hand_off_usec / n, st.begin_frame_usec / n, st.slot_wait_usec / n, st.between_frames_usec / n, st.screen_drain_usec / n));
+	String callers;
+	for (const KeyValue<String, uint32_t> &E : st.sync_callers) {
+		callers += vformat(" [%s: %d]", E.key, E.value);
+	}
+	print_line(vformat("RenderingDevice syncs over %d frames: %d flush and stall all (%.0f us), %d staging stalls (%.0f us).%s",
+			st.frames, st.flushes, double(st.flush_usec), st.staging_stalls, double(st.staging_stall_usec), callers));
 }
 
 Error RenderingDevice::initialize(RenderingContextDriver *p_context, DisplayServerEnums::WindowID p_main_window) {
@@ -9048,6 +9147,7 @@ Error RenderingDevice::initialize(RenderingContextDriver *p_context, DisplayServ
 
 	// D3D12 with a window: frames are submitted and presented by a thread of their own (GODOT_SUBMIT_THREAD=0: by the
 	// render thread, as before).
+	frame_stats.enabled = is_main_instance && (OS::get_singleton()->get_environment("GODOT_RHI_STATS") == "1" || OS::get_singleton()->get_environment("GODOT_PARALLEL_DRAW_LISTS_STATS") == "1");
 	submit_thread_enabled = main_surface != 0 && driver->get_api_name() == "D3D12" && OS::get_singleton()->get_environment("GODOT_SUBMIT_THREAD") != "0";
 	if (submit_thread_enabled) {
 		submit_frame_job.resize(frames.size());
@@ -9389,7 +9489,7 @@ void RenderingDevice::finalize() {
 
 	if (!frames.is_empty()) {
 		// Wait for all frames to have finished rendering.
-		_flush_and_stall_for_all_frames(false);
+		_flush_and_stall_for_all_frames(false, __func__);
 	}
 
 	if (submit_thread_enabled) {

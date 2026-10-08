@@ -82,6 +82,10 @@ void RenderingServerDefault::_draw(bool p_swap_buffers, double frame_step, uint6
 	// The Streamline token this draw was issued with, see draw(). Read on this thread only.
 	StreamlineContext::get().render_token = (sl::FrameToken *)p_frame_token;
 #endif
+	if (RenderingDevice::get_singleton() != nullptr) {
+		RenderingDevice::get_singleton()->frame_stats_draw_begin();
+	}
+
 	GodotProfileZoneGroupedFirst(_profile_zone, "rasterizer->begin_frame");
 	RSG::rasterizer->begin_frame(frame_step);
 
