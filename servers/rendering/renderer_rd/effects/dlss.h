@@ -35,6 +35,7 @@
 namespace RendererRD {
 
 class DLSSEffect;
+struct DLSSCallbackPayload;
 class DLSSContext {
 public:
 	struct Parameters {
@@ -106,8 +107,12 @@ public:
 	// async workloads): the compositor then alternates two of them.
 	static bool frame_generation_hudless_double_buffered();
 
+	// The end of a frame's recording, before the graph is replayed: the DLSS callbacks recorded in it take the
+	// HUD-less color and UI alpha the compositor set after them. Render thread, from RendererCompositorRD::end_frame().
+	static void finalize_frame_callbacks();
+
 private:
-	void _upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext::Parameters &p_params);
+	void _upscale_internal(RDD::CommandBufferID cmdid, DLSSCallbackPayload &p_payload);
 	static void _upscale_internal_graph_callback(RenderingDeviceDriver *p_driver, RDD::CommandBufferID p_command_buffer, void *p_userdata);
 };
 

@@ -113,7 +113,8 @@ bool RendererRD::DLSSEffect::frame_generation_hudless_double_buffered() {
 using namespace RendererRD;
 
 #ifdef ENABLE_DLSS
-// DLSS-G asked for by the last frame drawn (Viewport.frame_generation), enabled or not yet.
+// DLSS-G asked for by the DLSS pass just recorded (Viewport.frame_generation), enabled or not yet: set when the pass
+// is recorded, consumed by the compositor's HUD-less capture that follows it in the same frame.
 static bool frame_generation_dlssg_requested = false;
 
 // DLSS-G can be asked for: a game on hardware that supports it, with DLSS-G (not AMD FSR) as the
@@ -144,6 +145,86 @@ static constexpr uint64_t DLSS_D3D12_RESOURCE_STATE_COMMON = 0x0;
 // it always carries the storage bit; without it, keep the old read declaration.
 static bool dlss_output_is_storage(RID p_output) {
 	return p_output.is_valid() && (RD::get_singleton()->texture_get_format(p_output).usage_bits & RD::TEXTURE_USAGE_STORAGE_BIT);
+}
+
+namespace RendererRD {
+class DLSSContextInner;
+
+// A texture as Streamline is told about it: format and native handles, resolved on the render thread. The DLSS
+// callback runs when the graph is replayed, which may be on another thread once the render thread has moved on to
+// the next frame (RHI-THREAD-STUDY.md, step 1a): it must not look anything up through RenderingDevice.
+struct DLSSResolvedTexture {
+	bool valid = false;
+	uint32_t width = 0;
+	uint32_t height = 0;
+	uint32_t array_layers = 0;
+	uint32_t mipmaps = 0;
+	uint64_t image = 0;
+	uint64_t view = 0;
+	uint64_t memory = 0;
+	uint64_t format = 0;
+	uint64_t usage = 0;
+};
+
+// Everything one recorded DLSS callback uses that the render thread may change before it runs: the frame's
+// parameters, its Streamline token, the textures. Owned by the callback, which frees it.
+struct DLSSCallbackPayload {
+	DLSSContextInner *context = nullptr;
+	DLSSEffect *effect = nullptr;
+	DLSSContext::Parameters params;
+	sl::FrameToken *frame_token = nullptr;
+	bool output_storage = false;
+	DLSSResolvedTexture color;
+	DLSSResolvedTexture output;
+	DLSSResolvedTexture depth;
+	DLSSResolvedTexture velocity;
+	DLSSResolvedTexture rr_diffuse_albedo;
+	DLSSResolvedTexture rr_specular_albedo;
+	DLSSResolvedTexture rr_normal_roughness;
+	DLSSResolvedTexture rr_specular_hit_dist;
+	// The compositor sets the HUD-less color and UI alpha after the 3D pass that recorded this callback: they are
+	// captured when the frame's recording ends (DLSSEffect::finalize_frame_callbacks()), or by the callback itself
+	// when the graph is replayed earlier in the frame (a flush), on the render thread.
+	bool hudless_final = false;
+	DLSSResolvedTexture hudless;
+	DLSSResolvedTexture ui_alpha;
+};
+} // namespace RendererRD
+
+static RendererRD::DLSSResolvedTexture dlss_resolve_texture(RID p_texture) {
+	RendererRD::DLSSResolvedTexture resolved;
+	if (!p_texture.is_valid()) {
+		return resolved;
+	}
+	RenderingDevice *rd = RD::get_singleton();
+	const RD::TextureFormat texture_format = rd->texture_get_format(p_texture);
+	resolved.valid = true;
+	resolved.width = texture_format.width;
+	resolved.height = texture_format.height;
+	resolved.array_layers = texture_format.array_layers;
+	resolved.mipmaps = texture_format.mipmaps;
+	resolved.image = rd->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_TEXTURE, p_texture);
+	resolved.view = rd->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_TEXTURE_VIEW, p_texture);
+	resolved.memory = rd->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_TEXTURE_DEVICE_MEMORY, p_texture);
+	resolved.format = rd->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_TEXTURE_DATA_FORMAT, p_texture);
+	resolved.usage = rd->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_TEXTURE_USAGE_FLAGS, p_texture);
+	return resolved;
+}
+
+// The DLSS callbacks recorded in the frame being recorded, waiting for its HUD-less capture. Render thread only.
+static LocalVector<RendererRD::DLSSCallbackPayload *> dlss_pending_payloads;
+
+static void dlss_capture_hudless(RendererRD::DLSSCallbackPayload *p_payload) {
+	p_payload->hudless = dlss_resolve_texture(frame_generation_hudless);
+	p_payload->ui_alpha = dlss_resolve_texture(frame_generation_ui_alpha);
+	p_payload->hudless_final = true;
+}
+
+void RendererRD::DLSSEffect::finalize_frame_callbacks() {
+	for (DLSSCallbackPayload *payload : dlss_pending_payloads) {
+		dlss_capture_hudless(payload);
+	}
+	dlss_pending_payloads.clear();
 }
 static constexpr float DLSS_OPTIMAL_MODE_MAX_DISTANCE = 1000000.0f;
 namespace RendererRD {
@@ -460,6 +541,27 @@ void DLSSEffect::upscale(const DLSSContext::Parameters &p_params) {
 		RD::get_singleton()->draw_command_end_label();
 	}
 
+	// The compositor's HUD-less capture, later in this frame, follows this pass's request.
+	frame_generation_dlssg_requested = p_params.dlss_g && dlssg_is_provider();
+
+	DLSSCallbackPayload *payload = memnew(DLSSCallbackPayload);
+	payload->context = context;
+	payload->effect = this;
+	payload->params = p_params;
+	payload->frame_token = sl_frame_token();
+	payload->output_storage = dlss_output_is_storage(p_params.output);
+	payload->color = dlss_resolve_texture(p_params.color);
+	payload->output = dlss_resolve_texture(p_params.output);
+	payload->depth = dlss_resolve_texture(p_params.depth);
+	payload->velocity = dlss_resolve_texture(p_params.velocity);
+	if (p_params.dlss_rr) {
+		payload->rr_diffuse_albedo = dlss_resolve_texture(p_params.dlss_rr_diffuse_albedo);
+		payload->rr_specular_albedo = dlss_resolve_texture(p_params.dlss_rr_specular_albedo);
+		payload->rr_normal_roughness = dlss_resolve_texture(p_params.dlss_rr_normal_roughness);
+		payload->rr_specular_hit_dist = dlss_resolve_texture(p_params.dlss_rr_specular_hit_dist);
+	}
+	dlss_pending_payloads.push_back(payload);
+
 	// Inject DLSS into the render graph
 	RD::CallbackResource res[8]; // Increased for DLSS-RR buffers
 	int num_resources = 0;
@@ -494,7 +596,7 @@ void DLSSEffect::upscale(const DLSSContext::Parameters &p_params) {
 	// the 3D lagged the UI by exactly one frame of camera motion under DLSS only, and the lag
 	// vanished with --gpu-profile, whose timestamps serialize the graph. MetalFX declares its
 	// destination the same way (metal_fx.cpp).
-	if (dlss_output_is_storage(p_params.output)) {
+	if (payload->output_storage) {
 		res[1].usage = RD::CALLBACK_RESOURCE_USAGE_STORAGE_IMAGE_READ_WRITE; // res[1] is p_params.output.
 	}
 	if (p_params.context->is_d3d12) {
@@ -503,47 +605,42 @@ void DLSSEffect::upscale(const DLSSContext::Parameters &p_params) {
 			res[i].usage = RD::CALLBACK_RESOURCE_USAGE_GENERAL;
 		}
 	}
-	RD::get_singleton()->driver_callback_add((RDD::DriverCallback)DLSSEffect::_upscale_internal_graph_callback, p_params.context, VectorView<RD::CallbackResource>(res, num_resources));
+	RD::get_singleton()->driver_callback_add((RDD::DriverCallback)DLSSEffect::_upscale_internal_graph_callback, payload, VectorView<RD::CallbackResource>(res, num_resources));
 }
 
-void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext::Parameters &p_params) {
-	DLSSContextInner *context = (DLSSContextInner *)p_params.context;
+void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, DLSSCallbackPayload &p_payload) {
+	const DLSSContext::Parameters &p_params = p_payload.params;
+	DLSSContextInner *context = p_payload.context;
 
 	void *nativeCmdlist = RD::get_singleton()->get_device_driver()->command_buffer_get_native_handle(cmdid);
 
-	// Helper function for tagging resources.
-	auto assignResource = [context](sl::Resource *resources, sl::ResourceTag *resourceTags, int &numResources, RID textureRID, sl::BufferType bufferType, sl::ResourceLifecycle lifecycle, bool p_storage = false) {
-		if (!textureRID.is_valid() || textureRID.is_null()) {
+	// Helper function for tagging resources, resolved when the callback was recorded.
+	auto assignResource = [context](sl::Resource *resources, sl::ResourceTag *resourceTags, int &numResources, const DLSSResolvedTexture &p_texture, sl::BufferType bufferType, sl::ResourceLifecycle lifecycle, bool p_storage = false) {
+		if (!p_texture.valid) {
 			return;
 		}
 
-		RD::TextureFormat texture_format = RD::get_singleton()->texture_get_format(textureRID);
-		uint64_t texture_image = RD::get_singleton()->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_TEXTURE, textureRID);
-		uint64_t texture_view = RD::get_singleton()->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_TEXTURE_VIEW, textureRID);
-		uint64_t texture_device_memory = RD::get_singleton()->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_TEXTURE_DEVICE_MEMORY, textureRID);
 		// The state the render graph actually put the resource in; Streamline tracks nothing
 		// itself (eDisableCLStateTracking) and issues its barriers from this.
 		uint64_t texture_state = p_storage ? DLSS_VK_IMAGE_LAYOUT_GENERAL : DLSS_VK_IMAGE_LAYOUT_SHADER_READ_ONLY;
 		if (context->is_d3d12) {
 			texture_state = DLSS_D3D12_RESOURCE_STATE_COMMON;
 		}
-		uint64_t texture_vkformat = RD::get_singleton()->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_TEXTURE_DATA_FORMAT, textureRID);
-		uint64_t texture_usage_flags = RD::get_singleton()->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_TEXTURE_USAGE_FLAGS, textureRID);
 		auto &destinationResource = resources[numResources];
 		if (context->is_d3d12) {
 			destinationResource = sl::Resource(sl::ResourceType::eTex2d,
-					(void *)texture_view, texture_state);
+					(void *)p_texture.view, texture_state);
 		} else {
 			destinationResource = sl::Resource(sl::ResourceType::eTex2d,
-					(void *)texture_image, (void *)texture_device_memory, (void *)texture_view, texture_state);
+					(void *)p_texture.image, (void *)p_texture.memory, (void *)p_texture.view, texture_state);
 		}
-		destinationResource.width = texture_format.width;
-		destinationResource.height = texture_format.height;
-		destinationResource.nativeFormat = texture_vkformat;
-		destinationResource.arrayLayers = texture_format.array_layers;
+		destinationResource.width = p_texture.width;
+		destinationResource.height = p_texture.height;
+		destinationResource.nativeFormat = p_texture.format;
+		destinationResource.arrayLayers = p_texture.array_layers;
 		destinationResource.flags = 0;
-		destinationResource.mipLevels = texture_format.mipmaps;
-		destinationResource.usage = texture_usage_flags;
+		destinationResource.mipLevels = p_texture.mipmaps;
+		destinationResource.usage = p_texture.usage;
 
 		resourceTags[numResources] = sl::ResourceTag(resources + numResources, bufferType, lifecycle, nullptr);
 		++numResources;
@@ -686,7 +783,7 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext
 		context->constants.mvecScale = sl::float2(1.0f, 1.0f);
 		context->constants.orthographicProjection = sl::Boolean::eFalse;
 		context->constants.reset = p_params.reset_accumulation ? sl::Boolean::eTrue : sl::Boolean::eFalse;
-		sl::Result result = StreamlineContext::get().slSetConstants(context->constants, *sl_frame_token(), context->viewport);
+		sl::Result result = StreamlineContext::get().slSetConstants(context->constants, *p_payload.frame_token, context->viewport);
 		if (result != sl::Result::eOk) {
 			ERR_FAIL_MSG("Failed to call streamline slSetConstants. Result: " + String(StreamlineContext::result_to_string(result)));
 		}
@@ -700,19 +797,19 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext
 		sl::ResourceTag resourceTags[10];
 		int numResources = 0;
 
-		assignResource(resources, resourceTags, numResources, p_params.color, sl::kBufferTypeScalingInputColor, sl::ResourceLifecycle::eValidUntilPresent);
-		assignResource(resources, resourceTags, numResources, p_params.output, sl::kBufferTypeScalingOutputColor, sl::ResourceLifecycle::eValidUntilPresent, dlss_output_is_storage(p_params.output));
-		assignResource(resources, resourceTags, numResources, p_params.depth, sl::kBufferTypeDepth, sl::ResourceLifecycle::eValidUntilPresent);
-		assignResource(resources, resourceTags, numResources, p_params.velocity, sl::kBufferTypeMotionVectors, sl::ResourceLifecycle::eValidUntilPresent);
+		assignResource(resources, resourceTags, numResources, p_payload.color, sl::kBufferTypeScalingInputColor, sl::ResourceLifecycle::eValidUntilPresent);
+		assignResource(resources, resourceTags, numResources, p_payload.output, sl::kBufferTypeScalingOutputColor, sl::ResourceLifecycle::eValidUntilPresent, p_payload.output_storage);
+		assignResource(resources, resourceTags, numResources, p_payload.depth, sl::kBufferTypeDepth, sl::ResourceLifecycle::eValidUntilPresent);
+		assignResource(resources, resourceTags, numResources, p_payload.velocity, sl::kBufferTypeMotionVectors, sl::ResourceLifecycle::eValidUntilPresent);
 
 		// Tag DLSS-RR specific buffers if enabled
 		if (use_dlss_rr) {
 			// kBufferTypeAlbedo is used for diffuse albedo
-			assignResource(resources, resourceTags, numResources, p_params.dlss_rr_diffuse_albedo, sl::kBufferTypeAlbedo, sl::ResourceLifecycle::eValidUntilPresent);
-			assignResource(resources, resourceTags, numResources, p_params.dlss_rr_specular_albedo, sl::kBufferTypeSpecularAlbedo, sl::ResourceLifecycle::eValidUntilPresent);
+			assignResource(resources, resourceTags, numResources, p_payload.rr_diffuse_albedo, sl::kBufferTypeAlbedo, sl::ResourceLifecycle::eValidUntilPresent);
+			assignResource(resources, resourceTags, numResources, p_payload.rr_specular_albedo, sl::kBufferTypeSpecularAlbedo, sl::ResourceLifecycle::eValidUntilPresent);
 			// kBufferTypeNormalRoughness for packed normal+roughness (XYZ=normal, W=roughness)
-			assignResource(resources, resourceTags, numResources, p_params.dlss_rr_normal_roughness, sl::kBufferTypeNormalRoughness, sl::ResourceLifecycle::eValidUntilPresent);
-			assignResource(resources, resourceTags, numResources, p_params.dlss_rr_specular_hit_dist, sl::kBufferTypeSpecularHitDistance, sl::ResourceLifecycle::eValidUntilPresent);
+			assignResource(resources, resourceTags, numResources, p_payload.rr_normal_roughness, sl::kBufferTypeNormalRoughness, sl::ResourceLifecycle::eValidUntilPresent);
+			assignResource(resources, resourceTags, numResources, p_payload.rr_specular_hit_dist, sl::kBufferTypeSpecularHitDistance, sl::ResourceLifecycle::eValidUntilPresent);
 		}
 
 		// DLSS-G's HUD-less color: the scene before any canvas, back-buffer-sized, in the back
@@ -726,10 +823,9 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext
 		// the scene and the UI separately and recompose them (enableUserInterfaceRecomposition, set
 		// below): the HUD-less color alone only attenuates HUD distortion.
 		const bool dlssg_requested = p_params.dlss_g && dlssg_is_provider();
-		frame_generation_dlssg_requested = dlssg_requested;
-		if ((dlssg_requested || StreamlineContext::get().dlssg_viewport == context->viewport) && frame_generation_hudless.is_valid() && frame_generation_ui_alpha.is_valid()) {
-			assignResource(resources, resourceTags, numResources, frame_generation_hudless, sl::kBufferTypeHUDLessColor, sl::ResourceLifecycle::eValidUntilPresent);
-			assignResource(resources, resourceTags, numResources, frame_generation_ui_alpha, DLSS_BUFFER_TYPE_UI_ALPHA, sl::ResourceLifecycle::eValidUntilPresent);
+		if ((dlssg_requested || StreamlineContext::get().dlssg_viewport == context->viewport) && p_payload.hudless.valid && p_payload.ui_alpha.valid) {
+			assignResource(resources, resourceTags, numResources, p_payload.hudless, sl::kBufferTypeHUDLessColor, sl::ResourceLifecycle::eValidUntilPresent);
+			assignResource(resources, resourceTags, numResources, p_payload.ui_alpha, DLSS_BUFFER_TYPE_UI_ALPHA, sl::ResourceLifecycle::eValidUntilPresent);
 			context->hudless_tagged = true;
 		} else if (context->hudless_tagged) {
 			resourceTags[numResources++] = sl::ResourceTag(nullptr, sl::kBufferTypeHUDLessColor, sl::ResourceLifecycle::eValidUntilPresent);
@@ -861,13 +957,13 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext
 
 		if (use_dlss_rr && StreamlineContext::get().streamline_capabilities.dlss_rr_available) {
 			// Use DLSS Ray Reconstruction
-			result = StreamlineContext::get().slEvaluateFeature(sl::kFeatureDLSS_RR, *sl_frame_token(), inputs, 1, nativeCmdlist);
+			result = StreamlineContext::get().slEvaluateFeature(sl::kFeatureDLSS_RR, *p_payload.frame_token, inputs, 1, nativeCmdlist);
 			if (result != sl::Result::eOk) {
 				ERR_FAIL_MSG("Failed to call streamline slEvaluateFeature for DLSS Ray Reconstruction. Result: " + String(StreamlineContext::result_to_string(result)));
 			}
 		} else if (StreamlineContext::get().streamline_capabilities.dlss_available) {
 			// Use regular DLSS
-			result = StreamlineContext::get().slEvaluateFeature(sl::kFeatureDLSS, *sl_frame_token(), inputs, 1, nativeCmdlist);
+			result = StreamlineContext::get().slEvaluateFeature(sl::kFeatureDLSS, *p_payload.frame_token, inputs, 1, nativeCmdlist);
 			if (result != sl::Result::eOk) {
 				ERR_FAIL_MSG("Failed to call streamline slEvaluateFeature for DLSS Super Resolution. Result: " + String(StreamlineContext::result_to_string(result)));
 			}
@@ -901,9 +997,9 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext
 			int numResources = 0;
 
 			// Still the DLSS output, in the same storage state the graph set for the whole callback.
-			const bool output_storage = dlss_output_is_storage(p_params.output);
-			assignResource(resources, resourceTags, numResources, p_params.output, sl::kBufferTypeScalingInputColor, sl::ResourceLifecycle::eOnlyValidNow, output_storage);
-			assignResource(resources, resourceTags, numResources, p_params.output, sl::kBufferTypeScalingOutputColor, sl::ResourceLifecycle::eValidUntilPresent, output_storage);
+			const bool output_storage = p_payload.output_storage;
+			assignResource(resources, resourceTags, numResources, p_payload.output, sl::kBufferTypeScalingInputColor, sl::ResourceLifecycle::eOnlyValidNow, output_storage);
+			assignResource(resources, resourceTags, numResources, p_payload.output, sl::kBufferTypeScalingOutputColor, sl::ResourceLifecycle::eValidUntilPresent, output_storage);
 
 			sl::Result result = StreamlineContext::get().slSetTag(context->viewport, resourceTags, numResources, nativeCmdlist);
 			if (result != sl::Result::eOk) {
@@ -913,7 +1009,7 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext
 
 		{ // Evaluate NIS
 			const sl::BaseStructure *inputs[] = { &context->viewport };
-			sl::Result result = StreamlineContext::get().slEvaluateFeature(sl::kFeatureNIS, *sl_frame_token(), inputs, 1, nativeCmdlist);
+			sl::Result result = StreamlineContext::get().slEvaluateFeature(sl::kFeatureNIS, *p_payload.frame_token, inputs, 1, nativeCmdlist);
 			if (result != sl::Result::eOk) {
 				ERR_FAIL_MSG("Failed to call streamline slEvaluateFeature for NIS. Result: " + String(StreamlineContext::result_to_string(result)));
 			}
@@ -930,8 +1026,8 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext
 	} else if (context->is_d3d12 && FSRFrameGenerationD3D12::is_requested()) {
 		FSRFrameGenerationD3D12::PrepareParams fg;
 		fg.native_command_list = nativeCmdlist;
-		fg.depth_resource = RD::get_singleton()->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_TEXTURE, p_params.depth);
-		fg.motion_vectors_resource = RD::get_singleton()->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_TEXTURE, p_params.velocity);
+		fg.depth_resource = p_payload.depth.image;
+		fg.motion_vectors_resource = p_payload.velocity.image;
 		fg.render_width = p_params.internal_size.width;
 		fg.render_height = p_params.internal_size.height;
 		fg.jitter_x = p_params.jitter.x;
@@ -941,8 +1037,8 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext
 		fg.camera_far = p_params.z_far;
 		fg.fov_vertical_radians = Math::deg_to_rad(p_params.fovy);
 		fg.depth_inverted = p_params.reverse_depth;
-		if (frame_generation_hudless.is_valid()) {
-			fg.hudless_resource = RD::get_singleton()->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_TEXTURE, frame_generation_hudless);
+		if (p_payload.hudless.valid) {
+			fg.hudless_resource = p_payload.hudless.image;
 		}
 		const Basis &fg_basis = p_params.cam_transform.get_basis();
 		const Vector3 fg_origin = p_params.cam_transform.get_origin();
@@ -961,12 +1057,18 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext
 }
 
 void RendererRD::DLSSEffect::_upscale_internal_graph_callback(RenderingDeviceDriver *p_driver, RDD::CommandBufferID p_command_buffer, void *p_userdata) {
-	DLSSContextInner *self = (DLSSContextInner *)p_userdata;
+	DLSSCallbackPayload *payload = (DLSSCallbackPayload *)p_userdata;
+	if (!payload->hudless_final) {
+		// Replayed before its frame's recording ended (a flush, on the render thread): the HUD-less state as it is now.
+		dlss_capture_hudless(payload);
+		dlss_pending_payloads.erase(payload);
+	}
 	if (dlss_callback_stats.enabled < 0) {
 		dlss_callback_stats.enabled = OS::get_singleton()->get_environment("GODOT_PARALLEL_RECORDING_STATS") == "1" ? 1 : 0;
 	}
 	dlss_callback_stats.lap_usec = OS::get_singleton()->get_ticks_usec();
-	self->last_effect->_upscale_internal(p_command_buffer, self->last_parameters);
+	payload->effect->_upscale_internal(p_command_buffer, *payload);
+	memdelete(payload);
 	dlss_callback_lap(DLSS_SECTION_REST);
 	if (dlss_callback_stats.enabled > 0 && ++dlss_callback_stats.calls == 240) {
 		const uint64_t *u = dlss_callback_stats.usec;
@@ -1020,6 +1122,7 @@ void DLSSEffect::upscale(const DLSSContext::Parameters &p_params) {}
 bool DLSSEffect::is_ready(DLSSContext *p_context) {
 	return false;
 }
-void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext::Parameters &p_params) {}
+void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, DLSSCallbackPayload &p_payload) {}
 void DLSSEffect::_upscale_internal_graph_callback(RenderingDeviceDriver *p_driver, RDD::CommandBufferID p_command_buffer, void *p_userdata) {}
+void DLSSEffect::finalize_frame_callbacks() {}
 #endif

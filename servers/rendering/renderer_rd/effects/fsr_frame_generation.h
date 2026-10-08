@@ -70,11 +70,26 @@ public:
 	// so the decode runs after them. Records the decode, then FSR's prepare in a driver callback.
 	void prepare(const Parameters &p_params);
 
+	// The end of a frame's recording: the prepare callbacks recorded in it take the HUD-less color the
+	// compositor set after them (as DLSSEffect::finalize_frame_callbacks()). Render thread.
+	static void finalize_frame_callbacks();
+
 private:
 	MotionVectorDecodeShaderRD mvec_decode_shader;
 	RID mvec_decode_version;
 	RID mvec_decode_pipeline;
-	Parameters last_parameters;
+
+	// What one recorded prepare callback uses, resolved on the render thread: the callback may run on another
+	// thread after the render thread moved on (RHI-THREAD-STUDY.md, step 1a). Owned and freed by the callback.
+	struct CallbackPayload {
+		Parameters params;
+		uint64_t depth_resource = 0;
+		uint64_t motion_vectors_resource = 0;
+		bool hudless_final = false; // Captured at the frame's end, or by the callback when replayed earlier.
+		uint64_t hudless_resource = 0;
+	};
+	static LocalVector<CallbackPayload *> pending_payloads;
+	static void _capture_hudless(CallbackPayload *p_payload);
 
 	static void _prepare_graph_callback(RenderingDeviceDriver *p_driver, RDD::CommandBufferID p_command_buffer, void *p_userdata);
 };

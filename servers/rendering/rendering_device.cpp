@@ -8705,7 +8705,7 @@ void RenderingDevice::_execute_frame_slot(uint32_t p_frame, bool p_present) {
 }
 
 void RenderingDevice::_submit_thread_func(void *p_userdata) {
-	Thread::set_name("RenderingDevice submission");
+	Thread::set_name("RHISubmissionThread"); // As Unreal names it: submits and presents the recorded frames.
 	RenderingDevice *rd = (RenderingDevice *)p_userdata;
 	while (true) {
 		SubmitJob job;

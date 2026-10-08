@@ -78,7 +78,6 @@ void FSRFrameGenerationEffect::prepare(const Parameters &p_params) {
 		mvec_decode_pipeline = RD::get_singleton()->compute_pipeline_create(mvec_decode_shader.version_get_shader(mvec_decode_version, 0));
 	}
 	ERR_FAIL_COND(mvec_decode_version.is_null());
-	last_parameters = p_params;
 
 	// Complete motion vectors: pixels without object motion get the camera's, from depth. The same
 	// pass as DLSS's (DLSSEffect::upscale()); FSR's prepare takes no reprojection matrix.
@@ -119,20 +118,45 @@ void FSRFrameGenerationEffect::prepare(const Parameters &p_params) {
 	resources[0].usage = RD::CALLBACK_RESOURCE_USAGE_GENERAL;
 	resources[1].rid = p_params.velocity;
 	resources[1].usage = RD::CALLBACK_RESOURCE_USAGE_GENERAL;
-	RD::get_singleton()->driver_callback_add((RDD::DriverCallback)FSRFrameGenerationEffect::_prepare_graph_callback, this, VectorView<RD::CallbackResource>(resources, 2));
+	CallbackPayload *payload = memnew(CallbackPayload);
+	payload->params = p_params;
+	payload->depth_resource = RD::get_singleton()->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_TEXTURE, p_params.depth);
+	payload->motion_vectors_resource = RD::get_singleton()->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_TEXTURE, p_params.velocity);
+	pending_payloads.push_back(payload);
+	RD::get_singleton()->driver_callback_add((RDD::DriverCallback)FSRFrameGenerationEffect::_prepare_graph_callback, payload, VectorView<RD::CallbackResource>(resources, 2));
 #endif
+}
+
+LocalVector<FSRFrameGenerationEffect::CallbackPayload *> FSRFrameGenerationEffect::pending_payloads;
+
+void FSRFrameGenerationEffect::_capture_hudless(CallbackPayload *p_payload) {
+	const RID hudless = DLSSEffect::get_frame_generation_hudless();
+	p_payload->hudless_resource = hudless.is_valid() ? RD::get_singleton()->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_TEXTURE, hudless) : 0;
+	p_payload->hudless_final = true;
+}
+
+void FSRFrameGenerationEffect::finalize_frame_callbacks() {
+	for (CallbackPayload *payload : pending_payloads) {
+		_capture_hudless(payload);
+	}
+	pending_payloads.clear();
 }
 
 void FSRFrameGenerationEffect::_prepare_graph_callback(RenderingDeviceDriver *p_driver, RDD::CommandBufferID p_command_buffer, void *p_userdata) {
 #ifdef D3D12_ENABLED
-	const Parameters &p = ((FSRFrameGenerationEffect *)p_userdata)->last_parameters;
-	RenderingDevice *rd = RD::get_singleton();
+	CallbackPayload *payload = (CallbackPayload *)p_userdata;
+	if (!payload->hudless_final) {
+		// Replayed before its frame's recording ended (a flush, on the render thread).
+		_capture_hudless(payload);
+		pending_payloads.erase(payload);
+	}
+	const Parameters &p = payload->params;
 
 	// Same inputs as the DLSS path (DLSSEffect::_upscale_internal()).
 	FSRFrameGenerationD3D12::PrepareParams fg;
 	fg.native_command_list = p_driver->command_buffer_get_native_handle(p_command_buffer);
-	fg.depth_resource = rd->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_TEXTURE, p.depth);
-	fg.motion_vectors_resource = rd->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_TEXTURE, p.velocity);
+	fg.depth_resource = payload->depth_resource;
+	fg.motion_vectors_resource = payload->motion_vectors_resource;
 	fg.render_width = p.internal_size.width;
 	fg.render_height = p.internal_size.height;
 	fg.jitter_x = p.jitter.x;
@@ -142,10 +166,7 @@ void FSRFrameGenerationEffect::_prepare_graph_callback(RenderingDeviceDriver *p_
 	fg.camera_far = p.z_far;
 	fg.fov_vertical_radians = Math::deg_to_rad(p.fovy);
 	fg.depth_inverted = p.reverse_depth;
-	const RID hudless = DLSSEffect::get_frame_generation_hudless();
-	if (hudless.is_valid()) {
-		fg.hudless_resource = rd->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_TEXTURE, hudless);
-	}
+	fg.hudless_resource = payload->hudless_resource;
 	const Basis &basis = p.cam_transform.get_basis();
 	const Vector3 origin = p.cam_transform.get_origin();
 	const Vector3 up = basis.get_column(1).normalized();
