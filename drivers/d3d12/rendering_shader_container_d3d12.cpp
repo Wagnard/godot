@@ -354,7 +354,9 @@ bool RenderingShaderContainerD3D12::_convert_spirv_to_nir(Span<ReflectShaderStag
 	r_stages_processed.clear();
 
 	dxil_spirv_runtime_conf dxil_runtime_conf = {};
+	dxil_runtime_conf.runtime_data_cbv.register_space = ROOT_CONSTANT_SPACE;
 	dxil_runtime_conf.runtime_data_cbv.base_shader_register = RUNTIME_DATA_REGISTER;
+	dxil_runtime_conf.push_constant_cbv.register_space = ROOT_CONSTANT_SPACE;
 	dxil_runtime_conf.push_constant_cbv.base_shader_register = ROOT_CONSTANT_REGISTER;
 	dxil_runtime_conf.first_vertex_and_base_instance_mode = DXIL_SPIRV_SYSVAL_TYPE_ZERO;
 	dxil_runtime_conf.workgroup_id_mode = DXIL_SPIRV_SYSVAL_TYPE_ZERO;
@@ -380,7 +382,7 @@ bool RenderingShaderContainerD3D12::_convert_spirv_to_nir(Span<ReflectShaderStag
 			MESA_SHADER_COMPUTE, // SHADER_STAGE_COMPUTE
 		};
 
-		Span<uint32_t> code = p_spirv[i].spirv();
+		const Vector<uint32_t> code = _remap_spirv_bindings(p_spirv[i].spirv());
 		nir_shader *shader = spirv_to_nir(
 				code.ptr(),
 				code.size(),
@@ -560,6 +562,104 @@ bool RenderingShaderContainerD3D12::_convert_spirv_to_dxil(Span<ReflectShaderSta
 	return true;
 }
 
+void RenderingShaderContainerD3D12::_assign_dxil_slots() {
+	const uint32_t uniform_count = reflection_binding_set_uniforms_data.size();
+	dxil_binding_slots.resize(uniform_count);
+	uint32_t next_slot = 0;
+	// First the dynamic buffers (root descriptors: GPU-based validation's cost grows with their register), then the rest.
+	for (uint32_t pass = 0; pass < 2; pass++) {
+		for (uint32_t i = 0; i < uniform_count; i++) {
+			const ReflectionBindingData &uniform = reflection_binding_set_uniforms_data[i];
+			const bool root_descriptor = uniform.type == RDC::UNIFORM_TYPE_UNIFORM_BUFFER_DYNAMIC || uniform.type == RDC::UNIFORM_TYPE_STORAGE_BUFFER_DYNAMIC;
+			if (root_descriptor != (pass == 0)) {
+				continue;
+			}
+
+			dxil_binding_slots[i] = next_slot;
+			uint32_t slots = 1;
+			if (uniform.unbounded) {
+				slots = UNBOUNDED_ARRAY_SLOTS;
+			} else if (uniform.type == RDC::UNIFORM_TYPE_SAMPLER || uniform.type == RDC::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE || uniform.type == RDC::UNIFORM_TYPE_TEXTURE || uniform.type == RDC::UNIFORM_TYPE_IMAGE || uniform.type == RDC::UNIFORM_TYPE_INPUT_ATTACHMENT) {
+				// Arrays take one register per element.
+				slots = (MAX(1u, uniform.length) + GODOT_NIR_BINDING_MULTIPLIER - 1) / GODOT_NIR_BINDING_MULTIPLIER;
+			}
+			next_slot += slots;
+		}
+	}
+	dxil_binding_slots_end = next_slot;
+}
+
+uint32_t RenderingShaderContainerD3D12::_find_binding(uint32_t p_set, uint32_t p_binding) const {
+	if (p_set >= (uint32_t)reflection_binding_set_uniforms_count.size()) {
+		return UINT32_MAX;
+	}
+	uint32_t binding_start = 0;
+	for (uint32_t i = 0; i < p_set; i++) {
+		binding_start += reflection_binding_set_uniforms_count[i];
+	}
+	for (uint32_t i = 0; i < reflection_binding_set_uniforms_count[p_set]; i++) {
+		if (reflection_binding_set_uniforms_data[binding_start + i].binding == p_binding) {
+			return binding_start + i;
+		}
+	}
+	return UINT32_MAX;
+}
+
+Vector<uint32_t> RenderingShaderContainerD3D12::_remap_spirv_bindings(Span<uint32_t> p_spirv) const {
+	// Mesa (godot-nir-static) turns descriptor set S, binding B into register S * GODOT_NIR_DESCRIPTOR_SET_MULTIPLIER +
+	// B * GODOT_NIR_BINDING_MULTIPLIER, all in space 0. Every resource is given set 0 and its slot as binding instead.
+	static constexpr uint32_t SPV_OP_DECORATE = 71;
+	static constexpr uint32_t SPV_DECORATION_BINDING = 33;
+	static constexpr uint32_t SPV_DECORATION_DESCRIPTOR_SET = 34;
+	static constexpr int64_t SPV_HEADER_WORDS = 5;
+
+	Vector<uint32_t> code;
+	code.resize(p_spirv.size());
+	memcpy(code.ptrw(), p_spirv.ptr(), p_spirv.size() * sizeof(uint32_t));
+	uint32_t *words = code.ptrw();
+
+	struct Decorated {
+		uint32_t set = 0;
+		uint32_t binding = 0;
+		int64_t set_word = -1;
+		int64_t binding_word = -1;
+	};
+	HashMap<uint32_t, Decorated> decorated;
+	for (int64_t i = SPV_HEADER_WORDS; i < code.size();) {
+		const uint32_t opcode = words[i] & 0xffff;
+		const uint32_t word_count = words[i] >> 16;
+		ERR_FAIL_COND_V_MSG(word_count == 0 || i + word_count > code.size(), code, "Malformed SPIR-V.");
+		if (opcode == SPV_OP_DECORATE && word_count >= 4) {
+			const uint32_t decoration = words[i + 2];
+			if (decoration == SPV_DECORATION_DESCRIPTOR_SET) {
+				Decorated &d = decorated[words[i + 1]];
+				d.set = words[i + 3];
+				d.set_word = i + 3;
+			} else if (decoration == SPV_DECORATION_BINDING) {
+				Decorated &d = decorated[words[i + 1]];
+				d.binding = words[i + 3];
+				d.binding_word = i + 3;
+			}
+		}
+		i += word_count;
+	}
+
+	uint32_t unreflected_slot = dxil_binding_slots_end;
+	for (const KeyValue<uint32_t, Decorated> &E : decorated) {
+		const Decorated &d = E.value;
+		if (d.binding_word < 0) {
+			continue;
+		}
+		const uint32_t index = _find_binding(d.set, d.binding);
+		// A declared binding the reflection dropped (unused) still needs a register of its own.
+		words[d.binding_word] = index != UINT32_MAX ? dxil_binding_slots[index] : unreflected_slot++;
+		if (d.set_word >= 0) {
+			words[d.set_word] = 0;
+		}
+	}
+	return code;
+}
+
 bool RenderingShaderContainerD3D12::_generate_root_signature(BitField<RenderingDeviceCommons::ShaderStage> p_stages_processed) {
 	// Root (push) constants.
 	LocalVector<D3D12_ROOT_PARAMETER1> root_params;
@@ -568,7 +668,7 @@ bool RenderingShaderContainerD3D12::_generate_root_signature(BitField<RenderingD
 		push_constant.InitAsConstants(
 				reflection_data.push_constant_size / sizeof(uint32_t),
 				ROOT_CONSTANT_REGISTER,
-				0,
+				ROOT_CONSTANT_SPACE,
 				stages_to_d3d12_visibility(reflection_data_d3d12.dxil_push_constant_stages));
 
 		root_params.push_back(push_constant);
@@ -585,7 +685,7 @@ bool RenderingShaderContainerD3D12::_generate_root_signature(BitField<RenderingD
 		nir_runtime_data.InitAsConstants(
 				runtime_data_size / sizeof(uint32_t),
 				RUNTIME_DATA_REGISTER,
-				0,
+				ROOT_CONSTANT_SPACE,
 				visibility);
 		root_params.push_back(nir_runtime_data);
 	}
@@ -702,7 +802,7 @@ bool RenderingShaderContainerD3D12::_generate_root_signature(BitField<RenderingD
 				}
 			}
 
-			uint32_t dxil_register = i * GODOT_NIR_DESCRIPTOR_SET_MULTIPLIER + uniform.binding * GODOT_NIR_BINDING_MULTIPLIER;
+			uint32_t dxil_register = dxil_binding_slots[binding_start + j] * GODOT_NIR_BINDING_MULTIPLIER;
 			if (range_type != (D3D12_DESCRIPTOR_RANGE_TYPE)UINT_MAX) {
 				// Dynamic buffers are converted to root descriptors to prevent copying descriptors during command recording.
 				// Out of bounds accesses are not a concern because that's already undefined behavior on Vulkan.
@@ -840,30 +940,22 @@ void RenderingShaderContainerD3D12::_nir_report_resource(uint32_t p_register, ui
 	DEV_ASSERT(p_dxil_type < ARRAY_SIZE(DXIL_TYPE_TO_CLASS));
 	ResourceClass resource_class = DXIL_TYPE_TO_CLASS[p_dxil_type];
 
-	if (p_register == ROOT_CONSTANT_REGISTER && p_space == 0) {
+	if (p_register == ROOT_CONSTANT_REGISTER && p_space == ROOT_CONSTANT_SPACE) {
 		DEV_ASSERT(resource_class == RES_CLASS_CBV);
 		user_data.container->reflection_data_d3d12.dxil_push_constant_stages |= (1 << user_data.stage);
-	} else if (p_register == RUNTIME_DATA_REGISTER && p_space == 0) {
+	} else if (p_register == RUNTIME_DATA_REGISTER && p_space == ROOT_CONSTANT_SPACE) {
 		DEV_ASSERT(resource_class == RES_CLASS_CBV);
 		user_data.container->reflection_data_d3d12.nir_runtime_data_root_param_idx = 1; // Temporary, to be determined later.
 	} else {
-		DEV_ASSERT(p_space == 0);
+		ERR_FAIL_COND_MSG(p_space != 0, vformat("Unexpected DXIL register space %d for register %d.", p_space, p_register));
 
-		uint32_t set = p_register / GODOT_NIR_DESCRIPTOR_SET_MULTIPLIER;
-		uint32_t binding = (p_register % GODOT_NIR_DESCRIPTOR_SET_MULTIPLIER) / GODOT_NIR_BINDING_MULTIPLIER;
-
-		DEV_ASSERT(set < (uint32_t)user_data.container->reflection_binding_set_uniforms_count.size());
-
-		uint32_t binding_start = 0;
-		for (uint32_t i = 0; i < set; i++) {
-			binding_start += user_data.container->reflection_binding_set_uniforms_count[i];
-		}
+		const uint32_t slot = p_register / GODOT_NIR_BINDING_MULTIPLIER;
+		const LocalVector<uint32_t> &slots = user_data.container->dxil_binding_slots;
 
 		[[maybe_unused]] bool found = false;
-		for (uint32_t i = 0; i < user_data.container->reflection_binding_set_uniforms_count[set]; i++) {
-			const ReflectionBindingData &uniform = user_data.container->reflection_binding_set_uniforms_data[binding_start + i];
-			ReflectionBindingDataD3D12 &uniform_d3d12 = user_data.container->reflection_binding_set_uniforms_data_d3d12.ptrw()[binding_start + i];
-			if (uniform.binding != binding) {
+		for (uint32_t i = 0; i < slots.size(); i++) {
+			ReflectionBindingDataD3D12 &uniform_d3d12 = user_data.container->reflection_binding_set_uniforms_data_d3d12.ptrw()[i];
+			if (slots[i] != slot) {
 				continue;
 			}
 
@@ -941,6 +1033,7 @@ bool RenderingShaderContainerD3D12::_set_code_from_spirv(const ReflectShader &p_
 #if NIR_ENABLED
 	const LocalVector<ReflectShaderStage> &p_spirv = p_shader.shader_stages;
 	reflection_data_d3d12.nir_runtime_data_root_param_idx = UINT32_MAX;
+	_assign_dxil_slots();
 
 	for (int64_t i = 0; i < reflection_specialization_data.size(); i++) {
 		DEV_ASSERT(reflection_specialization_data[i].constant_id < (sizeof(reflection_data_d3d12.spirv_specialization_constants_ids_mask) * 8) && "Constant IDs with values above 31 are not supported.");

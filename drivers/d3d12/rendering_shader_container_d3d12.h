@@ -75,9 +75,16 @@ class RenderingShaderContainerD3D12 : public RenderingShaderContainer {
 
 public:
 	static constexpr uint32_t REQUIRED_SHADER_MODEL = 0x62; // D3D_SHADER_MODEL_6_2
-	static constexpr uint32_t ROOT_CONSTANT_REGISTER = GODOT_NIR_DESCRIPTOR_SET_MULTIPLIER * (RenderingDeviceCommons::MAX_UNIFORM_SETS + 1);
-	static constexpr uint32_t RUNTIME_DATA_REGISTER = GODOT_NIR_DESCRIPTOR_SET_MULTIPLIER * (RenderingDeviceCommons::MAX_UNIFORM_SETS + 2);
-	static constexpr uint32_t FORMAT_VERSION = 1;
+	// Root constants (push constants, NIR runtime data) live in a register space of their own, at registers 0 and 1. Every
+	// resource is in space 0 at register slot * GODOT_NIR_BINDING_MULTIPLIER (_assign_dxil_slots()). D3D12's GPU-based
+	// validation reserves memory in proportion to the register numbers of root parameters: at Mesa's set * 100000000 +
+	// binding * 100000, every root signature asked it for gigabytes and failed with E_OUTOFMEMORY.
+	static constexpr uint32_t ROOT_CONSTANT_SPACE = 1;
+	static constexpr uint32_t ROOT_CONSTANT_REGISTER = 0;
+	static constexpr uint32_t RUNTIME_DATA_REGISTER = 1;
+	// Register slots reserved for an unbounded (runtime-sized) array: room for 200000 descriptors.
+	static constexpr uint32_t UNBOUNDED_ARRAY_SLOTS = 2;
+	static constexpr uint32_t FORMAT_VERSION = 2;
 	static constexpr uint32_t SHADER_STAGES_BIT_OFFSET_INDICES[RenderingDeviceCommons::SHADER_STAGE_MAX] = {
 		0, // SHADER_STAGE_VERTEX
 		1, // SHADER_STAGE_FRAGMENT
@@ -131,6 +138,14 @@ protected:
 	bool _convert_nir_to_dxil(const HashMap<int, nir_shader *> &p_stages_nir_shaders, BitField<RenderingDeviceCommons::ShaderStage> p_stages_processed, HashMap<RenderingDeviceCommons::ShaderStage, Vector<uint8_t>> &r_dxil_blobs);
 	bool _convert_spirv_to_dxil(Span<ReflectShaderStage> p_spirv, HashMap<RenderingDeviceCommons::ShaderStage, Vector<uint8_t>> &r_dxil_blobs, Vector<RenderingDeviceCommons::ShaderStage> &r_stages, BitField<RenderingDeviceCommons::ShaderStage> &r_stages_processed);
 	bool _generate_root_signature(BitField<RenderingDeviceCommons::ShaderStage> p_stages_processed);
+
+	// The register slot of each binding (parallel to reflection_binding_set_uniforms_data), compilation only. Dynamic
+	// buffers, which become root descriptors, come first so their registers stay small.
+	LocalVector<uint32_t> dxil_binding_slots;
+	uint32_t dxil_binding_slots_end = 0;
+	void _assign_dxil_slots();
+	uint32_t _find_binding(uint32_t p_set, uint32_t p_binding) const;
+	Vector<uint32_t> _remap_spirv_bindings(Span<uint32_t> p_spirv) const;
 
 	// GodotNirCallbacks.
 	static void _nir_report_resource(uint32_t p_register, uint32_t p_space, uint32_t p_dxil_type, void *p_data);
