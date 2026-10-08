@@ -152,7 +152,7 @@ class DLSSContextInner;
 
 // A texture as Streamline is told about it: format and native handles, resolved on the render thread. The DLSS
 // callback runs when the graph is replayed, which may be on another thread once the render thread has moved on to
-// the next frame (RHI-THREAD-STUDY.md, step 1a): it must not look anything up through RenderingDevice.
+// the next frame (RD-REPLAY-THREAD-STUDY.md, step 1a): it must not look anything up through RenderingDevice.
 struct DLSSResolvedTexture {
 	bool valid = false;
 	uint32_t width = 0;
@@ -338,6 +338,10 @@ DLSSContextInner::~DLSSContextInner() {
 	// Compare FSR2Context::~FSR2Context, which calls ffxFsr2ContextDestroy -- FSR2 never
 	// exhibited the crash.
 	StreamlineContext &sl_ctx = StreamlineContext::get();
+
+	// The frames already handed over to the replay thread run their callbacks (which may turn DLSS-G on for this
+	// viewport) before anything below.
+	RD::get_singleton()->wait_for_frame_threads();
 
 	// DLSS-G first. The only code that turns it off lives in _upscale_internal, which stops
 	// running the moment this context is gone -- switching the viewport to bilinear or FSR2

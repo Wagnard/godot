@@ -547,6 +547,8 @@ void RendererCompositorRD::set_boot_image_with_stretch(const Ref<Image> &p_image
 
 	RD::get_singleton()->draw_list_end();
 
+	RendererRD::DLSSEffect::finalize_frame_callbacks();
+	RendererRD::FSRFrameGenerationEffect::finalize_frame_callbacks();
 	RD::get_singleton()->swap_buffers(true);
 
 	texture_storage->texture_free(texture);

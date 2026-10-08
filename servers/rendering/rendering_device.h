@@ -116,8 +116,34 @@ private:
 	void _submit_thread_wait(uint64_t p_job);
 	void _submit_thread_drain();
 
-	// Where the render thread's time goes around the graph, and every synchronization with the GPU (RHI-THREAD-STUDY.md,
-	// step 0). Main instance only; GODOT_RHI_STATS=1 (or GODOT_PARALLEL_DRAW_LISTS_STATS=1) prints it every 240 frames.
+	// Replay thread (with the submission thread; GODOT_RD_REPLAY_THREAD=0 disables it): swap_buffers()
+	// hands the recorded frame over and the render thread begins recording the next one into the other graph, while
+	// this thread replays the recorded graph into the slot's command buffers (RenderingDeviceGraph::end()) and passes
+	// the frame on to the submission thread. Its jobs are numbered with the submission jobs (submit_jobs_pushed): job n
+	// is done once its frame is submitted and presented, so _submit_thread_wait()/_submit_thread_drain() cover both
+	// threads. Each replay waits for the previous frame's submission: DLSS-G wants frame N+1's tags after Present(N).
+	struct ReplayJob {
+		uint32_t frame = 0;
+		RenderingDeviceGraph *graph = nullptr;
+		bool present = false;
+		uint64_t frame_token = 0;
+		uint64_t id = 0;
+	};
+	bool replay_thread_enabled = false;
+	Thread replay_thread;
+	ConditionVariable replay_condition; // A job was pushed, or the thread must exit (under submit_mutex).
+	LocalVector<ReplayJob> replay_jobs; // FIFO, under submit_mutex.
+	bool replay_thread_exit = false;
+	uint64_t draw_graph_job[2] = {}; // The last job that replays each of draw_graphs.
+	// Stats (GODOT_RD_STATS), written by the replay thread.
+	SafeNumeric<uint64_t> replay_thread_usec;
+	SafeNumeric<uint64_t> replay_thread_wait_usec; // Waiting for the previous frame's submission.
+	SafeNumeric<uint64_t> replay_thread_replays;
+
+	static void _replay_thread_func(void *p_userdata);
+
+	// Where the render thread's time goes around the graph, and every synchronization with the GPU (RD-REPLAY-THREAD-STUDY.md,
+	// step 0). Main instance only; GODOT_RD_STATS=1 (or GODOT_PARALLEL_DRAW_LISTS_STATS=1) prints it every 240 frames.
 	// A frame runs from one RenderingServer draw (frame_stats_draw_begin()) to the end of its swap_buffers().
 	struct FrameStats {
 		bool enabled = false;
@@ -2028,6 +2054,11 @@ public:
 	void _free_internal(RID p_id);
 	void _begin_frame(bool p_presented = false);
 	void _end_frame();
+	void _end_frame_recording();
+	// Waits until every frame swap_buffers() handed over is replayed, submitted and presented (replay and submission
+	// threads); nothing is replayed or submitted by it. For code that must order itself after those frames' driver
+	// callbacks, like the DLSS context destruction turning DLSS-G off.
+	void wait_for_frame_threads();
 	void _execute_frame(bool p_present);
 	void _execute_frame_slot(uint32_t p_frame, bool p_present);
 	void _stall_for_frame(uint32_t p_frame);

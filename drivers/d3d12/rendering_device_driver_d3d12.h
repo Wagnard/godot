@@ -535,7 +535,7 @@ private:
 
 		// Shader-visible descriptors of the clears recorded into this command buffer, reused from the start once it is
 		// begun again (the GPU is done with it by then): no need to know which frame is being recorded, which another
-		// thread may be on (RHI-THREAD-STUDY.md, step 1c).
+		// thread may be on (RD-REPLAY-THREAD-STUDY.md, step 1c).
 		LocalVector<DescriptorHeap::Allocation> clear_descriptor_allocations;
 		uint32_t clear_descriptor_allocation_count = 0;
 	};
@@ -943,7 +943,6 @@ private:
 	TightLocalVector<FrameInfo> frames;
 	uint32_t frame_idx = 0;
 	uint32_t frames_drawn = 0;
-	bool segment_begun = false;
 	HashMap<uint64_t, bool> has_comp_alpha;
 
 public:

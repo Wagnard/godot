@@ -5504,7 +5504,7 @@ Error RenderingDevice::screen_prepare_for_drawing(DisplayServerEnums::WindowID p
 	screen_framebuffers.erase(p_screen);
 
 	// The previous frame's present moves the back buffer index the acquisition reads, and nothing may use the main
-	// queue or the swap chain behind the submission thread's back.
+	// queue or the swap chain behind the submission thread's back (this waits for the replay thread's frames too).
 	const uint64_t drain_begin_usec = frame_stats.enabled ? OS::get_singleton()->get_ticks_usec() : 0;
 	_submit_thread_drain();
 	if (frame_stats.enabled) {
@@ -8314,7 +8314,12 @@ void RenderingDevice::swap_buffers(bool p_present) {
 	}
 
 	GodotProfileZoneGroupedFirst(_profile_zone, "_end_frame");
-	_end_frame();
+	if (replay_thread_enabled) {
+		// The replay is the replay thread's.
+		_end_frame_recording();
+	} else {
+		_end_frame();
+	}
 
 	if (frame_stats.enabled) {
 		const uint64_t now = OS::get_singleton()->get_ticks_usec();
@@ -8329,7 +8334,18 @@ void RenderingDevice::swap_buffers(bool p_present) {
 	}
 
 	GodotProfileZoneGrouped(_profile_zone, "_execute_frame");
-	if (submit_thread_enabled) {
+	if (replay_thread_enabled) {
+		// The replay thread replays this frame, then the submission thread submits and presents it, while this one
+		// records the next.
+		{
+			MutexLock lock(submit_mutex);
+			const uint64_t job = ++submit_jobs_pushed;
+			replay_jobs.push_back({ uint32_t(frame), draw_graph, p_present, Streamline::get_singleton()->get_render_frame_token(), job });
+			submit_frame_job[frame] = job;
+			draw_graph_job[draw_graph == &draw_graphs[0] ? 0 : 1] = job;
+		}
+		replay_condition.notify_one();
+	} else if (submit_thread_enabled) {
 		// The submission thread submits and presents this frame while this one begins the next.
 		{
 			MutexLock lock(submit_mutex);
@@ -8552,7 +8568,11 @@ void RenderingDevice::_begin_frame(bool p_presented) {
 	GodotProfileZoneGrouped(_profile_zone, "driver->command_buffer_begin");
 	driver->command_buffer_begin(frames[frame].command_buffer);
 
-	// Reset the graph.
+	// Reset the graph, once the replay thread is done replaying it (the slot stall above already waited for that with two
+	// frame slots, not with more).
+	if (replay_thread_enabled) {
+		_submit_thread_wait(draw_graph_job[draw_graph == &draw_graphs[0] ? 0 : 1]);
+	}
 	GodotProfileZoneGrouped(_profile_zone, "draw_graph->begin");
 	draw_graph->begin();
 
@@ -8584,6 +8604,11 @@ void RenderingDevice::_begin_frame(bool p_presented) {
 }
 
 void RenderingDevice::_end_frame() {
+	_end_frame_recording();
+	_replay_frame(frame, draw_graph);
+}
+
+void RenderingDevice::_end_frame_recording() {
 	if (draw_list.active) {
 		ERR_PRINT("Found open draw list at the end of the frame, this should never happen (further drawing will likely not work).");
 	}
@@ -8599,8 +8624,6 @@ void RenderingDevice::_end_frame() {
 	GodotProfileZoneGroupedFirst(_profile_zone, "_submit_transfer_workers");
 	_submit_transfer_workers(frames[frame].command_buffer);
 	_take_transfer_barriers(frame);
-
-	_replay_frame(frame, draw_graph);
 }
 
 void RenderingDevice::_replay_frame(uint32_t p_frame, RenderingDeviceGraph *p_graph) {
@@ -8716,8 +8739,55 @@ void RenderingDevice::_execute_frame_slot(uint32_t p_frame, bool p_present) {
 	}
 }
 
+void RenderingDevice::_replay_thread_func(void *p_userdata) {
+	Thread::set_name("RenderingDevice replay"); // Turns the recorded frames into command buffers.
+	RenderingDevice *rd = (RenderingDevice *)p_userdata;
+	while (true) {
+		ReplayJob job;
+		uint64_t wait_usec = 0;
+		{
+			MutexLock lock(rd->submit_mutex);
+			while (rd->replay_jobs.is_empty() && !rd->replay_thread_exit) {
+				rd->replay_condition.wait(lock);
+			}
+			if (rd->replay_jobs.is_empty()) {
+				break;
+			}
+			job = rd->replay_jobs[0];
+			rd->replay_jobs.remove_at(0);
+
+			// The previous frame is submitted and presented before this one's driver callbacks run: DLSS-G's tags of
+			// frame N+1 must follow Present(N), as when everything ran on the render thread.
+			if (rd->submit_jobs_done + 1 < job.id) {
+				const uint64_t wait_begin_usec = OS::get_singleton()->get_ticks_usec();
+				while (rd->submit_jobs_done + 1 < job.id) {
+					rd->submit_done_condition.wait(lock);
+				}
+				wait_usec = OS::get_singleton()->get_ticks_usec() - wait_begin_usec;
+			}
+		}
+
+		const uint64_t replay_begin_usec = OS::get_singleton()->get_ticks_usec();
+		rd->_replay_frame(job.frame, job.graph);
+		rd->replay_thread_usec.add(OS::get_singleton()->get_ticks_usec() - replay_begin_usec);
+		rd->replay_thread_wait_usec.add(wait_usec);
+		rd->replay_thread_replays.increment();
+
+		{
+			MutexLock lock(rd->submit_mutex);
+			rd->submit_jobs.push_back({ job.frame, job.present, job.frame_token });
+		}
+		rd->submit_condition.notify_one();
+	}
+}
+
+void RenderingDevice::wait_for_frame_threads() {
+	ERR_RENDER_THREAD_GUARD();
+	_submit_thread_drain();
+}
+
 void RenderingDevice::_submit_thread_func(void *p_userdata) {
-	Thread::set_name("RHISubmissionThread"); // As Unreal names it: submits and presents the recorded frames.
+	Thread::set_name("RenderingDevice submission"); // Submits and presents the recorded frames.
 	RenderingDevice *rd = (RenderingDevice *)p_userdata;
 	while (true) {
 		SubmitJob job;
@@ -8929,6 +8999,18 @@ void RenderingDevice::_frame_stats_print() {
 	}
 	print_line(vformat("RenderingDevice syncs over %d frames: %d flush and stall all (%.0f us), %d staging stalls (%.0f us).%s",
 			st.frames, st.flushes, double(st.flush_usec), st.staging_stalls, double(st.staging_stall_usec), callers));
+	if (replay_thread_enabled) {
+		const uint64_t replays = replay_thread_replays.get();
+		const uint64_t replay_usec = replay_thread_usec.get();
+		const uint64_t wait_usec = replay_thread_wait_usec.get();
+		replay_thread_replays.sub(replays);
+		replay_thread_usec.sub(replay_usec);
+		replay_thread_wait_usec.sub(wait_usec);
+		if (replays) {
+			print_line(vformat("RenderingDevice replay thread, per frame: replay %d us, waiting for the previous frame's submission %d us (%d replays).",
+					replay_usec / replays, wait_usec / replays, replays));
+		}
+	}
 }
 
 Error RenderingDevice::initialize(RenderingContextDriver *p_context, DisplayServerEnums::WindowID p_main_window) {
@@ -9161,7 +9243,7 @@ Error RenderingDevice::initialize(RenderingContextDriver *p_context, DisplayServ
 
 	// D3D12 with a window: frames are submitted and presented by a thread of their own (GODOT_SUBMIT_THREAD=0: by the
 	// render thread, as before).
-	frame_stats.enabled = is_main_instance && (OS::get_singleton()->get_environment("GODOT_RHI_STATS") == "1" || OS::get_singleton()->get_environment("GODOT_PARALLEL_DRAW_LISTS_STATS") == "1");
+	frame_stats.enabled = is_main_instance && (OS::get_singleton()->get_environment("GODOT_RD_STATS") == "1" || OS::get_singleton()->get_environment("GODOT_PARALLEL_DRAW_LISTS_STATS") == "1");
 	submit_thread_enabled = main_surface != 0 && driver->get_api_name() == "D3D12" && OS::get_singleton()->get_environment("GODOT_SUBMIT_THREAD") != "0";
 	if (submit_thread_enabled) {
 		submit_frame_job.resize(frames.size());
@@ -9170,6 +9252,13 @@ Error RenderingDevice::initialize(RenderingContextDriver *p_context, DisplayServ
 		}
 		submit_thread.start(_submit_thread_func, this);
 		print_verbose("RenderingDevice: frames are submitted and presented by a thread of their own.");
+
+		// And replayed by another (GODOT_RD_REPLAY_THREAD=0: by the render thread, as before).
+		replay_thread_enabled = OS::get_singleton()->get_environment("GODOT_RD_REPLAY_THREAD") != "0";
+		if (replay_thread_enabled) {
+			replay_thread.start(_replay_thread_func, this);
+			print_verbose("RenderingDevice: recorded frames are replayed by a thread of their own.");
+		}
 	}
 
 	// Convert block size from KB.
@@ -9504,6 +9593,16 @@ void RenderingDevice::finalize() {
 	if (!frames.is_empty()) {
 		// Wait for all frames to have finished rendering.
 		_flush_and_stall_for_all_frames(false, __func__);
+	}
+
+	if (replay_thread_enabled) {
+		{
+			MutexLock lock(submit_mutex);
+			replay_thread_exit = true;
+		}
+		replay_condition.notify_one();
+		replay_thread.wait_to_finish();
+		replay_thread_enabled = false;
 	}
 
 	if (submit_thread_enabled) {

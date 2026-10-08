@@ -3992,8 +3992,6 @@ void RenderingDeviceDriverD3D12::command_uniform_set_prepare_for_use(CommandBuff
 }
 
 void RenderingDeviceDriverD3D12::_command_check_descriptor_sets(CommandBufferID p_cmd_buffer) {
-	DEV_ASSERT(segment_begun && "Unable to use commands that rely on descriptors because a segment was never begun.");
-
 	CommandBufferInfo *cmd_buf_info = (CommandBufferInfo *)p_cmd_buffer.id;
 	if (!cmd_buf_info->descriptor_heaps_set) {
 		// Set descriptor heaps for the command buffer if they haven't been set yet.
@@ -5998,12 +5996,11 @@ void RenderingDeviceDriverD3D12::begin_segment(uint32_t p_frame_index, uint32_t 
 
 	frames_drawn = p_frames_drawn;
 	allocator->SetCurrentFrameIndex(p_frames_drawn);
-
-	segment_begun = true;
 }
 
 void RenderingDeviceDriverD3D12::end_segment() {
-	segment_begun = false;
+	// Nothing to do: the command buffers carry their own descriptors (clear_descriptor_allocations), and with the
+	// replay thread the next frame's segment is begun on the render thread before this one ends on the replay thread.
 }
 
 /**************/

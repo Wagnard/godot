@@ -80,7 +80,7 @@ private:
 	RID mvec_decode_pipeline;
 
 	// What one recorded prepare callback uses, resolved on the render thread: the callback may run on another
-	// thread after the render thread moved on (RHI-THREAD-STUDY.md, step 1a). Owned and freed by the callback.
+	// thread after the render thread moved on (RD-REPLAY-THREAD-STUDY.md, step 1a). Owned and freed by the callback.
 	struct CallbackPayload {
 		Parameters params;
 		uint64_t depth_resource = 0;
