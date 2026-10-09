@@ -331,6 +331,134 @@ uint32_t RenderingShaderContainerD3D12::_to_bytes_footer_extra_data(uint8_t *p_b
 }
 
 #if NIR_ENABLED
+// The array form of a 1D, 2D (single- or multisampled) or cube texture, or of a 1D or 2D image, keeping arrays of
+// descriptors around it; nullptr when the type stays as it is.
+static const glsl_type *_arrayed_resource_type(const glsl_type *p_type) {
+	if (glsl_type_is_array(p_type)) {
+		const glsl_type *element = _arrayed_resource_type(glsl_get_array_element(p_type));
+		return element ? glsl_array_type(element, glsl_get_length(p_type), glsl_get_explicit_stride(p_type)) : nullptr;
+	}
+
+	const bool is_image = glsl_type_is_image(p_type);
+	const bool is_texture = glsl_type_is_texture(p_type) || (glsl_type_is_sampler(p_type) && !glsl_type_is_bare_sampler(p_type));
+	if ((!is_image && !is_texture) || glsl_sampler_type_is_array(p_type)) {
+		return nullptr;
+	}
+
+	const glsl_sampler_dim dim = glsl_get_sampler_dim(p_type);
+	switch (dim) {
+		case GLSL_SAMPLER_DIM_1D:
+		case GLSL_SAMPLER_DIM_2D:
+			break;
+		case GLSL_SAMPLER_DIM_MS:
+		case GLSL_SAMPLER_DIM_CUBE:
+			// D3D12 has neither multisampled nor cube UAVs; nir_to_dxil handles those images its own way.
+			if (is_image) {
+				return nullptr;
+			}
+			break;
+		default:
+			return nullptr;
+	}
+
+	const glsl_base_type result_type = glsl_get_sampler_result_type(p_type);
+	if (is_image) {
+		return glsl_image_type(dim, true, result_type);
+	} else if (glsl_type_is_texture(p_type)) {
+		return glsl_texture_type(dim, true, result_type);
+	}
+	return glsl_sampler_type(dim, glsl_sampler_type_is_shadow(p_type), true, result_type);
+}
+
+// Declares every 1D, 2D and cube texture, and every 1D and 2D image, as an array read at layer 0.
+// A slice of a texture array other than the first can only be a Texture2DArray view in D3D12 (a Texture2D view
+// cannot select a slice), and a shader that declares Texture2D over such a view breaks the rule that the view
+// dimension matches the declaration (Unreal enforces the same). NVIDIA honours the view's first slice anyway, but
+// GPU-based validation resolves the access as slice 0 of the resource (the sky radiance roughness passes showed up
+// as "UAV in SHADER_RESOURCE"), and nothing obliges another driver to honour it. With arrays everywhere, the
+// driver binds array views (RenderingDeviceDriverD3D12::uniform_set_create()) and the two always match.
+static bool _declare_resources_as_arrays(nir_shader *p_shader) {
+	bool changed = false;
+	nir_foreach_variable_with_modes(var, p_shader, nir_var_uniform | nir_var_image) {
+		const glsl_type *type = _arrayed_resource_type(var->type);
+		if (type) {
+			var->type = type;
+			changed = true;
+		}
+	}
+	if (!changed) {
+		return false;
+	}
+	nir_fixup_deref_types(p_shader);
+
+	nir_foreach_function_impl(impl, p_shader) {
+		nir_builder b = nir_builder_create(impl);
+		nir_foreach_block(block, impl) {
+			nir_foreach_instr_safe(instr, block) {
+				if (instr->type == nir_instr_type_tex) {
+					nir_tex_instr *tex = nir_instr_as_tex(instr);
+					const int deref_index = nir_tex_instr_src_index(tex, nir_tex_src_texture_deref);
+					if (tex->is_array || deref_index < 0) {
+						continue;
+					}
+					const glsl_type *type = glsl_without_array(nir_src_as_deref(tex->src[deref_index].src)->type);
+					if (!(glsl_type_is_texture(type) || glsl_type_is_sampler(type)) || !glsl_sampler_type_is_array(type)) {
+						continue;
+					}
+					tex->is_array = true;
+
+					// Queries take no coordinate, and a LOD query's coordinate has no layer.
+					const int coord_index = nir_tex_instr_src_index(tex, nir_tex_src_coord);
+					if (coord_index < 0 || tex->op == nir_texop_lod) {
+						continue;
+					}
+					b.cursor = nir_before_instr(instr);
+					nir_def *coord = tex->src[coord_index].src.ssa;
+					nir_def *components[NIR_MAX_VEC_COMPONENTS];
+					for (unsigned i = 0; i < coord->num_components; i++) {
+						components[i] = nir_channel(&b, coord, i);
+					}
+					components[coord->num_components] = nir_imm_zero(&b, 1, coord->bit_size);
+					nir_src_rewrite(&tex->src[coord_index].src, nir_vec(&b, components, coord->num_components + 1));
+					tex->coord_components++;
+				} else if (instr->type == nir_instr_type_intrinsic) {
+					nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+					bool has_coord = true;
+					switch (intr->intrinsic) {
+						case nir_intrinsic_image_deref_load:
+						case nir_intrinsic_image_deref_sparse_load:
+						case nir_intrinsic_image_deref_store:
+						case nir_intrinsic_image_deref_atomic:
+						case nir_intrinsic_image_deref_atomic_swap:
+							break;
+						case nir_intrinsic_image_deref_size:
+						case nir_intrinsic_image_deref_samples:
+							has_coord = false;
+							break;
+						default:
+							continue;
+					}
+					const glsl_type *type = nir_src_as_deref(intr->src[0])->type;
+					if (!glsl_type_is_image(type) || !glsl_sampler_type_is_array(type) || nir_intrinsic_image_array(intr)) {
+						continue;
+					}
+					nir_intrinsic_set_image_array(intr, true);
+
+					// Image coordinates always have four components; the layer follows the used ones.
+					if (has_coord) {
+						b.cursor = nir_before_instr(instr);
+						nir_def *coord = intr->src[1].ssa;
+						const unsigned layer = glsl_get_sampler_dim_coordinate_components(glsl_get_sampler_dim(type));
+						nir_src_rewrite(&intr->src[1], nir_vector_insert_imm(&b, coord, nir_imm_zero(&b, 1, coord->bit_size), layer));
+					}
+				}
+			}
+		}
+		nir_progress(true, impl, nir_metadata_control_flow);
+	}
+	return true;
+}
+
 bool RenderingShaderContainerD3D12::_convert_spirv_to_nir(Span<ReflectShaderStage> p_spirv, const nir_shader_compiler_options *p_compiler_options, HashMap<int, nir_shader *> &r_stages_nir_shaders, Vector<RenderingDeviceCommons::ShaderStage> &r_stages, BitField<RenderingDeviceCommons::ShaderStage> &r_stages_processed) {
 	r_stages_processed.clear();
 
@@ -495,6 +623,8 @@ bool RenderingShaderContainerD3D12::_convert_nir_to_dxil(const HashMap<int, nir_
 			peephole_options.discard_ok = true;
 			nir_opt_peephole_select(it.value, &peephole_options);
 		}
+
+		_declare_resources_as_arrays(it.value);
 
 		blob dxil_blob = {};
 		bool ok = nir_to_dxil(it.value, &nir_to_dxil_options, &logger, &dxil_blob);

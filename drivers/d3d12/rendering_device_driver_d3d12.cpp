@@ -3545,6 +3545,70 @@ void RenderingDeviceDriverD3D12::shader_destroy_modules(ShaderID p_shader) {
 /**** UNIFORM SET ****/
 /*********************/
 
+// Shaders declare every 1D, 2D and cube texture as an array (_declare_resources_as_arrays() in
+// rendering_shader_container_d3d12.cpp, so that a slice of a texture array, which only an array view can select,
+// matches its declaration); the views bound to them become arrays of one layer or one cube to match.
+static D3D12_SHADER_RESOURCE_VIEW_DESC _srv_desc_as_array(const D3D12_SHADER_RESOURCE_VIEW_DESC &p_desc) {
+	D3D12_SHADER_RESOURCE_VIEW_DESC desc = p_desc;
+	switch (p_desc.ViewDimension) {
+		case D3D12_SRV_DIMENSION_TEXTURE1D: {
+			desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE1DARRAY;
+			desc.Texture1DArray.MostDetailedMip = p_desc.Texture1D.MostDetailedMip;
+			desc.Texture1DArray.MipLevels = p_desc.Texture1D.MipLevels;
+			desc.Texture1DArray.FirstArraySlice = 0;
+			desc.Texture1DArray.ArraySize = 1;
+			desc.Texture1DArray.ResourceMinLODClamp = p_desc.Texture1D.ResourceMinLODClamp;
+		} break;
+		case D3D12_SRV_DIMENSION_TEXTURE2D: {
+			desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+			desc.Texture2DArray.MostDetailedMip = p_desc.Texture2D.MostDetailedMip;
+			desc.Texture2DArray.MipLevels = p_desc.Texture2D.MipLevels;
+			desc.Texture2DArray.FirstArraySlice = 0;
+			desc.Texture2DArray.ArraySize = 1;
+			desc.Texture2DArray.PlaneSlice = p_desc.Texture2D.PlaneSlice;
+			desc.Texture2DArray.ResourceMinLODClamp = p_desc.Texture2D.ResourceMinLODClamp;
+		} break;
+		case D3D12_SRV_DIMENSION_TEXTURE2DMS: {
+			desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DMSARRAY;
+			desc.Texture2DMSArray.FirstArraySlice = 0;
+			desc.Texture2DMSArray.ArraySize = 1;
+		} break;
+		case D3D12_SRV_DIMENSION_TEXTURECUBE: {
+			desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBEARRAY;
+			desc.TextureCubeArray.MostDetailedMip = p_desc.TextureCube.MostDetailedMip;
+			desc.TextureCubeArray.MipLevels = p_desc.TextureCube.MipLevels;
+			desc.TextureCubeArray.First2DArrayFace = 0;
+			desc.TextureCubeArray.NumCubes = 1;
+			desc.TextureCubeArray.ResourceMinLODClamp = p_desc.TextureCube.ResourceMinLODClamp;
+		} break;
+		default: {
+		}
+	}
+	return desc;
+}
+
+static D3D12_UNORDERED_ACCESS_VIEW_DESC _uav_desc_as_array(const D3D12_UNORDERED_ACCESS_VIEW_DESC &p_desc) {
+	D3D12_UNORDERED_ACCESS_VIEW_DESC desc = p_desc;
+	switch (p_desc.ViewDimension) {
+		case D3D12_UAV_DIMENSION_TEXTURE1D: {
+			desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE1DARRAY;
+			desc.Texture1DArray.MipSlice = p_desc.Texture1D.MipSlice;
+			desc.Texture1DArray.FirstArraySlice = 0;
+			desc.Texture1DArray.ArraySize = 1;
+		} break;
+		case D3D12_UAV_DIMENSION_TEXTURE2D: {
+			desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
+			desc.Texture2DArray.MipSlice = p_desc.Texture2D.MipSlice;
+			desc.Texture2DArray.FirstArraySlice = 0;
+			desc.Texture2DArray.ArraySize = 1;
+			desc.Texture2DArray.PlaneSlice = p_desc.Texture2D.PlaneSlice;
+		} break;
+		default: {
+		}
+	}
+	return desc;
+}
+
 RDD::UniformSetID RenderingDeviceDriverD3D12::uniform_set_create(VectorView<BoundUniform> p_uniforms, ShaderID p_shader, uint32_t p_set_index, int p_linear_pool_index) {
 	// Pre-bookkeep.
 	UniformSetInfo *uniform_set_info = VersatileResource::allocate<UniformSetInfo>(resources_allocator);
@@ -3645,7 +3709,8 @@ RDD::UniformSetID RenderingDeviceDriverD3D12::uniform_set_create(VectorView<Boun
 					}
 
 					TextureInfo *texture_info = (TextureInfo *)uniform.ids[j + 1].id;
-					device->CreateShaderResourceView(texture_info->resource, &texture_info->view_descs.srv, get_cpu_handle(uniform_set_info->resource_descriptor_heap_alloc.cpu_handle, binding.resource_descriptor_offset + (j / 2), resource_descriptor_heap.increment_size));
+					const D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc = _srv_desc_as_array(texture_info->view_descs.srv);
+					device->CreateShaderResourceView(texture_info->resource, &srv_desc, get_cpu_handle(uniform_set_info->resource_descriptor_heap_alloc.cpu_handle, binding.resource_descriptor_offset + (j / 2), resource_descriptor_heap.increment_size));
 
 					NeededState &ns = resource_states[texture_info];
 					ns.shader_uniform_idx_mask |= ((uint64_t)1 << i);
@@ -3655,7 +3720,8 @@ RDD::UniformSetID RenderingDeviceDriverD3D12::uniform_set_create(VectorView<Boun
 			case UNIFORM_TYPE_TEXTURE: {
 				for (uint32_t j = 0; j < uniform.ids.size(); j++) {
 					TextureInfo *texture_info = (TextureInfo *)uniform.ids[j].id;
-					device->CreateShaderResourceView(texture_info->resource, &texture_info->view_descs.srv, get_cpu_handle(uniform_set_info->resource_descriptor_heap_alloc.cpu_handle, binding.resource_descriptor_offset + j, resource_descriptor_heap.increment_size));
+					const D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc = _srv_desc_as_array(texture_info->view_descs.srv);
+					device->CreateShaderResourceView(texture_info->resource, &srv_desc, get_cpu_handle(uniform_set_info->resource_descriptor_heap_alloc.cpu_handle, binding.resource_descriptor_offset + j, resource_descriptor_heap.increment_size));
 
 					NeededState &ns = resource_states[texture_info];
 					ns.shader_uniform_idx_mask |= ((uint64_t)1 << i);
@@ -3665,7 +3731,8 @@ RDD::UniformSetID RenderingDeviceDriverD3D12::uniform_set_create(VectorView<Boun
 			case UNIFORM_TYPE_IMAGE: {
 				for (uint32_t j = 0; j < uniform.ids.size(); j++) {
 					TextureInfo *texture_info = (TextureInfo *)uniform.ids[j].id;
-					device->CreateUnorderedAccessView(texture_info->resource, nullptr, &texture_info->view_descs.uav, get_cpu_handle(uniform_set_info->resource_descriptor_heap_alloc.cpu_handle, binding.resource_descriptor_offset + j, resource_descriptor_heap.increment_size));
+					const D3D12_UNORDERED_ACCESS_VIEW_DESC uav_desc = _uav_desc_as_array(texture_info->view_descs.uav);
+					device->CreateUnorderedAccessView(texture_info->resource, nullptr, &uav_desc, get_cpu_handle(uniform_set_info->resource_descriptor_heap_alloc.cpu_handle, binding.resource_descriptor_offset + j, resource_descriptor_heap.increment_size));
 
 					NeededState &ns = resource_states[texture_info];
 					ns.shader_uniform_idx_mask |= ((uint64_t)1 << i);
@@ -3759,7 +3826,8 @@ RDD::UniformSetID RenderingDeviceDriverD3D12::uniform_set_create(VectorView<Boun
 				for (uint32_t j = 0; j < uniform.ids.size(); j++) {
 					TextureInfo *texture_info = (TextureInfo *)uniform.ids[j].id;
 
-					device->CreateShaderResourceView(texture_info->resource, &texture_info->view_descs.srv, get_cpu_handle(uniform_set_info->resource_descriptor_heap_alloc.cpu_handle, binding.resource_descriptor_offset + j, resource_descriptor_heap.increment_size));
+					const D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc = _srv_desc_as_array(texture_info->view_descs.srv);
+					device->CreateShaderResourceView(texture_info->resource, &srv_desc, get_cpu_handle(uniform_set_info->resource_descriptor_heap_alloc.cpu_handle, binding.resource_descriptor_offset + j, resource_descriptor_heap.increment_size));
 
 					NeededState &ns = resource_states[texture_info];
 					ns.shader_uniform_idx_mask |= ((uint64_t)1 << i);
