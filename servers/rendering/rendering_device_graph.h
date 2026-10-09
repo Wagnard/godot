@@ -938,7 +938,16 @@ private:
 	LocalVector<DrawListReplay> parallel_replays;
 	bool parallel_split_draw_lists = false;
 	LocalVector<uint32_t> parallel_claimable_slices;
-	SafeNumeric<uint32_t> parallel_next_claim;
+	// Generation of the run in the high half, next claimable slice in the low half: a worker that starts after its
+	// run is over, or during a later one, claims nothing (its generation no longer matches).
+	std::atomic<uint64_t> parallel_claim = { 0 };
+	std::atomic<uint32_t> parallel_claimable_count = { 0 };
+	uint32_t parallel_generation = 0;
+	SafeNumeric<uint32_t> parallel_slices_done;
+	// The calling thread records whatever the workers have not claimed and waits for the claimed slices only, never
+	// for the group tasks: those may not start for a long time (every worker busy, or blocked on the RenderingDevice
+	// lock that the render thread holds while it waits for this replay). They are reaped once completed.
+	LocalVector<WorkerThreadPool::GroupID> parallel_groups;
 	// GODOT_PARALLEL_RECORDING_STATS: totals over the last frames, printed every 240 frames.
 	struct ParallelStats {
 		static constexpr uint32_t MAX_SLICES = 16;
@@ -1020,8 +1029,9 @@ private:
 	void _run_draw_list_part(RDD::CommandBufferID p_command_buffer, const RecordedDrawListCommand *p_draw_list_command, uint32_t p_from, uint32_t p_to, const ParallelSlice &p_slice);
 	void _run_parallel_slice(ParallelSlice &p_slice);
 	void _count_parallel_slice(ParallelSlice &p_slice);
-	void _run_parallel_slice_task(uint32_t p_index, void *p_userdata);
-	void _run_claimed_parallel_slices(bool p_calling_thread);
+	void _run_parallel_slice_task(uint32_t p_index, uint32_t p_generation);
+	void _run_claimed_parallel_slices(bool p_calling_thread, uint32_t p_generation);
+	void _release_parallel_groups(bool p_wait);
 	void _print_render_commands(const RecordedCommandSort *p_sorted_commands, uint32_t p_sorted_commands_count);
 	void _print_draw_list(const uint8_t *p_instruction_data, uint32_t p_instruction_data_size);
 	void _print_compute_list(const uint8_t *p_instruction_data, uint32_t p_instruction_data_size);

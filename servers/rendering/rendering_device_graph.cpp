@@ -31,6 +31,7 @@
 #include "rendering_device_graph.h"
 
 #include "core/os/os.h"
+#include "core/os/thread.h"
 #include "core/templates/hash_set.h"
 
 #define PRINT_RENDER_GRAPH 0
@@ -47,6 +48,8 @@ RenderingDeviceGraph::RenderingDeviceGraph() {
 }
 
 RenderingDeviceGraph::~RenderingDeviceGraph() {
+	// A worker task may still be pending; it must not run on a freed graph.
+	_release_parallel_groups(true);
 }
 
 String RenderingDeviceGraph::_usage_to_string(ResourceUsage p_usage) {
@@ -2003,18 +2006,33 @@ void RenderingDeviceGraph::_count_parallel_slice(ParallelSlice &p_slice) {
 	}
 }
 
-void RenderingDeviceGraph::_run_parallel_slice_task(uint32_t p_index, void *p_userdata) {
-	_run_claimed_parallel_slices(false);
+void RenderingDeviceGraph::_run_parallel_slice_task(uint32_t p_index, uint32_t p_generation) {
+	_run_claimed_parallel_slices(false, p_generation);
 }
 
-void RenderingDeviceGraph::_run_claimed_parallel_slices(bool p_calling_thread) {
+void RenderingDeviceGraph::_run_claimed_parallel_slices(bool p_calling_thread, uint32_t p_generation) {
 	// The slices that any thread may record go to whichever thread is free first.
-	uint32_t claim = parallel_next_claim.postincrement();
-	while (claim < parallel_claimable_slices.size()) {
-		ParallelSlice &slice = parallel_slices[parallel_claimable_slices[claim]];
+	uint64_t claim = parallel_claim.load(std::memory_order_acquire);
+	while (uint32_t(claim >> 32) == p_generation && uint32_t(claim) < parallel_claimable_count.load(std::memory_order_relaxed)) {
+		if (!parallel_claim.compare_exchange_weak(claim, claim + 1, std::memory_order_acq_rel, std::memory_order_acquire)) {
+			continue;
+		}
+		ParallelSlice &slice = parallel_slices[parallel_claimable_slices[uint32_t(claim)]];
 		slice.recorded_on_calling_thread = p_calling_thread;
 		_run_parallel_slice(slice);
-		claim = parallel_next_claim.postincrement();
+		parallel_slices_done.increment();
+		claim = parallel_claim.load(std::memory_order_acquire);
+	}
+}
+
+void RenderingDeviceGraph::_release_parallel_groups(bool p_wait) {
+	for (uint32_t i = 0; i < parallel_groups.size();) {
+		if (p_wait || WorkerThreadPool::get_singleton()->is_group_task_completed(parallel_groups[i])) {
+			WorkerThreadPool::get_singleton()->wait_for_group_task_completion(parallel_groups[i]);
+			parallel_groups.remove_at_unordered(i);
+		} else {
+			i++;
+		}
 	}
 }
 
@@ -3474,26 +3492,34 @@ void RenderingDeviceGraph::end(bool p_reorder_commands, bool p_full_barriers, RD
 					parallel_commands_sorted = commands_sorted.ptr();
 					parallel_commands_count = command_count;
 					parallel_full_barriers = p_full_barriers;
+
+					// Close the claims before touching the claimable slices: a worker of an earlier run still looking
+					// at them sees a generation that is not its own.
+					_release_parallel_groups(false);
+					parallel_generation++;
+					const uint64_t generation_bits = uint64_t(parallel_generation) << 32;
+					parallel_claim.store(generation_bits | 0xFFFFFFFF, std::memory_order_relaxed);
 					parallel_claimable_slices.clear();
 					for (uint32_t i = 0; i < parallel_slices.size(); i++) {
 						if (!parallel_slices[i].pinned_to_calling_thread) {
 							parallel_claimable_slices.push_back(i);
 						}
 					}
+					parallel_claimable_count.store(parallel_claimable_slices.size(), std::memory_order_relaxed);
+					parallel_slices_done.set(0);
+					parallel_claim.store(generation_bits, std::memory_order_release);
 
 					// Up to N - 1 workers; this thread is the N-th once its driver callbacks are recorded. When it has
 					// callbacks to record (a slice of their own, ~300 us with DLSS and DLSS-G), it would only take a whole
 					// slice after them and finish last: then N workers take the N slices.
-					parallel_next_claim.set(0);
 					const bool has_pinned_slices = parallel_claimable_slices.size() < parallel_slices.size();
 					const uint32_t worker_count = MIN(parallel_claimable_slices.size(), has_pinned_slices ? parallel_slice_count : parallel_slice_count - 1);
-					WorkerThreadPool::GroupID group_id = 0;
 					const bool use_workers = worker_count > 0;
 					if (parallel_stats) {
 						parallel_launch_usec = OS::get_singleton()->get_ticks_usec();
 					}
 					if (use_workers) {
-						group_id = WorkerThreadPool::get_singleton()->add_template_group_task(this, &RenderingDeviceGraph::_run_parallel_slice_task, (void *)nullptr, worker_count, worker_count, true, "RenderingDeviceGraph parallel recording");
+						parallel_groups.push_back(WorkerThreadPool::get_singleton()->add_template_group_task(this, &RenderingDeviceGraph::_run_parallel_slice_task, parallel_generation, worker_count, worker_count, true, "RenderingDeviceGraph parallel recording"));
 					}
 
 					const uint64_t calling_begin_usec = parallel_stats ? OS::get_singleton()->get_ticks_usec() : 0;
@@ -3504,11 +3530,13 @@ void RenderingDeviceGraph::end(bool p_reorder_commands, bool p_full_barriers, RD
 						}
 					}
 
-					_run_claimed_parallel_slices(true);
+					_run_claimed_parallel_slices(true, parallel_generation);
 
+					// Every slice is claimed by now; wait for those the workers are still recording.
 					const uint64_t wait_begin_usec = parallel_stats ? OS::get_singleton()->get_ticks_usec() : 0;
-					if (use_workers) {
-						WorkerThreadPool::get_singleton()->wait_for_group_task_completion(group_id);
+					const uint32_t claimable_count = parallel_claimable_slices.size();
+					while (parallel_slices_done.get() < claimable_count) {
+						Thread::yield();
 					}
 
 					if (parallel_stats) {
