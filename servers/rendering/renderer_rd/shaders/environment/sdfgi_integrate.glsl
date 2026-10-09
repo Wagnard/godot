@@ -422,7 +422,18 @@ void main() {
 		vec3 m = sh.rgb * c[i] * 4.0;
 
 		irradiance += m * l_mult[i];
-		radiance += m;
+	}
+
+	// The radiance has a loop of its own. Summed in the irradiance's loop (`radiance += m;`), Intel's shader compiler
+	// (Arc B580, Vulkan and D3D12) returned it 256 times too large: the specular probe layers saturated and every
+	// surface of medium roughness reflected white. Same operations in the same order, so other GPUs are unchanged.
+	for (uint i = 0; i < SH_SIZE; i++) {
+		ivec2 average_pos = sh_pos + ivec2(0, i);
+		ivec4 average = imageLoad(lightprobe_average_texture, average_pos);
+
+		vec4 sh = (vec4(average) / float(params.history_size)) / float(1 << HISTORY_BITS);
+
+		radiance += sh.rgb * c[i] * 4.0;
 	}
 
 	//encode RGBE9995 for the final texture
