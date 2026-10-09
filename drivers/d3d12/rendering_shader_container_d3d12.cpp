@@ -478,6 +478,122 @@ static bool _declare_resources_as_arrays(nir_shader *p_shader) {
 	return true;
 }
 
+// Moves the constant arrays a shader indexes at run time out of the invocation, into global constants of the DXIL
+// module: what DXC does with a `static const` array. glslang copies a constant array into a local one before every
+// dynamic read of it, and nir_to_dxil keeps that local array (an `alloca`): SSAO and SSIL refill their 32-entry
+// `sample_pattern` (128 floats) at each tap. Intel's compiler puts such arrays in scratch memory; on an Arc B580 at
+// 1080p, SSAO and SSIL took ten times their Vulkan time (SSIL 2.8 ms against 0.25).
+// A local array qualifies when it is only read and stored through direct element derefs, and every store to an element
+// writes the same constant: a read then sees that constant, or reads an element never written, which is undefined
+// anyway. nir_opt_large_constants() does not take these arrays: they are filled in more than one block (once per
+// inlined call), and nir_to_dxil cannot read the constant data it produces.
+static bool _move_constant_arrays_to_globals(nir_shader *p_shader) {
+	nir_function_impl *impl = nir_shader_get_entrypoint(p_shader);
+
+	struct ConstantArray {
+		nir_constant *initializer = nullptr;
+		LocalVector<bool> written;
+		bool constant = true;
+		bool read = false;
+	};
+	HashMap<nir_variable *, ConstantArray> arrays;
+	nir_foreach_function_temp_variable(var, impl) {
+		if (!glsl_type_is_array(var->type) || !glsl_type_is_scalar(glsl_get_array_element(var->type)) || glsl_get_bit_size(glsl_get_array_element(var->type)) != 32) {
+			continue;
+		}
+		const uint32_t length = glsl_get_length(var->type);
+		ConstantArray array;
+		array.initializer = rzalloc(p_shader, nir_constant);
+		array.initializer->num_elements = length;
+		array.initializer->elements = rzalloc_array(p_shader, nir_constant *, length);
+		for (uint32_t i = 0; i < length; i++) {
+			array.initializer->elements[i] = rzalloc(p_shader, nir_constant);
+		}
+		array.written.resize_initialized(length);
+		arrays.insert(var, array);
+	}
+	if (arrays.is_empty()) {
+		return false;
+	}
+
+	// The element indices and stored values are only constants once these have run.
+	nir_copy_prop(p_shader);
+	nir_opt_constant_folding(p_shader);
+	nir_opt_dce(p_shader);
+
+	nir_foreach_block(block, impl) {
+		nir_foreach_instr(instr, block) {
+			if (instr->type == nir_instr_type_deref) {
+				nir_deref_instr *deref = nir_instr_as_deref(instr);
+				if (deref->deref_type == nir_deref_type_var && arrays.has(deref->var) && nir_deref_instr_has_complex_use(deref, nir_deref_instr_has_complex_use_options(0))) {
+					arrays[deref->var].constant = false;
+				}
+				continue;
+			}
+			if (instr->type != nir_instr_type_intrinsic) {
+				continue;
+			}
+			nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+			for (uint32_t i = 0; i < nir_intrinsic_infos[intr->intrinsic].num_srcs; i++) {
+				nir_deref_instr *deref = nir_src_as_deref(intr->src[i]);
+				ConstantArray *array = deref ? arrays.getptr(nir_deref_instr_get_variable(deref)) : nullptr;
+				if (!array) {
+					continue;
+				}
+				if (intr->intrinsic == nir_intrinsic_load_deref) {
+					array->read = true;
+				} else if (intr->intrinsic == nir_intrinsic_store_deref && i == 0 && deref->deref_type == nir_deref_type_array && nir_src_is_const(deref->arr.index) && nir_src_is_const(intr->src[1])) {
+					const uint64_t index = nir_src_as_uint(deref->arr.index);
+					const uint32_t value = uint32_t(nir_src_as_uint(intr->src[1]));
+					if (index >= array->written.size() || (array->written[index] && array->initializer->elements[index]->values[0].u32 != value)) {
+						array->constant = false;
+					} else {
+						array->written[index] = true;
+						array->initializer->elements[index]->values[0].u32 = value;
+					}
+				} else {
+					array->constant = false;
+				}
+			}
+		}
+	}
+
+	bool changed = false;
+	for (KeyValue<nir_variable *, ConstantArray> &E : arrays) {
+		if (!E.value.constant || !E.value.read) {
+			continue;
+		}
+		nir_variable *var = E.key;
+		exec_node_remove(&var->node);
+		var->data.mode = nir_var_mem_constant;
+		var->constant_initializer = E.value.initializer;
+		nir_shader_add_variable(p_shader, var);
+		changed = true;
+	}
+	if (!changed) {
+		return false;
+	}
+
+	nir_foreach_block(block, impl) {
+		nir_foreach_instr_safe(instr, block) {
+			if (instr->type != nir_instr_type_intrinsic) {
+				continue;
+			}
+			nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+			if (intr->intrinsic == nir_intrinsic_store_deref) {
+				nir_variable *var = nir_deref_instr_get_variable(nir_src_as_deref(intr->src[0]));
+				if (var && var->data.mode == nir_var_mem_constant) {
+					nir_instr_remove(instr);
+				}
+			}
+		}
+	}
+	nir_progress(true, impl, nir_metadata_control_flow);
+	nir_fixup_deref_modes(p_shader);
+	nir_opt_dce(p_shader);
+	return true;
+}
+
 bool RenderingShaderContainerD3D12::_convert_spirv_to_nir(Span<ReflectShaderStage> p_spirv, const nir_shader_compiler_options *p_compiler_options, HashMap<int, nir_shader *> &r_stages_nir_shaders, Vector<RenderingDeviceCommons::ShaderStage> &r_stages, BitField<RenderingDeviceCommons::ShaderStage> &r_stages_processed) {
 	r_stages_processed.clear();
 
@@ -644,6 +760,7 @@ bool RenderingShaderContainerD3D12::_convert_nir_to_dxil(const HashMap<int, nir_
 		}
 
 		_declare_resources_as_arrays(it.value);
+		_move_constant_arrays_to_globals(it.value);
 
 		blob dxil_blob = {};
 		bool ok = nir_to_dxil(it.value, &nir_to_dxil_options, &logger, &dxil_blob);
