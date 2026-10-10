@@ -1793,7 +1793,8 @@ void GI::SDFGI::debug_probes(RID p_framebuffer, const uint32_t p_view_count, con
 		gi->sdfgi_debug_probe_dir = Vector3();
 	}
 
-	if (gi->sdfgi_debug_probe_enabled) {
+	// The occlusion around the selected probe, not computed without occlusion (render_region()).
+	if (gi->sdfgi_debug_probe_enabled && uses_occlusion) {
 		uint32_t cascade = 0;
 		uint32_t probe_cells = (cascade_size / SDFGI::PROBE_DIVISOR);
 		Vector3i probe_from = cascades[cascade].position / probe_cells;
@@ -2112,6 +2113,11 @@ void GI::SDFGI::render_region(Ref<RenderSceneBuffersRD> p_render_buffers, int p_
 
 		push_constant.grid_size = cascade_size;
 		push_constant.cascade = cascade;
+		// Without occlusion nothing reads it: gi.glsl, the SDFGI direct light, the volumetric fog and the scene shaders
+		// all test use_occlusion first, and turning it on recreates SDFGI (sdfgi_update()). Its passes are skipped: on an
+		// Arc B580 the occlusion pass was half of each cascade scroll on D3D12 and 45 % on Vulkan. Only the SDFGI probes
+		// debug view reads the occlusion unconditionally.
+		push_constant.store_occlusion = uses_occlusion ? 1 : 0;
 
 		if (cascades[cascade].dirty_regions != SDFGI::Cascade::DIRTY_ALL) {
 			RD::get_singleton()->buffer_copy(cascades[cascade].solid_cell_dispatch_buffer_storage, cascades[cascade].solid_cell_dispatch_buffer_call, 0, 0, sizeof(uint32_t) * 4);
@@ -2126,17 +2132,19 @@ void GI::SDFGI::render_region(Ref<RenderSceneBuffersRD> p_render_buffers, int p_
 			RD::get_singleton()->compute_list_dispatch_indirect(compute_list, cascades[cascade].solid_cell_dispatch_buffer_call, 0);
 			// no barrier do all together
 
-			RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, gi->sdfgi_shader.preprocess_pipeline[SDFGIShader::PRE_PROCESS_SCROLL_OCCLUSION].get_rid());
-			RD::get_singleton()->compute_list_bind_uniform_set(compute_list, cascades[cascade].scroll_occlusion_uniform_set, 0);
-
 			Vector3i dirty = cascades[cascade].dirty_regions;
-			Vector3i groups;
-			groups.x = cascade_size - Math::abs(dirty.x);
-			groups.y = cascade_size - Math::abs(dirty.y);
-			groups.z = cascade_size - Math::abs(dirty.z);
+			if (uses_occlusion) {
+				RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, gi->sdfgi_shader.preprocess_pipeline[SDFGIShader::PRE_PROCESS_SCROLL_OCCLUSION].get_rid());
+				RD::get_singleton()->compute_list_bind_uniform_set(compute_list, cascades[cascade].scroll_occlusion_uniform_set, 0);
 
-			RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(SDFGIShader::PreprocessPushConstant));
-			RD::get_singleton()->compute_list_dispatch_threads(compute_list, groups.x, groups.y, groups.z);
+				Vector3i groups;
+				groups.x = cascade_size - Math::abs(dirty.x);
+				groups.y = cascade_size - Math::abs(dirty.y);
+				groups.z = cascade_size - Math::abs(dirty.z);
+
+				RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(SDFGIShader::PreprocessPushConstant));
+				RD::get_singleton()->compute_list_dispatch_threads(compute_list, groups.x, groups.y, groups.z);
+			}
 
 			//no barrier, continue together
 
@@ -2341,7 +2349,7 @@ void GI::SDFGI::render_region(Ref<RenderSceneBuffersRD> p_render_buffers, int p_
 		RENDER_TIMESTAMP("SDFGI Occlusion");
 
 		// occlusion
-		{
+		if (uses_occlusion) {
 			uint32_t probe_size = cascade_size / SDFGI::PROBE_DIVISOR;
 			Vector3i probe_global_pos = cascades[cascade].position / probe_size;
 

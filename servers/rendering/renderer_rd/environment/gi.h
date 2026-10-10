@@ -289,7 +289,7 @@ private:
 			int32_t half_size;
 			uint32_t occlusion_index;
 			int32_t cascade;
-			uint32_t pad;
+			uint32_t store_occlusion; // MODE_STORE packs the occlusion only when this SDFGI uses it.
 		};
 
 		SdfgiPreprocessShaderRD preprocess;

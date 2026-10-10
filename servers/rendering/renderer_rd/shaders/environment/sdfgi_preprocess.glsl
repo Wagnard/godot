@@ -171,7 +171,7 @@ layout(push_constant, std430) uniform Params {
 	bool half_size;
 	uint occlusion_index;
 	int cascade;
-	uint pad;
+	uint store_occlusion;
 }
 params;
 
@@ -974,13 +974,13 @@ void main() {
 
 	// STORE OCCLUSION
 
-	uint occlusion = 0;
-	const uint occlusion_shift[8] = uint[](12, 8, 4, 0, 28, 24, 20, 16);
-	for (int i = 0; i < 8; i++) {
-		float occ = texelFetch(src_occlusion[i], pos, 0).r;
-		occlusion |= uint(clamp(occ * 15.0, 0.0, 15.0)) << occlusion_shift[i];
-	}
-	{
+	if (params.store_occlusion != 0) {
+		uint occlusion = 0;
+		const uint occlusion_shift[8] = uint[](12, 8, 4, 0, 28, 24, 20, 16);
+		for (int i = 0; i < 8; i++) {
+			float occ = texelFetch(src_occlusion[i], pos, 0).r;
+			occlusion |= uint(clamp(occ * 15.0, 0.0, 15.0)) << occlusion_shift[i];
+		}
 		ivec3 occ_pos = pos;
 		occ_pos.z += params.cascade * params.grid_size;
 		imageStore(dst_occlusion, occ_pos, uvec4(occlusion & 0xFFFF));
