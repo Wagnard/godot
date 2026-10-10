@@ -362,10 +362,8 @@ protected:
 		uint32_t helpers_woken = 0;
 	} render_list_split_stats;
 
-	// GODOT_LIST_STABILITY_STATS=1 prints every 240 frames how much of each sorted list matches the same list in the
-	// previous frame (phase 0 of INCREMENTAL-CACHE-STUDY.md, statistics only): elements at the same position with the
-	// same sort keys, shifted or reordered in the list, with other keys, entered and left, and those whose instance moved. A list is
-	// the same from one frame to the next by view (main lists) or by light and pass (shadow passes).
+	// GODOT_LIST_STABILITY_STATS=1 prints every 240 frames how much of each sorted list matches the same list the last
+	// time it was drawn (by view for the main lists, by light and pass for shadow passes). Statistics only.
 	enum ListStabilityCategory {
 		LIST_STABILITY_OPAQUE,
 		LIST_STABILITY_MOTION,
@@ -551,6 +549,16 @@ protected:
 		static_assert(std::is_trivially_destructible_v<InstanceData>);
 		static_assert(std::is_trivially_constructible_v<InstanceData>);
 
+		// Per drawn element, in sorted order: the data that depends on the pass, and the slots holding the rest.
+		// Matches ElementData in scene_forward_clustered_inc.glsl.
+		struct ElementData {
+			uint32_t instance_slot;
+			uint32_t surface_slot;
+			uint32_t flags;
+			uint32_t gi_offset;
+		};
+		static_assert(sizeof(ElementData) == 16);
+
 		UBO ubo;
 
 		LocalVector<RID> uniform_buffers;
@@ -565,7 +573,7 @@ protected:
 		RID lightmap_buffer;
 
 		MultiUmaBuffer<1u> instance_buffer[RENDER_LIST_MAX] = { MultiUmaBuffer<1u>("RENDER_LIST_OPAQUE"), MultiUmaBuffer<1u>("RENDER_LIST_MOTION"), MultiUmaBuffer<1u>("RENDER_LIST_ALPHA"), MultiUmaBuffer<1u>("RENDER_LIST_SECONDARY") };
-		InstanceData *curr_gpu_ptr[RENDER_LIST_MAX] = {};
+		ElementData *curr_gpu_ptr[RENDER_LIST_MAX] = {};
 
 		LightmapCaptureData *lightmap_captures = nullptr;
 		uint32_t max_lightmap_captures;
@@ -710,7 +718,10 @@ protected:
 
 	void _fill_instance_data_range(RenderListType p_render_list, uint32_t p_offset, uint32_t p_from, uint32_t p_to);
 	void _fill_instance_data_part(uint32_t p_part);
+#ifdef DEBUG_ENABLED
+	// The record the scene shaders used to read per element, built only to check the slots.
 	_FORCE_INLINE_ void _store_instance_data(const GeometryInstanceForwardClustered *p_inst, const GeometryInstanceSurfaceDataCache *p_surface, uint32_t p_flags, uint32_t p_gi_offset, SceneState::InstanceData *r_instance_data);
+#endif
 
 	HashMap<Size2i, RID> sdfgi_framebuffer_size_cache;
 
@@ -869,10 +880,8 @@ protected:
 		void age_out_motion(uint64_t p_frame);
 	};
 
-	// Phase A of INCREMENTAL-CACHE-PHASE-A-PLAN.md, step 1: the part of InstanceData that belongs to the geometry
-	// instance (not to the mesh surface or to the pass) kept in one place per instance, rewritten only when the instance
-	// changes. Nothing reads it yet. GODOT_INSTANCE_SLOTS_CHECK=1 compares every element written the per-frame way with
-	// its instance's place and prints the differences every 240 frames: a difference is a change no rule marked.
+	// Data that belongs to the geometry instance, one slot per instance, rewritten only when it changes. Matches
+	// InstanceSlotData in scene_forward_clustered_inc.glsl.
 	struct InstanceSlotData {
 		float transform[12];
 		float prev_transform[12];
@@ -893,28 +902,65 @@ protected:
 		LocalVector<uint32_t> dirty;
 		SpinLock dirty_lock;
 
+#ifdef DEBUG_ENABLED
+		// GODOT_INSTANCE_SLOTS_CHECK=1: every element is also built the per-frame way (InstanceData) and compared
+		// with its slots; a difference is a change that marked nothing. Reported every 240 frames.
 		bool check = false;
 		uint64_t frame = 0;
 		uint32_t frames = 0;
-		uint64_t written = 0;
+		uint64_t slots_written = 0;
 		SafeNumeric<uint64_t> checked;
 		SafeNumeric<uint64_t> mismatches;
 		Mutex first_mismatch_mutex;
 		String first_mismatch;
+#endif
 	} instance_slots;
 
-	// Step 2: the part of InstanceData that belongs to the mesh surface (compressed AABB, UV scale), one place per
-	// surface cache, written when the cache is built (a mesh change rebuilds the caches through _mark_dirty()).
+	// Data that belongs to the mesh surface, one slot per surface cache, written when the cache is built (a mesh change
+	// rebuilds the caches). Matches SurfaceSlotData in scene_forward_clustered_inc.glsl.
 	struct SurfaceSlotData {
 		float compressed_aabb_position[4];
 		float compressed_aabb_size[4];
 		float uv_scale[4];
 	};
 
+#ifdef REAL_T_IS_DOUBLE
+	static_assert(sizeof(InstanceSlotData) == 160);
+#else
+	static_assert(sizeof(InstanceSlotData) == 128);
+#endif
+	static_assert(sizeof(SurfaceSlotData) == 48);
+
 	struct SurfaceSlots {
 		LocalVector<SurfaceSlotData> data;
 		LocalVector<uint32_t> free_slots;
+		LocalVector<uint32_t> dirty; // Built since the last upload.
 	} surface_slots;
+
+	// Slots on the GPU: a persistently mapped buffer with one copy per frame in flight. A copy is brought up to date
+	// with the slots written since it was last mapped. Mapped once per frame, by the first list fill, before any draw
+	// of the frame is recorded.
+	struct SlotUploadBuffer {
+		uint32_t slot_size = 0;
+		RID buffer;
+		uint32_t capacity = 0;
+		uint8_t *mapped = nullptr;
+		uint64_t mapped_frame = UINT64_MAX;
+		LocalVector<LocalVector<uint32_t>> written; // Slots written in each of the last maps (one per copy).
+		uint32_t map_index = 0;
+		uint32_t full_writes = 0; // Maps left that must write every slot (after the buffer was created or grown).
+
+		void ensure(uint32_t p_slot_count);
+		void begin_frame(uint32_t p_slot_count, const uint8_t *p_slots, uint64_t p_frame);
+		void write(uint32_t p_slot, const uint8_t *p_slots);
+		void free();
+	};
+	SlotUploadBuffer instance_slot_buffer;
+	SlotUploadBuffer surface_slot_buffer;
+	LocalVector<uint32_t> instance_slots_written; // Scratch of _instance_slots_flush().
+
+	void _slot_buffers_upload();
+	void _slot_buffers_append_uniforms(LocalVector<RD::Uniform> &r_uniforms);
 
 	void _surface_slot_alloc(GeometryInstanceSurfaceDataCache *p_surface);
 	void _surface_slot_free(GeometryInstanceSurfaceDataCache *p_surface);
@@ -923,7 +969,9 @@ protected:
 	void _instance_slot_free(GeometryInstanceForwardClustered *p_instance);
 	void _instance_slots_flush();
 	static void _instance_slot_compute(const GeometryInstanceForwardClustered *p_instance, InstanceSlotData &r_data);
+#ifdef DEBUG_ENABLED
 	void _instance_slot_check(const GeometryInstanceForwardClustered *p_instance, const GeometryInstanceSurfaceDataCache *p_surface, const SceneState::InstanceData &p_data);
+#endif
 
 	// These are not used in the Forward+ path, it has different light clustering tech.
 	virtual uint32_t get_max_lights_total() override { return 0; }
@@ -1001,11 +1049,9 @@ protected:
 
 	/* Render List */
 
-	// Surfaces with equal sort keys (the same mesh and material: identical units), or equal priority and depth in the
-	// alpha list, are ordered by address, so a list that holds the same surfaces sorts the same way every frame.
-	// SortArray is not stable: it reordered 17 % of Solfarer's opaque list every frame with nothing moving (list
-	// stability counter). Equal keys stay contiguous, so instancing is unchanged. GODOT_STABLE_SORT=0 leaves ties
-	// unordered as before.
+	// Ties (equal sort keys, or equal priority and depth in the alpha list) are ordered by surface address, so the same
+	// surfaces sort the same way every frame; SortArray is not stable. Equal keys stay contiguous: instancing is
+	// unchanged. GODOT_STABLE_SORT=0 leaves ties unordered.
 	static inline bool sort_ties_by_surface = true;
 
 	struct RenderList {

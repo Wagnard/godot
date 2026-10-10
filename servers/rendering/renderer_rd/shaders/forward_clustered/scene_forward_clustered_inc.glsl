@@ -378,16 +378,27 @@ implementation_data_block;
 
 #define implementation_data implementation_data_block.data
 
-struct InstanceData {
-	mat3x4 transform;
-	vec4 compressed_aabb_position_pad; // Only .xyz is used. .w is padding.
-	vec4 compressed_aabb_size_pad; // Only .xyz is used. .w is padding.
-	vec4 uv_scale;
+// Per drawn element, in sorted order: the data that depends on the pass, and the slots of the instance and surface data,
+// which are only rewritten when they change.
+struct ElementData {
+	uint instance_slot;
+	uint surface_slot;
 	uint flags;
-	uint instance_uniforms_ofs; //base offset in global buffer for instance variables
 	uint gi_offset; //GI information when using lightmapping (VCT or lightmap index)
-	uint layer_mask;
+};
+
+layout(set = 1, binding = 2, std430) buffer restrict readonly ElementDataBuffer {
+	ElementData data[];
+}
+elements;
+
+struct InstanceSlotData {
+	mat3x4 transform;
 	mat3x4 prev_transform;
+	uint layer_mask;
+	uint instance_uniforms_ofs; //base offset in global buffer for instance variables
+	uint pad0;
+	uint pad1;
 	vec4 lightmap_uv_scale;
 #ifdef USE_DOUBLE_PRECISION
 	vec4 model_precision;
@@ -395,10 +406,39 @@ struct InstanceData {
 #endif
 };
 
-layout(set = 1, binding = 2, std430) buffer restrict readonly InstanceDataBuffer {
-	InstanceData data[];
+layout(set = 1, binding = 37, std430) buffer restrict readonly InstanceSlotBuffer {
+	InstanceSlotData data[];
 }
-instances;
+instance_slots;
+
+struct SurfaceSlotData {
+	vec4 compressed_aabb_position_pad; // Only .xyz is used. .w is padding.
+	vec4 compressed_aabb_size_pad; // Only .xyz is used. .w is padding.
+	vec4 uv_scale;
+};
+
+layout(set = 1, binding = 38, std430) buffer restrict readonly SurfaceSlotBuffer {
+	SurfaceSlotData data[];
+}
+surface_slots;
+
+// Cube-layered shadow passes keep the face in bits 29-31 of instance_index_interp; masked here for every reader,
+// including the generated instance uniform code.
+#define ELEMENT_DATA(m_index) elements.data[(m_index) & 0x1FFFFFFFu]
+#define instance_data_flags(m_index) ELEMENT_DATA(m_index).flags
+#define instance_data_gi_offset(m_index) ELEMENT_DATA(m_index).gi_offset
+#define instance_data_transform(m_index) instance_slots.data[ELEMENT_DATA(m_index).instance_slot].transform
+#define instance_data_prev_transform(m_index) instance_slots.data[ELEMENT_DATA(m_index).instance_slot].prev_transform
+#define instance_data_layer_mask(m_index) instance_slots.data[ELEMENT_DATA(m_index).instance_slot].layer_mask
+#define instance_data_instance_uniforms_ofs(m_index) instance_slots.data[ELEMENT_DATA(m_index).instance_slot].instance_uniforms_ofs
+#define instance_data_lightmap_uv_scale(m_index) instance_slots.data[ELEMENT_DATA(m_index).instance_slot].lightmap_uv_scale
+#define instance_data_model_precision(m_index) instance_slots.data[ELEMENT_DATA(m_index).instance_slot].model_precision
+#define instance_data_prev_model_precision(m_index) instance_slots.data[ELEMENT_DATA(m_index).instance_slot].prev_model_precision
+#define instance_data_compressed_aabb_position_pad(m_index) surface_slots.data[ELEMENT_DATA(m_index).surface_slot].compressed_aabb_position_pad
+#define instance_data_compressed_aabb_size_pad(m_index) surface_slots.data[ELEMENT_DATA(m_index).surface_slot].compressed_aabb_size_pad
+#define instance_data_uv_scale(m_index) surface_slots.data[ELEMENT_DATA(m_index).surface_slot].uv_scale
+
+#define INSTANCE_DATA_TRANSFORM(m_index) instance_data_transform(m_index)
 
 #ifdef USE_RADIANCE_OCTMAP_ARRAY
 

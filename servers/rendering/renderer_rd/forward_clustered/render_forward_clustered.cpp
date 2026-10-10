@@ -1140,10 +1140,10 @@ uint32_t RenderForwardClustered::_setup_environment(const RenderDataRD *p_render
 
 void RenderForwardClustered::SceneState::grow_instance_buffer(RenderListType p_render_list, uint32_t p_req_element_count, bool p_append) {
 	if (p_req_element_count > 0) {
-		if (instance_buffer[p_render_list].get_size(0u) < p_req_element_count * sizeof(SceneState::InstanceData)) {
+		if (instance_buffer[p_render_list].get_size(0u) < p_req_element_count * sizeof(SceneState::ElementData)) {
 			instance_buffer[p_render_list].uninit();
 			uint32_t new_size = Math::nearest_power_of_2_templated(MAX(uint64_t(INSTANCE_DATA_BUFFER_MIN_SIZE), p_req_element_count));
-			instance_buffer[p_render_list].set_storage_size(0u, new_size * sizeof(SceneState::InstanceData));
+			instance_buffer[p_render_list].set_storage_size(0u, new_size * sizeof(SceneState::ElementData));
 			curr_gpu_ptr[p_render_list] = nullptr;
 		}
 
@@ -1154,6 +1154,7 @@ void RenderForwardClustered::SceneState::grow_instance_buffer(RenderListType p_r
 	}
 }
 
+#ifdef DEBUG_ENABLED
 void RenderForwardClustered::_store_instance_data(const GeometryInstanceForwardClustered *p_inst, const GeometryInstanceSurfaceDataCache *p_surface, uint32_t p_flags, uint32_t p_gi_offset, SceneState::InstanceData *r_instance_data) {
 	if (likely(p_inst->store_transform_cache)) {
 		RendererRD::MaterialStorage::store_transform_transposed_3x4(p_inst->transform, r_instance_data->transform);
@@ -1196,9 +1197,10 @@ void RenderForwardClustered::_store_instance_data(const GeometryInstanceForwardC
 	r_instance_data->set_compressed_aabb(surface_aabb);
 	r_instance_data->set_uv_scale(uv_scale);
 }
+#endif
 
 void RenderForwardClustered::_instance_slot_compute(const GeometryInstanceForwardClustered *p_instance, InstanceSlotData &r_data) {
-	// The instance's share of _store_instance_data(), field for field.
+	// Same values as the instance fields of the per-element record (_store_instance_data()).
 	if (likely(p_instance->store_transform_cache)) {
 		RendererRD::MaterialStorage::store_transform_transposed_3x4(p_instance->transform, r_data.transform);
 		RendererRD::MaterialStorage::store_transform_transposed_3x4(p_instance->prev_transform, r_data.prev_transform);
@@ -1242,7 +1244,7 @@ void RenderForwardClustered::_surface_slot_alloc(GeometryInstanceSurfaceDataCach
 	}
 	p_surface->surface_slot = slot;
 
-	// The surface's share of _store_instance_data().
+	// Same values as the surface fields of the per-element record (_store_instance_data()).
 	AABB aabb = AABB(Vector3(0.0, 0.0, 0.0), Vector3(1.0, 1.0, 1.0));
 	Vector4 uv_scale = Vector4(0.0, 0.0, 0.0, 0.0);
 	RendererRD::MeshStorage *mesh_storage = RendererRD::MeshStorage::get_singleton();
@@ -1250,6 +1252,7 @@ void RenderForwardClustered::_surface_slot_alloc(GeometryInstanceSurfaceDataCach
 		aabb = mesh_storage->mesh_surface_get_aabb(p_surface->surface);
 		uv_scale = mesh_storage->mesh_surface_get_uv_scale(p_surface->surface);
 	}
+	slots.dirty.push_back(slot);
 	SurfaceSlotData &data = slots.data[slot];
 	data.compressed_aabb_position[0] = aabb.position.x;
 	data.compressed_aabb_position[1] = aabb.position.y;
@@ -1313,6 +1316,7 @@ void RenderForwardClustered::GeometryInstanceForwardClustered::_mark_instance_sl
 
 void RenderForwardClustered::_instance_slots_flush() {
 	InstanceSlots &slots = instance_slots;
+#ifdef DEBUG_ENABLED
 	if (slots.check) {
 		const uint64_t frame = RSG::rasterizer->get_frame_number();
 		if (frame != slots.frame) {
@@ -1321,18 +1325,17 @@ void RenderForwardClustered::_instance_slots_flush() {
 			if (slots.frames == 240) {
 				MutexLock lock(slots.first_mismatch_mutex);
 				print_line(vformat("Instance slots: %d in use, %.1f written per frame, %d surface slots; %.0f elements checked per frame, %d differences%s.",
-						slots.owners.size() - slots.free_slots.size(), slots.written / 240.0, surface_slots.data.size() - surface_slots.free_slots.size(), slots.checked.get() / 240.0, slots.mismatches.get(), slots.first_mismatch.is_empty() ? String() : " (first: " + slots.first_mismatch + ")"));
+						slots.owners.size() - slots.free_slots.size(), slots.slots_written / 240.0, surface_slots.data.size() - surface_slots.free_slots.size(), slots.checked.get() / 240.0, slots.mismatches.get(), slots.first_mismatch.is_empty() ? String() : " (first: " + slots.first_mismatch + ")"));
 				slots.frames = 0;
-				slots.written = 0;
+				slots.slots_written = 0;
 				slots.checked.set(0);
 				slots.mismatches.set(0);
 				slots.first_mismatch = String();
 			}
 		}
 	}
-	if (slots.dirty.is_empty()) {
-		return;
-	}
+#endif
+	instance_slots_written.clear();
 	for (uint32_t slot : slots.dirty) {
 		GeometryInstanceForwardClustered *instance = slots.owners[slot];
 		if (!instance || !instance->instance_slot_dirty) {
@@ -1340,11 +1343,92 @@ void RenderForwardClustered::_instance_slots_flush() {
 		}
 		_instance_slot_compute(instance, slots.data[slot]);
 		instance->instance_slot_dirty = false;
-		slots.written++;
+		instance_slots_written.push_back(slot);
+#ifdef DEBUG_ENABLED
+		slots.slots_written++;
+#endif
 	}
 	slots.dirty.clear();
+	_slot_buffers_upload();
 }
 
+void RenderForwardClustered::SlotUploadBuffer::ensure(uint32_t p_slot_count) {
+	if (buffer.is_valid() && capacity >= p_slot_count) {
+		return;
+	}
+	RenderingDevice *rd = RD::get_singleton();
+	if (buffer.is_valid()) {
+		rd->free_rid(buffer); // Freed once the frames using it are done.
+	}
+	capacity = Math::nearest_power_of_2_templated(MAX(1024u, p_slot_count));
+	buffer = rd->storage_buffer_create(capacity * slot_size, Vector<uint8_t>(), BitField<RenderingDevice::StorageBufferUsage>(), RD::BUFFER_CREATION_DYNAMIC_PERSISTENT_BIT);
+	written.resize(MAX(rd->get_frame_delay(), 1u));
+	for (LocalVector<uint32_t> &slots : written) {
+		slots.clear();
+	}
+	full_writes = written.size();
+	mapped_frame = UINT64_MAX;
+	mapped = nullptr;
+}
+
+void RenderForwardClustered::SlotUploadBuffer::begin_frame(uint32_t p_slot_count, const uint8_t *p_slots, uint64_t p_frame) {
+	ensure(p_slot_count);
+	if (mapped_frame == p_frame) {
+		return;
+	}
+	mapped = RD::get_singleton()->buffer_persistent_map_advance(buffer);
+	mapped_frame = p_frame;
+	map_index = (map_index + 1) % written.size();
+	if (full_writes > 0) {
+		memcpy(mapped, p_slots, size_t(p_slot_count) * slot_size);
+		full_writes--;
+	} else {
+		// This copy was last written written.size() maps ago: the slots written by the maps since then are stale here.
+		for (uint32_t i = 0; i < written.size(); i++) {
+			if (i == map_index) {
+				continue;
+			}
+			for (uint32_t slot : written[i]) {
+				if (slot < p_slot_count) {
+					memcpy(mapped + size_t(slot) * slot_size, p_slots + size_t(slot) * slot_size, slot_size);
+				}
+			}
+		}
+	}
+	written[map_index].clear();
+}
+
+void RenderForwardClustered::SlotUploadBuffer::write(uint32_t p_slot, const uint8_t *p_slots) {
+	memcpy(mapped + size_t(p_slot) * slot_size, p_slots + size_t(p_slot) * slot_size, slot_size);
+	written[map_index].push_back(p_slot);
+}
+
+void RenderForwardClustered::SlotUploadBuffer::free() {
+	if (buffer.is_valid()) {
+		RD::get_singleton()->free_rid(buffer);
+		buffer = RID();
+	}
+	capacity = 0;
+}
+
+void RenderForwardClustered::_slot_buffers_upload() {
+	const uint64_t frame = RSG::rasterizer->get_frame_number();
+
+	const uint8_t *instance_data = reinterpret_cast<const uint8_t *>(instance_slots.data.ptr());
+	instance_slot_buffer.begin_frame(instance_slots.data.size(), instance_data, frame);
+	for (uint32_t slot : instance_slots_written) {
+		instance_slot_buffer.write(slot, instance_data);
+	}
+
+	const uint8_t *surface_data = reinterpret_cast<const uint8_t *>(surface_slots.data.ptr());
+	surface_slot_buffer.begin_frame(surface_slots.data.size(), surface_data, frame);
+	for (uint32_t slot : surface_slots.dirty) {
+		surface_slot_buffer.write(slot, surface_data);
+	}
+	surface_slots.dirty.clear();
+}
+
+#ifdef DEBUG_ENABLED
 void RenderForwardClustered::_instance_slot_check(const GeometryInstanceForwardClustered *p_instance, const GeometryInstanceSurfaceDataCache *p_surface, const SceneState::InstanceData &p_data) {
 	InstanceSlots &slots = instance_slots;
 	slots.checked.increment();
@@ -1384,6 +1468,7 @@ void RenderForwardClustered::_instance_slot_check(const GeometryInstanceForwardC
 		print_line("Instance slots: difference in frame " + itos(RSG::rasterizer->get_frame_number()) + ": " + slots.first_mismatch);
 	}
 }
+#endif
 
 void RenderForwardClustered::_fill_instance_data(RenderListType p_render_list, int *p_render_info, uint32_t p_offset, int32_t p_max_elements, bool p_update_buffer) {
 	_instance_slots_flush();
@@ -1397,7 +1482,7 @@ void RenderForwardClustered::_fill_instance_data(RenderListType p_render_list, i
 	scene_state.grow_instance_buffer(p_render_list, p_offset + element_total, p_offset != 0u);
 	if (!scene_state.curr_gpu_ptr[p_render_list] && element_total > 0u) {
 		// The old buffer was replaced for another larger one. We must start copying from scratch.
-		scene_state.curr_gpu_ptr[p_render_list] = reinterpret_cast<SceneState::InstanceData *>(scene_state.instance_buffer[p_render_list].map_raw_for_upload(0u));
+		scene_state.curr_gpu_ptr[p_render_list] = reinterpret_cast<SceneState::ElementData *>(scene_state.instance_buffer[p_render_list].map_raw_for_upload(0u));
 		if (p_offset > 0u) {
 			// The elements before p_offset belong to earlier calls (the previous shadow passes): only their instance data
 			// is written again. Their element info (instancing repeats) stays as it was computed for each of them;
@@ -1481,16 +1566,18 @@ void RenderForwardClustered::_fill_instance_data_range(RenderListType p_render_l
 		GeometryInstanceSurfaceDataCache *surface = rl->elements[i + p_offset];
 		GeometryInstanceForwardClustered *inst = surface->owner;
 
-		SceneState::InstanceData instance_data;
-		_store_instance_data(inst, surface, inst->flags_cache, inst->gi_offset_cache, &instance_data);
+#ifdef DEBUG_ENABLED
 		if (unlikely(instance_slots.check)) {
+			SceneState::InstanceData instance_data;
+			_store_instance_data(inst, surface, inst->flags_cache, inst->gi_offset_cache, &instance_data);
 			_instance_slot_check(inst, surface, instance_data);
 		}
+#endif
 
-		scene_state.curr_gpu_ptr[p_render_list][i + p_offset] = instance_data;
+		scene_state.curr_gpu_ptr[p_render_list][i + p_offset] = { inst->instance_slot, surface->surface_slot, inst->flags_cache, inst->gi_offset_cache };
 
 		// Same as the previous element: drawn with it, instanced. Multimeshes and mesh instances never are.
-		const bool cant_repeat = instance_data.flags & INSTANCE_DATA_FLAG_MULTIMESH || inst->mesh_instance.is_valid();
+		const bool cant_repeat = inst->flags_cache & INSTANCE_DATA_FLAG_MULTIMESH || inst->mesh_instance.is_valid();
 		bool repeat = false;
 		if (i > 0 && !cant_repeat) {
 			const GeometryInstanceSurfaceDataCache *prev_surface = rl->elements[i - 1 + p_offset];
@@ -3900,7 +3987,7 @@ void RenderForwardClustered::_render_shadow_build() {
 	// As _fill_instance_data() does for the first pass (offset 0): a new buffer for this frame, mapped if needed.
 	scene_state.grow_instance_buffer(RENDER_LIST_SECONDARY, element_total, false);
 	if (!scene_state.curr_gpu_ptr[RENDER_LIST_SECONDARY]) {
-		scene_state.curr_gpu_ptr[RENDER_LIST_SECONDARY] = reinterpret_cast<SceneState::InstanceData *>(scene_state.instance_buffer[RENDER_LIST_SECONDARY].map_raw_for_upload(0u));
+		scene_state.curr_gpu_ptr[RENDER_LIST_SECONDARY] = reinterpret_cast<SceneState::ElementData *>(scene_state.instance_buffer[RENDER_LIST_SECONDARY].map_raw_for_upload(0u));
 	}
 
 	// 1. Sort: each pass is a run, a large one is cut in runs of at least 1024 elements merged afterwards. Runs of
@@ -4207,19 +4294,21 @@ void RenderForwardClustered::_render_shadow_instance_part(uint32_t p_part) {
 
 void RenderForwardClustered::_render_shadow_instance_range(uint32_t p_from, uint32_t p_to) {
 	RenderList *rl = &render_list[RENDER_LIST_SECONDARY];
-	SceneState::InstanceData *gpu_ptr = scene_state.curr_gpu_ptr[RENDER_LIST_SECONDARY];
+	SceneState::ElementData *gpu_ptr = scene_state.curr_gpu_ptr[RENDER_LIST_SECONDARY];
 	for (uint32_t i = p_from; i < p_to; i++) {
 		const ShadowElement &element = shadow_elements[i];
 		GeometryInstanceSurfaceDataCache *surface = element.surface;
 		const GeometryInstanceForwardClustered *inst = surface->owner;
 		rl->elements[i] = surface;
 
-		SceneState::InstanceData instance_data;
-		_store_instance_data(inst, surface, element.flags, element.gi_offset, &instance_data);
+#ifdef DEBUG_ENABLED
 		if (unlikely(instance_slots.check)) {
+			SceneState::InstanceData instance_data;
+			_store_instance_data(inst, surface, element.flags, element.gi_offset, &instance_data);
 			_instance_slot_check(inst, surface, instance_data);
 		}
-		gpu_ptr[i] = instance_data;
+#endif
+		gpu_ptr[i] = { inst->instance_slot, surface->surface_slot, element.flags, element.gi_offset };
 
 		// Same as the previous element of the pass: drawn with it, instanced. Multimeshes and mesh instances never are.
 		const bool cant_repeat = element.flags & INSTANCE_DATA_FLAG_MULTIMESH || inst->mesh_instance.is_valid();
@@ -4875,6 +4964,25 @@ void RenderForwardClustered::_update_render_base_uniform_set() {
 	}
 }
 
+void RenderForwardClustered::_slot_buffers_append_uniforms(LocalVector<RD::Uniform> &r_uniforms) {
+	instance_slot_buffer.ensure(instance_slots.data.size());
+	surface_slot_buffer.ensure(surface_slots.data.size());
+	{
+		RD::Uniform u;
+		u.binding = 37;
+		u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER_DYNAMIC;
+		u.append_id(instance_slot_buffer.buffer);
+		r_uniforms.push_back(u);
+	}
+	{
+		RD::Uniform u;
+		u.binding = 38;
+		u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER_DYNAMIC;
+		u.append_id(surface_slot_buffer.buffer);
+		r_uniforms.push_back(u);
+	}
+}
+
 RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_render_list, const RenderDataRD *p_render_data, RID p_radiance_texture, const RendererRD::MaterialStorage::Samplers &p_samplers, uint32_t p_uniform_buffer_index, bool p_use_directional_shadow_atlas) {
 	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
 	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
@@ -4919,13 +5027,14 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 		if (scene_state.instance_buffer[p_render_list].get_size(0u) == 0u) {
 			// Any buffer will do since it's not used, so just create one.
 			// We can't use scene_shader.default_vec4_xform_buffer because it's not dynamic.
-			scene_state.instance_buffer[p_render_list].set_storage_size(0u, INSTANCE_DATA_BUFFER_MIN_SIZE * sizeof(SceneState::InstanceData));
+			scene_state.instance_buffer[p_render_list].set_storage_size(0u, INSTANCE_DATA_BUFFER_MIN_SIZE * sizeof(SceneState::ElementData));
 			scene_state.instance_buffer[p_render_list].prepare_for_upload();
 		}
 		RID instance_buffer = scene_state.instance_buffer[p_render_list]._get(0u);
 		u.append_id(instance_buffer);
 		uniforms.push_back(u);
 	}
+	_slot_buffers_append_uniforms(uniforms);
 	{
 		RID radiance_texture;
 		if (p_radiance_texture.is_valid()) {
@@ -5288,13 +5397,14 @@ RID RenderForwardClustered::_setup_sdfgi_render_pass_uniform_set(RID p_albedo_te
 		if (scene_state.instance_buffer[RENDER_LIST_SECONDARY].get_size(0u) == 0u) {
 			// Any buffer will do since it's not used, so just create one.
 			// We can't use scene_shader.default_vec4_xform_buffer because it's not dynamic.
-			scene_state.instance_buffer[RENDER_LIST_SECONDARY].set_storage_size(0u, INSTANCE_DATA_BUFFER_MIN_SIZE * sizeof(SceneState::InstanceData));
+			scene_state.instance_buffer[RENDER_LIST_SECONDARY].set_storage_size(0u, INSTANCE_DATA_BUFFER_MIN_SIZE * sizeof(SceneState::ElementData));
 			scene_state.instance_buffer[RENDER_LIST_SECONDARY].prepare_for_upload();
 		}
 		RID instance_buffer = scene_state.instance_buffer[RENDER_LIST_SECONDARY]._get(0u);
 		u.append_id(instance_buffer);
 		uniforms.push_back(u);
 	}
+	_slot_buffers_append_uniforms(uniforms);
 	{
 		// No radiance texture.
 		RID radiance_texture = texture_storage->texture_rd_get_default(is_using_radiance_octmap_array() ? RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_BLACK : RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_BLACK);
@@ -6757,7 +6867,11 @@ RenderForwardClustered::RenderForwardClustered() {
 		render_list_split_stats.enabled = OS::get_singleton()->get_environment("GODOT_PARALLEL_DRAW_LISTS_STATS") == "1";
 		list_stability.enabled = OS::get_singleton()->get_environment("GODOT_LIST_STABILITY_STATS") == "1";
 		sort_ties_by_surface = OS::get_singleton()->get_environment("GODOT_STABLE_SORT") != "0";
+#ifdef DEBUG_ENABLED
 		instance_slots.check = OS::get_singleton()->get_environment("GODOT_INSTANCE_SLOTS_CHECK") == "1";
+#endif
+		instance_slot_buffer.slot_size = sizeof(InstanceSlotData);
+		surface_slot_buffer.slot_size = sizeof(SurfaceSlotData);
 
 		// The render lists themselves are filled by up to 3 threads (memory bound: more threads only slow each other
 		// down), in chunks of at least 256 instances (1024 elements for the instance data). GODOT_PARALLEL_LIST_BUILD=N
@@ -6938,6 +7052,9 @@ RenderForwardClustered::~RenderForwardClustered() {
 
 	cube_shadow_instances.reset();
 	cube_shadow_instance_pool.reset();
+
+	instance_slot_buffer.free();
+	surface_slot_buffer.free();
 
 	if (ss_effects != nullptr) {
 		memdelete(ss_effects);
