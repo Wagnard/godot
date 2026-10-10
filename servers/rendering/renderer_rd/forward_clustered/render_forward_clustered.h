@@ -1192,6 +1192,9 @@ protected:
 	// Each sorted list keeps the order it had the last time it was sorted (main lists by view, shadow passes by light
 	// and pass). When it holds the same surfaces with the same sort inputs, that order is what sorting would give: every
 	// comparison breaks ties by surface, so there is only one. GODOT_SORT_REUSE=0 sorts every list again.
+	// A kept order is forgotten when its list is not sorted for a frame, and a freed surface cache stays allocated two
+	// frames (retired_surface_caches): every kept order then points to allocated surfaces, which a check may mark, and
+	// a freed surface's address cannot come back as another surface while an order still holds it.
 	struct SortReuseEntry {
 		const GeometryInstanceSurfaceDataCache *surface = nullptr;
 		uint64_t sort_key1 = 0;
@@ -1201,7 +1204,6 @@ protected:
 	struct SortReuseList {
 		LocalVector<SortReuseEntry> entries;
 		uint64_t frame = 0;
-		uint64_t surfaces_freed = 0; // surface_caches_freed when stored: its surfaces are all alive while it is unchanged.
 	};
 	struct SortReuse {
 		bool enabled = true;
@@ -1215,7 +1217,16 @@ protected:
 		LocalVector<ShadowElement> shadow_scratch;
 		LocalVector<uint8_t> shadow_pass_reused;
 	} sort_reuse;
-	uint64_t surface_caches_freed = 0;
+
+	struct RetiredSurfaceCache {
+		GeometryInstanceSurfaceDataCache *surface = nullptr;
+		uint64_t frame = 0;
+	};
+	LocalVector<RetiredSurfaceCache> retired_surface_caches; // In the order they were freed.
+	uint64_t surface_caches_freed = 0; // For the statistics.
+
+	void _surface_cache_free(GeometryInstanceSurfaceDataCache *p_surface);
+	void _sort_reuse_begin_frame();
 
 	static _FORCE_INLINE_ GeometryInstanceSurfaceDataCache *_sort_reuse_surface(GeometryInstanceSurfaceDataCache *p_surface) { return p_surface; }
 	static _FORCE_INLINE_ GeometryInstanceSurfaceDataCache *_sort_reuse_surface(const ShadowElement &p_element) { return p_element.surface; }

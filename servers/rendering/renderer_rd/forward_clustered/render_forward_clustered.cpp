@@ -318,6 +318,7 @@ bool RenderForwardClustered::free(RID p_rid) {
 
 void RenderForwardClustered::update() {
 	RendererSceneRenderRD::update();
+	_sort_reuse_begin_frame();
 	_update_global_pipeline_data_requirements_from_project();
 	_update_global_pipeline_data_requirements_from_light_storage();
 }
@@ -4349,30 +4350,58 @@ RenderForwardClustered::SortReuseEntry RenderForwardClustered::_sort_reuse_entry
 }
 
 RenderForwardClustered::SortReuseList *RenderForwardClustered::_sort_reuse_list(uint64_t p_key) {
+	return sort_reuse.lists.getptr(p_key);
+}
+
+void RenderForwardClustered::_surface_cache_free(GeometryInstanceSurfaceDataCache *p_surface) {
+	_surface_slot_free(p_surface);
+	p_surface->compilation_dirty_element.remove_from_list();
+	p_surface->compilation_all_element.remove_from_list();
+	retired_surface_caches.push_back({ p_surface, RSG::rasterizer->get_frame_number() });
+	surface_caches_freed++;
+}
+
+void RenderForwardClustered::_sort_reuse_begin_frame() {
 	const uint64_t frame = RSG::rasterizer->get_frame_number();
-	if (frame != sort_reuse.frame) {
-		sort_reuse.frame = frame;
-		// Lists not sorted for a second are forgotten (a light out of view, a closed viewport).
-		LocalVector<uint64_t> stale;
-		for (const KeyValue<uint64_t, SortReuseList> &E : sort_reuse.lists) {
-			if (E.value.frame + 60 < frame) {
-				stale.push_back(E.key);
-			}
-		}
-		for (uint64_t key : stale) {
-			sort_reuse.lists.erase(key);
+	if (frame == sort_reuse.frame) {
+		return;
+	}
+	sort_reuse.frame = frame;
+
+	// Orders not used last frame are forgotten (a light out of view, a viewport not drawn every frame). Every order
+	// left was stored or reused last frame, from surfaces still in their instances then.
+	LocalVector<uint64_t> stale;
+	for (const KeyValue<uint64_t, SortReuseList> &E : sort_reuse.lists) {
+		if (E.value.frame + 1 < frame) {
+			stale.push_back(E.key);
 		}
 	}
-	return sort_reuse.lists.getptr(p_key);
+	for (uint64_t key : stale) {
+		sort_reuse.lists.erase(key);
+	}
+
+	// So a surface freed two frames ago is in no order any more.
+	uint32_t released = 0;
+	while (released < retired_surface_caches.size() && retired_surface_caches[released].frame + 2 <= frame) {
+		geometry_instance_surface_alloc.free(retired_surface_caches[released].surface);
+		released++;
+	}
+	if (released > 0) {
+		const uint32_t remaining = retired_surface_caches.size() - released;
+		for (uint32_t i = 0; i < remaining; i++) {
+			retired_surface_caches[i] = retired_surface_caches[released + i];
+		}
+		retired_surface_caches.resize(remaining);
+	}
 }
 
 template <typename T>
 bool RenderForwardClustered::_sort_reuse_apply(uint64_t p_key, T *p_elements, uint32_t p_count, bool p_depth, LocalVector<T> &r_scratch) {
 	SortReuseList *list = _sort_reuse_list(p_key);
-	if (!list || list->entries.size() != p_count || p_count == 0u || list->surfaces_freed != surface_caches_freed) {
+	if (!list || list->entries.size() != p_count || p_count == 0u) {
 		return false;
 	}
-	// No surface was freed since the order was kept: each of its surfaces can be marked with its place.
+	// The kept surfaces are all allocated, even those freed since: each can be marked with its place.
 	sort_reuse.mark = sort_reuse.mark == UINT32_MAX ? 1u : sort_reuse.mark + 1u;
 	const uint32_t mark = sort_reuse.mark;
 	for (uint32_t i = 0; i < p_count; i++) {
@@ -4412,7 +4441,6 @@ void RenderForwardClustered::_sort_reuse_store(uint64_t p_key, const T *p_elemen
 		list->entries[i] = _sort_reuse_entry(p_elements[i], p_depth);
 	}
 	list->frame = sort_reuse.frame;
-	list->surfaces_freed = surface_caches_freed;
 }
 
 #ifdef DEBUG_ENABLED
@@ -5897,9 +5925,7 @@ void RenderForwardClustered::GeometryInstanceForwardClustered::_mark_dirty() {
 
 	while (surf) {
 		GeometryInstanceSurfaceDataCache *next = surf->next;
-		RenderForwardClustered::get_singleton()->_surface_slot_free(surf);
-		RenderForwardClustered::get_singleton()->geometry_instance_surface_alloc.free(surf);
-		RenderForwardClustered::get_singleton()->surface_caches_freed++;
+		RenderForwardClustered::get_singleton()->_surface_cache_free(surf);
 		surf = next;
 	}
 
@@ -6878,9 +6904,7 @@ void RenderForwardClustered::geometry_instance_free(RenderGeometryInstance *p_ge
 	GeometryInstanceSurfaceDataCache *surf = ginstance->surface_caches;
 	while (surf) {
 		GeometryInstanceSurfaceDataCache *next = surf->next;
-		_surface_slot_free(surf);
-		geometry_instance_surface_alloc.free(surf);
-		surface_caches_freed++;
+		_surface_cache_free(surf);
 		surf = next;
 	}
 	memdelete(ginstance->data);
@@ -7216,6 +7240,10 @@ RenderForwardClustered::~RenderForwardClustered() {
 
 	instance_slot_buffer.free();
 	surface_slot_buffer.free();
+	for (const RetiredSurfaceCache &retired : retired_surface_caches) {
+		geometry_instance_surface_alloc.free(retired.surface);
+	}
+	retired_surface_caches.clear();
 
 	if (ss_effects != nullptr) {
 		memdelete(ss_effects);
