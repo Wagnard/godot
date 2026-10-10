@@ -350,6 +350,14 @@ protected:
 		uint64_t shadow_elements = 0;
 		uint64_t shadow_usec = 0; // Sorting the shadow passes and writing their instance data, either path.
 		uint64_t shadow_draw_calls = 0; // Deferred builds only.
+		// Deferred shadow builds, step by step: copying each pass's elements as it is filled, checking for a kept order,
+		// sorting, keeping the new orders, writing the instance data, counting the instancing runs.
+		uint64_t shadow_copy_usec = 0;
+		uint64_t shadow_check_usec = 0;
+		uint64_t shadow_sort_usec = 0;
+		uint64_t shadow_store_usec = 0;
+		uint64_t shadow_instance_usec = 0;
+		uint64_t shadow_runs_usec = 0;
 		uint64_t sort_usec = 0; // Sorting the main view's opaque, motion and alpha lists, either path.
 		uint32_t sorted_lists = 0; // Main lists and deferred shadow passes, and how many of them kept their last order.
 		uint32_t reused_lists = 0;

@@ -810,6 +810,8 @@ uint32_t RenderForwardClustered::_render_list_get_split_count(const RenderListPa
 						st.split_lists / 240.0, st.splits / 240.0, st.split_elements / 240.0, st.split_usec / 240.0, st.split_wait_usec / 240.0, st.split_join_usec / 240.0, st.split_parts_usec / 240.0, st.split_start_usec / 240.0, st.shadow_parallel_passes / 240.0, st.shadow_parallel_usec / 240.0, st.serial_lists / 240.0, st.serial_elements / 240.0, st.serial_usec / 240.0));
 				print_line(vformat("List building, per frame: filling %.0f us, instance data %.0f us, %.1f of them on several threads; shadow sort + instance data %.0f us (%.1f deferred builds of %.1f passes, %.1f of %.1f non-empty ones in their last order, %.0f elements, %.0f draw calls); main lists sort %.0f us (%.1f of %.1f non-empty lists in their last order); %.1f surface caches freed.",
 						st.fill_usec / 240.0, st.instance_data_usec / 240.0, st.parallel_builds / 240.0, st.shadow_usec / 240.0, st.shadow_builds / 240.0, st.shadow_passes / 240.0, st.reused_shadow_passes / 240.0, st.sorted_shadow_passes / 240.0, st.shadow_elements / 240.0, st.shadow_draw_calls / 240.0, st.sort_usec / 240.0, st.reused_lists / 240.0, st.sorted_lists / 240.0, (surface_caches_freed - st.surface_caches_freed) / 240.0));
+				print_line(vformat("Shadow build, per frame: copying the elements %.0f us, checking for kept orders %.0f us, sorting %.0f us, keeping the orders %.0f us, instance data %.0f us, instancing runs %.0f us.",
+						st.shadow_copy_usec / 240.0, st.shadow_check_usec / 240.0, st.shadow_sort_usec / 240.0, st.shadow_store_usec / 240.0, st.shadow_instance_usec / 240.0, st.shadow_runs_usec / 240.0));
 				print_line(vformat("Parallel runs, per frame: %.1f runs, %.1f helpers woken, %.0f parts, %.0f of them on the calling thread, %.0f us of parts in total, %.0f us of wall time.",
 						st.runs / 240.0, st.helpers_woken / 240.0, st.run_parts.get() / 240.0, st.run_parts_on_caller.get() / 240.0, st.run_parts_usec.get() / 240.0, st.run_usec / 240.0));
 				render_list_split_stats.~RenderListSplitStats();
@@ -3929,6 +3931,9 @@ void RenderForwardClustered::_render_shadow_append(RID p_framebuffer, const Page
 		if (shadow_render_info) {
 			shadow_render_info[RSE::VIEWPORT_RENDER_INFO_OBJECTS_IN_FRAME] += render_list_size;
 		}
+		if (render_list_split_stats.enabled) {
+			render_list_split_stats.shadow_copy_usec += OS::get_singleton()->get_ticks_usec() - shadow_begin_usec;
+		}
 	} else {
 		render_list[RENDER_LIST_SECONDARY].sort_by_key_range(render_list_from, render_list_size);
 		_fill_instance_data(RENDER_LIST_SECONDARY, shadow_render_info, render_list_from, render_list_size, false);
@@ -3980,6 +3985,16 @@ void RenderForwardClustered::_render_shadow_build() {
 	}
 
 	const uint64_t begin_usec = render_list_split_stats.enabled ? OS::get_singleton()->get_ticks_usec() : 0;
+	uint64_t step_usec = begin_usec;
+	uint64_t statistics_usec = 0; // list_stability's own time, left out.
+	// Adds the time since the previous step to r_usec when the statistics are on.
+	auto step_done = [&](uint64_t &r_usec) {
+		if (render_list_split_stats.enabled) {
+			const uint64_t now = OS::get_singleton()->get_ticks_usec();
+			r_usec += now - step_usec;
+			step_usec = now;
+		}
+	};
 	const bool parallel = element_total >= list_build_min_instances;
 	rl->element_info.resize(element_total);
 	// As _fill_instance_data() does for the first pass (offset 0): a new buffer for this frame, mapped if needed.
@@ -3998,6 +4013,7 @@ void RenderForwardClustered::_render_shadow_build() {
 		const SceneState::ShadowPass &shadow_pass = scene_state.shadow_passes[i];
 		sort_reuse.shadow_pass_reused[i] = sort_reuse.enabled && _sort_reuse_apply(shadow_pass.list_key, shadow_elements.ptr() + shadow_pass.element_from, shadow_pass.element_count, false, sort_reuse.shadow_scratch);
 	}
+	step_done(render_list_split_stats.shadow_check_usec);
 	bool merges = false;
 	for (uint32_t pass = 0; pass < pass_count; pass++) {
 		const SceneState::ShadowPass &shadow_pass = scene_state.shadow_passes[pass];
@@ -4062,6 +4078,7 @@ void RenderForwardClustered::_render_shadow_build() {
 		}
 	}
 
+	step_done(render_list_split_stats.shadow_sort_usec);
 	for (uint32_t i = 0; i < pass_count; i++) {
 		const SceneState::ShadowPass &shadow_pass = scene_state.shadow_passes[i];
 		const ShadowElement *elements = shadow_elements.ptr() + shadow_pass.element_from;
@@ -4079,6 +4096,8 @@ void RenderForwardClustered::_render_shadow_build() {
 		}
 	}
 
+	step_done(render_list_split_stats.shadow_store_usec);
+
 	if (list_stability.enabled) {
 		for (const SceneState::ShadowPass &shadow_pass : scene_state.shadow_passes) {
 			list_stability.current.resize(shadow_pass.element_count);
@@ -4090,6 +4109,7 @@ void RenderForwardClustered::_render_shadow_build() {
 			_list_stability_compare(shadow_pass.list_key, shadow_pass.stability_category);
 		}
 	}
+	step_done(statistics_usec);
 
 	// 2. Instance data, element info and the marks for instancing, in ranges across all the passes.
 	shadow_repeats.resize(element_total);
@@ -4107,6 +4127,7 @@ void RenderForwardClustered::_render_shadow_build() {
 		_render_shadow_instance_range(0, element_total);
 	}
 
+	step_done(render_list_split_stats.shadow_instance_usec);
 	// 3. Runs of instanced elements and draw calls, pass by pass, as _fill_instance_data() counts them.
 	for (SceneState::ShadowPass &shadow_pass : scene_state.shadow_passes) {
 		RenderElementInfo *element_info = rl->element_info.ptr() + shadow_pass.element_from;
@@ -4136,8 +4157,9 @@ void RenderForwardClustered::_render_shadow_build() {
 		}
 	}
 
+	step_done(render_list_split_stats.shadow_runs_usec);
 	if (render_list_split_stats.enabled) {
-		render_list_split_stats.shadow_usec += OS::get_singleton()->get_ticks_usec() - begin_usec;
+		render_list_split_stats.shadow_usec += OS::get_singleton()->get_ticks_usec() - begin_usec - statistics_usec;
 		render_list_split_stats.shadow_passes += pass_count;
 		render_list_split_stats.shadow_elements += element_total;
 		render_list_split_stats.shadow_builds += 1;
