@@ -832,10 +832,16 @@ protected:
 		GeometryInstanceSurfaceDataCache *surface_caches = nullptr;
 		SelfList<GeometryInstanceForwardClustered> dirty_list_element;
 
+		uint32_t instance_slot = UINT32_MAX; // Its place in instance_slots.
+		bool instance_slot_dirty = false;
+
 		GeometryInstanceForwardClustered() :
 				dirty_list_element(this) {}
 
 		virtual void _mark_dirty() override;
+		void _mark_instance_slot_dirty();
+
+		virtual void set_layer_mask(uint32_t p_layer_mask) override;
 
 		virtual void set_transform(const Transform3D &p_transform, const AABB &p_aabb, const AABB &p_transformed_aabb) override;
 		virtual void reset_motion_vectors() override;
@@ -860,6 +866,46 @@ protected:
 
 		void age_out_motion(uint64_t p_frame);
 	};
+
+	// Phase A of INCREMENTAL-CACHE-PHASE-A-PLAN.md, step 1: the part of InstanceData that belongs to the geometry
+	// instance (not to the mesh surface or to the pass) kept in one place per instance, rewritten only when the instance
+	// changes. Nothing reads it yet. GODOT_INSTANCE_SLOTS_CHECK=1 compares every element written the per-frame way with
+	// its instance's place and prints the differences every 240 frames: a difference is a change no rule marked.
+	struct InstanceSlotData {
+		float transform[12];
+		float prev_transform[12];
+		uint32_t layer_mask;
+		uint32_t instance_uniforms_ofs;
+		uint32_t pad[2];
+		float lightmap_uv_scale[4];
+#ifdef REAL_T_IS_DOUBLE
+		float model_precision[4];
+		float prev_model_precision[4];
+#endif
+	};
+
+	struct InstanceSlots {
+		LocalVector<InstanceSlotData> data;
+		LocalVector<GeometryInstanceForwardClustered *> owners;
+		LocalVector<uint32_t> free_slots;
+		LocalVector<uint32_t> dirty;
+		SpinLock dirty_lock;
+
+		bool check = false;
+		uint64_t frame = 0;
+		uint32_t frames = 0;
+		uint64_t written = 0;
+		SafeNumeric<uint64_t> checked;
+		SafeNumeric<uint64_t> mismatches;
+		Mutex first_mismatch_mutex;
+		String first_mismatch;
+	} instance_slots;
+
+	void _instance_slot_alloc(GeometryInstanceForwardClustered *p_instance);
+	void _instance_slot_free(GeometryInstanceForwardClustered *p_instance);
+	void _instance_slots_flush();
+	static void _instance_slot_compute(const GeometryInstanceForwardClustered *p_instance, InstanceSlotData &r_data);
+	void _instance_slot_check(const GeometryInstanceForwardClustered *p_instance, const SceneState::InstanceData &p_data);
 
 	// These are not used in the Forward+ path, it has different light clustering tech.
 	virtual uint32_t get_max_lights_total() override { return 0; }

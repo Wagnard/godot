@@ -1197,7 +1197,143 @@ void RenderForwardClustered::_store_instance_data(const GeometryInstanceForwardC
 	r_instance_data->set_uv_scale(uv_scale);
 }
 
+void RenderForwardClustered::_instance_slot_compute(const GeometryInstanceForwardClustered *p_instance, InstanceSlotData &r_data) {
+	// The instance's share of _store_instance_data(), field for field.
+	if (likely(p_instance->store_transform_cache)) {
+		RendererRD::MaterialStorage::store_transform_transposed_3x4(p_instance->transform, r_data.transform);
+		RendererRD::MaterialStorage::store_transform_transposed_3x4(p_instance->prev_transform, r_data.prev_transform);
+#ifdef REAL_T_IS_DOUBLE
+		RendererRD::MaterialStorage::split_double(p_instance->transform.origin.x, &r_data.transform[3], &r_data.model_precision[0]);
+		RendererRD::MaterialStorage::split_double(p_instance->transform.origin.y, &r_data.transform[7], &r_data.model_precision[1]);
+		RendererRD::MaterialStorage::split_double(p_instance->transform.origin.z, &r_data.transform[11], &r_data.model_precision[2]);
+		RendererRD::MaterialStorage::split_double(p_instance->prev_transform.origin.x, &r_data.prev_transform[3], &r_data.prev_model_precision[0]);
+		RendererRD::MaterialStorage::split_double(p_instance->prev_transform.origin.y, &r_data.prev_transform[7], &r_data.prev_model_precision[1]);
+		RendererRD::MaterialStorage::split_double(p_instance->prev_transform.origin.z, &r_data.prev_transform[11], &r_data.prev_model_precision[2]);
+		r_data.model_precision[3] = 0.0f;
+		r_data.prev_model_precision[3] = 0.0f;
+#endif
+	} else {
+		RendererRD::MaterialStorage::store_transform_transposed_3x4(Transform3D(), r_data.transform);
+		RendererRD::MaterialStorage::store_transform_transposed_3x4(Transform3D(), r_data.prev_transform);
+#ifdef REAL_T_IS_DOUBLE
+		memset(r_data.model_precision, 0, sizeof(r_data.model_precision));
+		memset(r_data.prev_model_precision, 0, sizeof(r_data.prev_model_precision));
+#endif
+	}
+	r_data.layer_mask = p_instance->layer_mask;
+	r_data.instance_uniforms_ofs = uint32_t(p_instance->shader_uniforms_offset);
+	r_data.pad[0] = 0;
+	r_data.pad[1] = 0;
+	r_data.lightmap_uv_scale[0] = p_instance->lightmap_uv_scale.position.x;
+	r_data.lightmap_uv_scale[1] = p_instance->lightmap_uv_scale.position.y;
+	r_data.lightmap_uv_scale[2] = p_instance->lightmap_uv_scale.size.x;
+	r_data.lightmap_uv_scale[3] = p_instance->lightmap_uv_scale.size.y;
+}
+
+void RenderForwardClustered::_instance_slot_alloc(GeometryInstanceForwardClustered *p_instance) {
+	InstanceSlots &slots = instance_slots;
+	uint32_t slot;
+	if (!slots.free_slots.is_empty()) {
+		slot = slots.free_slots[slots.free_slots.size() - 1];
+		slots.free_slots.resize(slots.free_slots.size() - 1);
+	} else {
+		slot = slots.data.size();
+		slots.data.push_back(InstanceSlotData());
+		slots.owners.push_back(nullptr);
+	}
+	slots.owners[slot] = p_instance;
+	p_instance->instance_slot = slot;
+	p_instance->instance_slot_dirty = false;
+	p_instance->_mark_instance_slot_dirty();
+}
+
+void RenderForwardClustered::_instance_slot_free(GeometryInstanceForwardClustered *p_instance) {
+	if (p_instance->instance_slot == UINT32_MAX) {
+		return;
+	}
+	// It may still be listed as dirty: _instance_slots_flush() skips a slot without owner, or whose owner is not dirty.
+	instance_slots.owners[p_instance->instance_slot] = nullptr;
+	instance_slots.free_slots.push_back(p_instance->instance_slot);
+	p_instance->instance_slot = UINT32_MAX;
+}
+
+void RenderForwardClustered::GeometryInstanceForwardClustered::_mark_instance_slot_dirty() {
+	if (instance_slot_dirty || instance_slot == UINT32_MAX) {
+		return;
+	}
+	InstanceSlots &slots = RenderForwardClustered::get_singleton()->instance_slots;
+	slots.dirty_lock.lock();
+	instance_slot_dirty = true;
+	slots.dirty.push_back(instance_slot);
+	slots.dirty_lock.unlock();
+}
+
+void RenderForwardClustered::_instance_slots_flush() {
+	InstanceSlots &slots = instance_slots;
+	if (slots.check) {
+		const uint64_t frame = RSG::rasterizer->get_frame_number();
+		if (frame != slots.frame) {
+			slots.frame = frame;
+			slots.frames++;
+			if (slots.frames == 240) {
+				MutexLock lock(slots.first_mismatch_mutex);
+				print_line(vformat("Instance slots: %d in use, %.1f written per frame; %.0f elements checked per frame, %d differences%s.",
+						slots.owners.size() - slots.free_slots.size(), slots.written / 240.0, slots.checked.get() / 240.0, slots.mismatches.get(), slots.first_mismatch.is_empty() ? String() : " (first: " + slots.first_mismatch + ")"));
+				slots.frames = 0;
+				slots.written = 0;
+				slots.checked.set(0);
+				slots.mismatches.set(0);
+				slots.first_mismatch = String();
+			}
+		}
+	}
+	if (slots.dirty.is_empty()) {
+		return;
+	}
+	for (uint32_t slot : slots.dirty) {
+		GeometryInstanceForwardClustered *instance = slots.owners[slot];
+		if (!instance || !instance->instance_slot_dirty) {
+			continue;
+		}
+		_instance_slot_compute(instance, slots.data[slot]);
+		instance->instance_slot_dirty = false;
+		slots.written++;
+	}
+	slots.dirty.clear();
+}
+
+void RenderForwardClustered::_instance_slot_check(const GeometryInstanceForwardClustered *p_instance, const SceneState::InstanceData &p_data) {
+	InstanceSlots &slots = instance_slots;
+	slots.checked.increment();
+	if (p_instance->instance_slot == UINT32_MAX) {
+		return;
+	}
+	const InstanceSlotData &slot = slots.data[p_instance->instance_slot];
+	const char *field = nullptr;
+	if (memcmp(slot.transform, p_data.transform, sizeof(slot.transform)) != 0) {
+		field = "transform";
+	} else if (memcmp(slot.prev_transform, p_data.prev_transform, sizeof(slot.prev_transform)) != 0) {
+		field = "prev_transform";
+	} else if (slot.layer_mask != p_data.layer_mask) {
+		field = "layer_mask";
+	} else if (slot.instance_uniforms_ofs != p_data.instance_uniforms_ofs) {
+		field = "instance_uniforms_ofs";
+	} else if (memcmp(slot.lightmap_uv_scale, p_data.lightmap_uv_scale, sizeof(slot.lightmap_uv_scale)) != 0) {
+		field = "lightmap_uv_scale";
+#ifdef REAL_T_IS_DOUBLE
+	} else if (memcmp(slot.model_precision, p_data.model_precision, sizeof(float) * 3) != 0 || memcmp(slot.prev_model_precision, p_data.prev_model_precision, sizeof(float) * 3) != 0) {
+		field = "model_precision";
+#endif
+	}
+	if (field && slots.mismatches.increment() == 1) {
+		MutexLock lock(slots.first_mismatch_mutex);
+		slots.first_mismatch = vformat("%s, slot %d, base type %d, transform status %d, still marked dirty: %s", field, p_instance->instance_slot, int(p_instance->data->base_type), int(p_instance->transform_status), p_instance->instance_slot_dirty ? "yes" : "no");
+		print_line("Instance slots: difference in frame " + itos(RSG::rasterizer->get_frame_number()) + ": " + slots.first_mismatch);
+	}
+}
+
 void RenderForwardClustered::_fill_instance_data(RenderListType p_render_list, int *p_render_info, uint32_t p_offset, int32_t p_max_elements, bool p_update_buffer) {
+	_instance_slots_flush();
 	RenderList *rl = &render_list[p_render_list];
 	uint32_t element_total = p_max_elements >= 0 ? uint32_t(p_max_elements) : rl->elements.size();
 
@@ -1294,6 +1430,9 @@ void RenderForwardClustered::_fill_instance_data_range(RenderListType p_render_l
 
 		SceneState::InstanceData instance_data;
 		_store_instance_data(inst, surface, inst->flags_cache, inst->gi_offset_cache, &instance_data);
+		if (unlikely(instance_slots.check)) {
+			_instance_slot_check(inst, instance_data);
+		}
 
 		scene_state.curr_gpu_ptr[p_render_list][i + p_offset] = instance_data;
 
@@ -1335,6 +1474,7 @@ void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, con
 
 	RenderList *rl = &render_list[p_render_list];
 	_update_dirty_geometry_instances();
+	_instance_slots_flush();
 
 	if (!p_append) {
 		rl->clear();
@@ -3693,6 +3833,7 @@ void RenderForwardClustered::_render_shadow_append(RID p_framebuffer, const Page
 }
 
 void RenderForwardClustered::_render_shadow_build() {
+	_instance_slots_flush();
 	RenderList *rl = &render_list[RENDER_LIST_SECONDARY];
 	const uint32_t element_total = rl->elements.size();
 	const uint32_t pass_count = scene_state.shadow_passes.size();
@@ -4022,6 +4163,9 @@ void RenderForwardClustered::_render_shadow_instance_range(uint32_t p_from, uint
 
 		SceneState::InstanceData instance_data;
 		_store_instance_data(inst, surface, element.flags, element.gi_offset, &instance_data);
+		if (unlikely(instance_slots.check)) {
+			_instance_slot_check(inst, instance_data);
+		}
 		gpu_ptr[i] = instance_data;
 
 		// Same as the previous element of the pass: drawn with it, instanced. Multimeshes and mesh instances never are.
@@ -5829,6 +5973,10 @@ void RenderForwardClustered::_geometry_instance_update(RenderGeometryInstance *p
 		ginstance->data->dirty_dependencies = false;
 	}
 
+	// Everything _mark_dirty() rebuilds may change the instance's slot (store_transform_cache, lightmap UV scale,
+	// instance uniforms offset).
+	ginstance->_mark_instance_slot_dirty();
+
 	ginstance->dirty_list_element.remove_from_list();
 }
 
@@ -6237,6 +6385,7 @@ RenderGeometryInstance *RenderForwardClustered::geometry_instance_create(RID p_b
 	ginstance->data->dependency_tracker.changed_callback = _geometry_instance_dependency_changed;
 	ginstance->data->dependency_tracker.deleted_callback = _geometry_instance_dependency_deleted;
 
+	_instance_slot_alloc(ginstance);
 	ginstance->_mark_dirty();
 
 	return ginstance;
@@ -6278,11 +6427,19 @@ void RenderForwardClustered::GeometryInstanceForwardClustered::set_transform(con
 	for (GeometryInstanceSurfaceDataCache *surf = surface_caches; surf; surf = surf->next) {
 		surf->cached_final_transform_valid = false;
 	}
+
+	_mark_instance_slot_dirty();
 }
 
 void RenderForwardClustered::GeometryInstanceForwardClustered::reset_motion_vectors() {
 	prev_transform = transform;
 	transform_status = TransformStatus::TELEPORTED;
+	_mark_instance_slot_dirty();
+}
+
+void RenderForwardClustered::GeometryInstanceForwardClustered::set_layer_mask(uint32_t p_layer_mask) {
+	RenderGeometryInstanceBase::set_layer_mask(p_layer_mask);
+	_mark_instance_slot_dirty();
 }
 
 bool RenderForwardClustered::GeometryInstanceForwardClustered::get_motion_history(MotionHistory &r_history) const {
@@ -6304,6 +6461,7 @@ void RenderForwardClustered::GeometryInstanceForwardClustered::set_motion_histor
 	created_frame = p_history.created_frame;
 	last_aged_frame = p_history.last_aged_frame;
 	transform_status = TransformStatus(p_history.status);
+	_mark_instance_slot_dirty();
 }
 
 void RenderForwardClustered::GeometryInstanceForwardClustered::age_out_motion(uint64_t p_frame) {
@@ -6316,6 +6474,7 @@ void RenderForwardClustered::GeometryInstanceForwardClustered::age_out_motion(ui
 	if (transform_status != TransformStatus::NONE && p_frame > prev_transform_change_frame && prev_transform_change_frame) {
 		prev_transform = transform;
 		transform_status = TransformStatus::NONE;
+		_mark_instance_slot_dirty();
 	}
 }
 
@@ -6388,6 +6547,7 @@ void RenderForwardClustered::GeometryInstanceForwardClustered::_free_procedural_
 void RenderForwardClustered::geometry_instance_free(RenderGeometryInstance *p_geometry_instance) {
 	GeometryInstanceForwardClustered *ginstance = static_cast<GeometryInstanceForwardClustered *>(p_geometry_instance);
 	ERR_FAIL_NULL(ginstance);
+	_instance_slot_free(ginstance);
 	if (ginstance->lightmap_sh != nullptr) {
 		geometry_instance_lightmap_sh.free(ginstance->lightmap_sh);
 	}
@@ -6541,6 +6701,7 @@ RenderForwardClustered::RenderForwardClustered() {
 		render_list_split_stats.enabled = OS::get_singleton()->get_environment("GODOT_PARALLEL_DRAW_LISTS_STATS") == "1";
 		list_stability.enabled = OS::get_singleton()->get_environment("GODOT_LIST_STABILITY_STATS") == "1";
 		sort_ties_by_surface = OS::get_singleton()->get_environment("GODOT_STABLE_SORT") != "0";
+		instance_slots.check = OS::get_singleton()->get_environment("GODOT_INSTANCE_SLOTS_CHECK") == "1";
 
 		// The render lists themselves are filled by up to 3 threads (memory bound: more threads only slow each other
 		// down), in chunks of at least 256 instances (1024 elements for the instance data). GODOT_PARALLEL_LIST_BUILD=N
