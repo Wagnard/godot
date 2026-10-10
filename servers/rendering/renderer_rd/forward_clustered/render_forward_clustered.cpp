@@ -2711,6 +2711,13 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	_fill_render_list(RENDER_LIST_OPAQUE, p_render_data, PASS_MODE_COLOR, using_sdfgi, using_sdfgi || using_voxelgi, using_motion_pass);
 	_sort_render_lists();
 
+	if (list_stability.enabled) {
+		const uint64_t view_key = hash_murmur3_one_64(p_render_data->reflection_probe.get_id(), hash_murmur3_one_64(uint64_t(uintptr_t(rb.ptr())), uint32_t(p_render_data->reflection_probe_pass)));
+		_list_stability_add_main_list(view_key, RENDER_LIST_OPAQUE, LIST_STABILITY_OPAQUE);
+		_list_stability_add_main_list(view_key, RENDER_LIST_MOTION, LIST_STABILITY_MOTION);
+		_list_stability_add_main_list(view_key, RENDER_LIST_ALPHA, LIST_STABILITY_ALPHA);
+	}
+
 	int *render_info = p_render_data->render_info ? p_render_data->render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_VISIBLE] : (int *)nullptr;
 	_fill_instance_data(RENDER_LIST_OPAQUE, render_info);
 	_fill_instance_data(RENDER_LIST_MOTION, render_info);
@@ -3505,6 +3512,12 @@ void RenderForwardClustered::_render_shadow_pass(RID p_light, RID p_shadow_atlas
 		}
 	}
 
+	if (list_stability.enabled) {
+		const RSE::LightType light_type = light_storage->light_get_type(base);
+		shadow_append_stability_key = hash_murmur3_one_64(p_light.get_id(), uint32_t(p_pass));
+		shadow_append_stability_category = light_type == RSE::LIGHT_DIRECTIONAL ? LIST_STABILITY_SHADOW_DIRECTIONAL : (light_type == RSE::LIGHT_OMNI ? LIST_STABILITY_SHADOW_OMNI : LIST_STABILITY_SHADOW_SPOT);
+	}
+
 	if (render_cubemap) {
 		//rendering to cubemap
 		_render_shadow_append(render_fb, p_instances, light_projection, light_transform, zfar, 0, 0, reverse_cull_face, false, false, use_pancake, p_lod_distance_multiplier, p_screen_mesh_lod_threshold, Rect2(), false, true, true, true, p_render_info, p_viewport_size, p_main_cam_transform, cube_layered);
@@ -3672,6 +3685,8 @@ void RenderForwardClustered::_render_shadow_append(RID p_framebuffer, const Page
 
 		shadow_pass.uniform_buffer_index = uniform_buffer_index;
 		shadow_pass.render_info = shadow_render_info;
+		shadow_pass.stability_key = shadow_append_stability_key;
+		shadow_pass.stability_category = shadow_append_stability_category;
 
 		scene_state.shadow_passes.push_back(shadow_pass);
 	}
@@ -3759,6 +3774,18 @@ void RenderForwardClustered::_render_shadow_build() {
 		}
 	}
 
+	if (list_stability.enabled) {
+		for (const SceneState::ShadowPass &shadow_pass : scene_state.shadow_passes) {
+			list_stability.current.resize(shadow_pass.element_count);
+			for (uint32_t i = 0; i < shadow_pass.element_count; i++) {
+				const ShadowElement &element = shadow_elements[shadow_pass.element_from + i];
+				const Transform3D &transform = element.surface->owner->transform;
+				list_stability.current[i] = { element.surface, element.sort_key1, element.sort_key2, element.cube_face_mask, hash_murmur3_buffer(&transform, sizeof(Transform3D)) };
+			}
+			_list_stability_compare(shadow_pass.stability_key, shadow_pass.stability_category);
+		}
+	}
+
 	// 2. Instance data, element info and the marks for instancing, in ranges across all the passes.
 	shadow_repeats.resize(element_total);
 	shadow_pass_begins.resize(element_total);
@@ -3811,6 +3838,104 @@ void RenderForwardClustered::_render_shadow_build() {
 		render_list_split_stats.shadow_builds += 1;
 		render_list_split_stats.parallel_builds += shadow_instance_part_count > 1 ? 1 : 0;
 	}
+}
+
+void RenderForwardClustered::_list_stability_add_main_list(uint64_t p_view_key, RenderListType p_render_list, ListStabilityCategory p_category) {
+	const RenderList &rl = render_list[p_render_list];
+	list_stability.current.resize(rl.elements.size());
+	for (uint32_t i = 0; i < rl.elements.size(); i++) {
+		const GeometryInstanceSurfaceDataCache *surface = rl.elements[i];
+		const Transform3D &transform = surface->owner->transform;
+		list_stability.current[i] = { surface, surface->sort.sort_key1, surface->sort.sort_key2, 0u, hash_murmur3_buffer(&transform, sizeof(Transform3D)) };
+	}
+	_list_stability_compare(hash_murmur3_one_64(p_view_key, uint32_t(p_category)), p_category);
+}
+
+void RenderForwardClustered::_list_stability_compare(uint64_t p_key, ListStabilityCategory p_category) {
+	ListStability &ls = list_stability;
+	const uint64_t frame = RSG::rasterizer->get_frame_number();
+	if (frame != ls.frame) {
+		ls.frame = frame;
+		ls.frames++;
+		if (ls.frames == 240) {
+			static const char *names[LIST_STABILITY_MAX] = { "opaque", "motion", "alpha", "directional shadow", "omni shadow", "spot shadow" };
+			print_line("List stability over 240 frames (per frame: lists, of them identical; elements; of them % at the same position, shifted, reordered, with other keys, entered, left; moved):");
+			for (int i = 0; i < LIST_STABILITY_MAX; i++) {
+				const ListStability::Counters &c = ls.counters[i];
+				if (c.lists == 0) {
+					continue;
+				}
+				const double elements = MAX(c.elements, uint64_t(1));
+				print_line(vformat("  %-18s %6.1f lists, %6.1f identical; %8.0f elements; %5.1f %% same position, %5.1f %% shifted, %5.1f %% reordered, %5.1f %% other keys, %5.1f %% entered, %5.1f left per frame; %5.1f %% moved.",
+						names[i], c.lists / 240.0, c.identical_lists / 240.0, c.elements / 240.0, 100.0 * c.same_position / elements, 100.0 * c.shifted / elements, 100.0 * c.reordered / elements, 100.0 * c.rekeyed / elements, 100.0 * c.entered / elements, c.left / 240.0, 100.0 * c.moved / elements));
+				ls.counters[i] = ListStability::Counters();
+			}
+			ls.frames = 0;
+		}
+		// Lists not drawn for a second are forgotten (a light out of view, a closed viewport).
+		LocalVector<uint64_t> stale;
+		for (const KeyValue<uint64_t, ListStability::History> &E : ls.histories) {
+			if (E.value.frame + 60 < frame) {
+				stale.push_back(E.key);
+			}
+		}
+		for (uint64_t key : stale) {
+			ls.histories.erase(key);
+		}
+	}
+
+	ListStability::History *history = ls.histories.getptr(p_key);
+	ListStability::Counters &c = ls.counters[p_category];
+	const LocalVector<ListStability::Element> &current = ls.current;
+	c.lists++;
+	c.elements += current.size();
+	if (!history) {
+		// A list not seen in the last second: everything entered.
+		c.entered += current.size();
+		history = &ls.histories.insert(p_key, ListStability::History())->value;
+	} else {
+		// Compared with the last time it was drawn: a shadow pass is skipped while nothing in its range changes.
+		const LocalVector<ListStability::Element> &previous = history->elements;
+		ls.previous_index.clear();
+		for (uint32_t i = 0; i < previous.size(); i++) {
+			ls.previous_index.insert(previous[i].surface, i);
+		}
+		uint32_t found = 0;
+		uint32_t same_position = 0;
+		int64_t last_kept_index = -1; // Position last frame of the last element kept with its keys.
+		for (uint32_t i = 0; i < current.size(); i++) {
+			const ListStability::Element &element = current[i];
+			const uint32_t *index = ls.previous_index.getptr(element.surface);
+			if (!index) {
+				c.entered++;
+				continue;
+			}
+			found++;
+			const ListStability::Element &before = previous[*index];
+			if (before.sort_key1 != element.sort_key1 || before.sort_key2 != element.sort_key2 || before.cube_face_mask != element.cube_face_mask) {
+				c.rekeyed++;
+			} else {
+				if (*index == i) {
+					same_position++;
+				} else if (int64_t(*index) > last_kept_index) {
+					c.shifted++;
+				} else {
+					c.reordered++;
+				}
+				last_kept_index = MAX(last_kept_index, int64_t(*index));
+			}
+			if (before.transform_hash != element.transform_hash) {
+				c.moved++;
+			}
+		}
+		c.same_position += same_position;
+		c.left += previous.size() - found;
+		if (same_position == current.size() && previous.size() == current.size()) {
+			c.identical_lists++;
+		}
+	}
+	history->frame = frame;
+	history->elements = current;
 }
 
 void RenderForwardClustered::_sort_render_lists() {
@@ -6414,6 +6539,8 @@ RenderForwardClustered::RenderForwardClustered() {
 		const String min_env = OS::get_singleton()->get_environment("GODOT_PARALLEL_DRAW_LISTS_MIN");
 		render_list_split_min_elements = min_env.is_empty() ? 128 : uint32_t(MAX(min_env.to_int(), 1));
 		render_list_split_stats.enabled = OS::get_singleton()->get_environment("GODOT_PARALLEL_DRAW_LISTS_STATS") == "1";
+		list_stability.enabled = OS::get_singleton()->get_environment("GODOT_LIST_STABILITY_STATS") == "1";
+		sort_ties_by_surface = OS::get_singleton()->get_environment("GODOT_STABLE_SORT") != "0";
 
 		// The render lists themselves are filled by up to 3 threads (memory bound: more threads only slow each other
 		// down), in chunks of at least 256 instances (1024 elements for the instance data). GODOT_PARALLEL_LIST_BUILD=N

@@ -362,6 +362,60 @@ protected:
 		uint32_t helpers_woken = 0;
 	} render_list_split_stats;
 
+	// GODOT_LIST_STABILITY_STATS=1 prints every 240 frames how much of each sorted list matches the same list in the
+	// previous frame (phase 0 of INCREMENTAL-CACHE-STUDY.md, statistics only): elements at the same position with the
+	// same sort keys, shifted or reordered in the list, with other keys, entered and left, and those whose instance moved. A list is
+	// the same from one frame to the next by view (main lists) or by light and pass (shadow passes).
+	enum ListStabilityCategory {
+		LIST_STABILITY_OPAQUE,
+		LIST_STABILITY_MOTION,
+		LIST_STABILITY_ALPHA,
+		LIST_STABILITY_SHADOW_DIRECTIONAL,
+		LIST_STABILITY_SHADOW_OMNI,
+		LIST_STABILITY_SHADOW_SPOT,
+		LIST_STABILITY_MAX,
+	};
+
+	struct ListStability {
+		struct Element {
+			const void *surface = nullptr;
+			uint64_t sort_key1 = 0;
+			uint64_t sort_key2 = 0;
+			uint32_t cube_face_mask = 0;
+			uint32_t transform_hash = 0;
+		};
+		struct History {
+			LocalVector<Element> elements;
+			uint64_t frame = 0;
+		};
+		struct Counters {
+			uint64_t lists = 0;
+			uint64_t identical_lists = 0; // Same elements, keys and order: what a cached list would reuse whole.
+			uint64_t elements = 0;
+			uint64_t same_position = 0;
+			uint64_t shifted = 0; // Same keys and order, another position: something entered, left or moved above it.
+			uint64_t reordered = 0; // Same keys, out of order with the elements kept before it.
+			uint64_t rekeyed = 0; // In the previous list with other keys.
+			uint64_t entered = 0;
+			uint64_t left = 0;
+			uint64_t moved = 0; // Kept, but the instance has another transform.
+		};
+		bool enabled = false;
+		uint64_t frame = 0;
+		uint32_t frames = 0;
+		HashMap<uint64_t, History> histories;
+		Counters counters[LIST_STABILITY_MAX];
+		LocalVector<Element> current; // Filled by the caller of _list_stability_compare().
+		HashMap<const void *, uint32_t> previous_index;
+	} list_stability;
+
+	// Which light and pass the next _render_shadow_append() draws, set by _render_shadow_pass() for the statistics.
+	uint64_t shadow_append_stability_key = 0;
+	ListStabilityCategory shadow_append_stability_category = LIST_STABILITY_SHADOW_DIRECTIONAL;
+
+	void _list_stability_compare(uint64_t p_key, ListStabilityCategory p_category);
+	void _list_stability_add_main_list(uint64_t p_view_key, RenderListType p_render_list, ListStabilityCategory p_category);
+
 	struct LightmapData {
 		float normal_xform[12];
 		float texture_size[2];
@@ -546,6 +600,9 @@ protected:
 			int *render_info = nullptr; // Shadow render info of the pass, for its draw calls.
 			uint32_t draw_calls = 0;
 			int32_t cube_copy = -1; // The cube shadow to copy into the atlas once this pass is drawn (cube_shadow_copies).
+
+			uint64_t stability_key = 0; // list_stability.
+			ListStabilityCategory stability_category = LIST_STABILITY_SHADOW_DIRECTIONAL;
 		};
 
 		LocalVector<ShadowPass> shadow_passes;
@@ -880,6 +937,13 @@ protected:
 
 	/* Render List */
 
+	// Surfaces with equal sort keys (the same mesh and material: identical units), or equal priority and depth in the
+	// alpha list, are ordered by address, so a list that holds the same surfaces sorts the same way every frame.
+	// SortArray is not stable: it reordered 17 % of Solfarer's opaque list every frame with nothing moving (list
+	// stability counter). Equal keys stay contiguous, so instancing is unchanged. GODOT_STABLE_SORT=0 leaves ties
+	// unordered as before.
+	static inline bool sort_ties_by_surface = true;
+
 	struct RenderList {
 		LocalVector<GeometryInstanceSurfaceDataCache *> elements;
 		LocalVector<RenderElementInfo> element_info;
@@ -893,6 +957,9 @@ protected:
 
 		struct SortByKey {
 			_FORCE_INLINE_ bool operator()(const GeometryInstanceSurfaceDataCache *A, const GeometryInstanceSurfaceDataCache *B) const {
+				if (A->sort.sort_key2 == B->sort.sort_key2 && A->sort.sort_key1 == B->sort.sort_key1) {
+					return sort_ties_by_surface && A < B;
+				}
 				return (A->sort.sort_key2 == B->sort.sort_key2) ? (A->sort.sort_key1 < B->sort.sort_key1) : (A->sort.sort_key2 < B->sort.sort_key2);
 			}
 		};
@@ -921,6 +988,9 @@ protected:
 
 		struct SortByReverseDepthAndPriority {
 			_FORCE_INLINE_ bool operator()(const GeometryInstanceSurfaceDataCache *A, const GeometryInstanceSurfaceDataCache *B) const {
+				if (A->sort.priority == B->sort.priority && A->owner->depth == B->owner->depth) {
+					return sort_ties_by_surface && A < B;
+				}
 				return (A->sort.priority == B->sort.priority) ? (A->owner->depth > B->owner->depth) : (A->sort.priority < B->sort.priority);
 			}
 		};
@@ -953,9 +1023,12 @@ protected:
 
 	struct ShadowElementByKey {
 		_FORCE_INLINE_ bool operator()(const ShadowElement &A, const ShadowElement &B) const {
-			// Equal keys then by cube face mask: only elements seen by the same faces draw instanced together.
+			// Equal keys then by cube face mask (only elements seen by the same faces draw instanced together), then by surface.
 			if (A.sort_key2 == B.sort_key2 && A.sort_key1 == B.sort_key1) {
-				return A.cube_face_mask < B.cube_face_mask;
+				if (A.cube_face_mask != B.cube_face_mask) {
+					return A.cube_face_mask < B.cube_face_mask;
+				}
+				return sort_ties_by_surface && A.surface < B.surface;
 			}
 			return (A.sort_key2 == B.sort_key2) ? (A.sort_key1 < B.sort_key1) : (A.sort_key2 < B.sort_key2);
 		}
