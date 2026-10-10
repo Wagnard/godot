@@ -807,14 +807,15 @@ uint32_t RenderForwardClustered::_render_list_get_split_count(const RenderListPa
 				const RenderListSplitStats &st = render_list_split_stats;
 				print_line(vformat("Parallel draw lists, per frame: %.1f lists split in %.1f parts (%.0f elements, %.0f us, of which waiting %.0f us, joining %.0f us; parts %.0f us in total, last part started after %.0f us), %.1f shadow passes recorded together (%.0f us), %.1f lists recorded serially (%.0f elements, %.0f us).",
 						st.split_lists / 240.0, st.splits / 240.0, st.split_elements / 240.0, st.split_usec / 240.0, st.split_wait_usec / 240.0, st.split_join_usec / 240.0, st.split_parts_usec / 240.0, st.split_start_usec / 240.0, st.shadow_parallel_passes / 240.0, st.shadow_parallel_usec / 240.0, st.serial_lists / 240.0, st.serial_elements / 240.0, st.serial_usec / 240.0));
-				print_line(vformat("List building, per frame: filling %.0f us, instance data %.0f us, %.1f of them on several threads; shadow sort + instance data %.0f us (%.1f deferred builds of %.1f passes, %.0f elements, %.0f draw calls); main lists sort %.0f us.",
-						st.fill_usec / 240.0, st.instance_data_usec / 240.0, st.parallel_builds / 240.0, st.shadow_usec / 240.0, st.shadow_builds / 240.0, st.shadow_passes / 240.0, st.shadow_elements / 240.0, st.shadow_draw_calls / 240.0, st.sort_usec / 240.0));
+				print_line(vformat("List building, per frame: filling %.0f us, instance data %.0f us, %.1f of them on several threads; shadow sort + instance data %.0f us (%.1f deferred builds of %.1f passes, %.1f of %.1f non-empty ones in their last order, %.0f elements, %.0f draw calls); main lists sort %.0f us (%.1f of %.1f non-empty lists in their last order); %.1f surface caches freed.",
+						st.fill_usec / 240.0, st.instance_data_usec / 240.0, st.parallel_builds / 240.0, st.shadow_usec / 240.0, st.shadow_builds / 240.0, st.shadow_passes / 240.0, st.reused_shadow_passes / 240.0, st.sorted_shadow_passes / 240.0, st.shadow_elements / 240.0, st.shadow_draw_calls / 240.0, st.sort_usec / 240.0, st.reused_lists / 240.0, st.sorted_lists / 240.0, (surface_caches_freed - st.surface_caches_freed) / 240.0));
 				print_line(vformat("Parallel runs, per frame: %.1f runs, %.1f helpers woken, %.0f parts, %.0f of them on the calling thread, %.0f us of parts in total, %.0f us of wall time.",
 						st.runs / 240.0, st.helpers_woken / 240.0, st.run_parts.get() / 240.0, st.run_parts_on_caller.get() / 240.0, st.run_parts_usec.get() / 240.0, st.run_usec / 240.0));
 				render_list_split_stats.~RenderListSplitStats();
 				memnew_placement(&render_list_split_stats, RenderListSplitStats);
 				render_list_split_stats.enabled = true;
 				render_list_split_stats.frame = frame;
+				render_list_split_stats.surface_caches_freed = surface_caches_freed;
 			}
 		}
 	}
@@ -2985,10 +2986,10 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	_update_render_base_uniform_set();
 
 	_fill_render_list(RENDER_LIST_OPAQUE, p_render_data, PASS_MODE_COLOR, using_sdfgi, using_sdfgi || using_voxelgi, using_motion_pass);
-	_sort_render_lists();
+	const uint64_t view_key = hash_murmur3_one_64(p_render_data->reflection_probe.get_id(), hash_murmur3_one_64(uint64_t(uintptr_t(rb.ptr())), uint32_t(p_render_data->reflection_probe_pass)));
+	_sort_render_lists(view_key);
 
 	if (list_stability.enabled) {
-		const uint64_t view_key = hash_murmur3_one_64(p_render_data->reflection_probe.get_id(), hash_murmur3_one_64(uint64_t(uintptr_t(rb.ptr())), uint32_t(p_render_data->reflection_probe_pass)));
 		_list_stability_add_main_list(view_key, RENDER_LIST_OPAQUE, LIST_STABILITY_OPAQUE);
 		_list_stability_add_main_list(view_key, RENDER_LIST_MOTION, LIST_STABILITY_MOTION);
 		_list_stability_add_main_list(view_key, RENDER_LIST_ALPHA, LIST_STABILITY_ALPHA);
@@ -3788,9 +3789,9 @@ void RenderForwardClustered::_render_shadow_pass(RID p_light, RID p_shadow_atlas
 		}
 	}
 
+	shadow_append_list_key = hash_murmur3_one_64(p_light.get_id(), uint32_t(p_pass));
 	if (list_stability.enabled) {
 		const RSE::LightType light_type = light_storage->light_get_type(base);
-		shadow_append_stability_key = hash_murmur3_one_64(p_light.get_id(), uint32_t(p_pass));
 		shadow_append_stability_category = light_type == RSE::LIGHT_DIRECTIONAL ? LIST_STABILITY_SHADOW_DIRECTIONAL : (light_type == RSE::LIGHT_OMNI ? LIST_STABILITY_SHADOW_OMNI : LIST_STABILITY_SHADOW_SPOT);
 	}
 
@@ -3961,7 +3962,7 @@ void RenderForwardClustered::_render_shadow_append(RID p_framebuffer, const Page
 
 		shadow_pass.uniform_buffer_index = uniform_buffer_index;
 		shadow_pass.render_info = shadow_render_info;
-		shadow_pass.stability_key = shadow_append_stability_key;
+		shadow_pass.list_key = shadow_append_list_key;
 		shadow_pass.stability_category = shadow_append_stability_category;
 
 		scene_state.shadow_passes.push_back(shadow_pass);
@@ -3991,8 +3992,17 @@ void RenderForwardClustered::_render_shadow_build() {
 	// identical surfaces is drawn first in a depth-only pass. Without the merge (GODOT_PARALLEL_SHADOW_MERGE=0) the
 	// pass is drawn run after run: no serial step, but each run repeats the state changes and splits the instancing.
 	shadow_sort_runs.clear();
+	sort_reuse.shadow_pass_reused.resize(pass_count);
+	for (uint32_t i = 0; i < pass_count; i++) {
+		const SceneState::ShadowPass &shadow_pass = scene_state.shadow_passes[i];
+		sort_reuse.shadow_pass_reused[i] = sort_reuse.enabled && _sort_reuse_apply(shadow_pass.list_key, shadow_elements.ptr() + shadow_pass.element_from, shadow_pass.element_count, false, sort_reuse.shadow_scratch);
+	}
 	bool merges = false;
-	for (const SceneState::ShadowPass &shadow_pass : scene_state.shadow_passes) {
+	for (uint32_t pass = 0; pass < pass_count; pass++) {
+		const SceneState::ShadowPass &shadow_pass = scene_state.shadow_passes[pass];
+		if (sort_reuse.shadow_pass_reused[pass]) {
+			continue;
+		}
 		const uint32_t cuts = parallel ? CLAMP(shadow_pass.element_count / 1024u, 1u, list_build_max_threads) : 1u;
 		merges = merges || cuts > 1;
 		for (uint32_t i = 0; i < cuts; i++) {
@@ -4051,6 +4061,23 @@ void RenderForwardClustered::_render_shadow_build() {
 		}
 	}
 
+	for (uint32_t i = 0; i < pass_count; i++) {
+		const SceneState::ShadowPass &shadow_pass = scene_state.shadow_passes[i];
+		const ShadowElement *elements = shadow_elements.ptr() + shadow_pass.element_from;
+		if (sort_reuse.enabled && !sort_reuse.shadow_pass_reused[i]) {
+			_sort_reuse_store(shadow_pass.list_key, elements, shadow_pass.element_count, false);
+		}
+#ifdef DEBUG_ENABLED
+		if (sort_reuse.shadow_pass_reused[i] && unlikely(sort_reuse.check)) {
+			_sort_reuse_verify<ShadowElement, ShadowElementByKey>(elements, shadow_pass.element_count, "shadow pass");
+		}
+#endif
+		if (render_list_split_stats.enabled && shadow_pass.element_count > 0u) {
+			render_list_split_stats.sorted_shadow_passes++;
+			render_list_split_stats.reused_shadow_passes += sort_reuse.shadow_pass_reused[i] ? 1 : 0;
+		}
+	}
+
 	if (list_stability.enabled) {
 		for (const SceneState::ShadowPass &shadow_pass : scene_state.shadow_passes) {
 			list_stability.current.resize(shadow_pass.element_count);
@@ -4059,7 +4086,7 @@ void RenderForwardClustered::_render_shadow_build() {
 				const Transform3D &transform = element.surface->owner->transform;
 				list_stability.current[i] = { element.surface, element.sort_key1, element.sort_key2, element.cube_face_mask, hash_murmur3_buffer(&transform, sizeof(Transform3D)) };
 			}
-			_list_stability_compare(shadow_pass.stability_key, shadow_pass.stability_category);
+			_list_stability_compare(shadow_pass.list_key, shadow_pass.stability_category);
 		}
 	}
 
@@ -4215,16 +4242,29 @@ void RenderForwardClustered::_list_stability_compare(uint64_t p_key, ListStabili
 	history->elements = current;
 }
 
-void RenderForwardClustered::_sort_render_lists() {
+void RenderForwardClustered::_sort_render_lists(uint64_t p_view_key) {
 	const uint64_t begin_usec = render_list_split_stats.enabled ? OS::get_singleton()->get_ticks_usec() : 0;
+	static const RenderListType main_lists[3] = { RENDER_LIST_OPAQUE, RENDER_LIST_MOTION, RENDER_LIST_ALPHA };
+	for (RenderListType list : main_lists) {
+		RenderList &rl = render_list[list];
+		// Alpha lists are sorted by depth.
+		main_sort_reused[list] = sort_reuse.enabled && _sort_reuse_apply(hash_murmur3_one_64(p_view_key, uint32_t(list)), rl.elements.ptr(), rl.elements.size(), list == RENDER_LIST_ALPHA, sort_reuse.scratch);
+	}
+
 	const uint32_t opaque_count = render_list[RENDER_LIST_OPAQUE].elements.size();
 	// Runs of at least 1024 elements, as many as the list building threads.
-	const uint32_t runs = (list_sort_parallel && list_build_max_threads > 1 && opaque_count >= 2048u) ? MIN(opaque_count / 1024u, list_build_max_threads) : 0u;
+	const uint32_t runs = (!main_sort_reused[RENDER_LIST_OPAQUE] && list_sort_parallel && list_build_max_threads > 1 && opaque_count >= 2048u) ? MIN(opaque_count / 1024u, list_build_max_threads) : 0u;
 
 	if (runs < 2u) {
-		render_list[RENDER_LIST_OPAQUE].sort_by_key();
-		render_list[RENDER_LIST_MOTION].sort_by_key();
-		render_list[RENDER_LIST_ALPHA].sort_by_reverse_depth_and_priority();
+		if (!main_sort_reused[RENDER_LIST_OPAQUE]) {
+			render_list[RENDER_LIST_OPAQUE].sort_by_key();
+		}
+		if (!main_sort_reused[RENDER_LIST_MOTION]) {
+			render_list[RENDER_LIST_MOTION].sort_by_key();
+		}
+		if (!main_sort_reused[RENDER_LIST_ALPHA]) {
+			render_list[RENDER_LIST_ALPHA].sort_by_reverse_depth_and_priority();
+		}
 	} else {
 		opaque_sort_runs.resize(runs);
 		for (uint32_t i = 0; i < runs; i++) {
@@ -4258,6 +4298,26 @@ void RenderForwardClustered::_sort_render_lists() {
 		memcpy(elements, opaque_merge_buffer.ptr(), sizeof(GeometryInstanceSurfaceDataCache *) * opaque_count);
 	}
 
+	for (RenderListType list : main_lists) {
+		const RenderList &rl = render_list[list];
+		if (sort_reuse.enabled && !main_sort_reused[list]) {
+			_sort_reuse_store(hash_murmur3_one_64(p_view_key, uint32_t(list)), rl.elements.ptr(), rl.elements.size(), list == RENDER_LIST_ALPHA);
+		}
+#ifdef DEBUG_ENABLED
+		if (main_sort_reused[list] && unlikely(sort_reuse.check)) {
+			if (list == RENDER_LIST_ALPHA) {
+				_sort_reuse_verify<GeometryInstanceSurfaceDataCache *, RenderList::SortByReverseDepthAndPriority>(rl.elements.ptr(), rl.elements.size(), "alpha");
+			} else {
+				_sort_reuse_verify<GeometryInstanceSurfaceDataCache *, RenderList::SortByKey>(rl.elements.ptr(), rl.elements.size(), list == RENDER_LIST_OPAQUE ? "opaque" : "motion");
+			}
+		}
+#endif
+		if (render_list_split_stats.enabled && !rl.elements.is_empty()) {
+			render_list_split_stats.sorted_lists++;
+			render_list_split_stats.reused_lists += main_sort_reused[list] ? 1 : 0;
+		}
+	}
+
 	if (render_list_split_stats.enabled) {
 		render_list_split_stats.sort_usec += OS::get_singleton()->get_ticks_usec() - begin_usec;
 	}
@@ -4268,11 +4328,111 @@ void RenderForwardClustered::_sort_render_lists_part(uint32_t p_part) {
 	if (p_part < runs) {
 		render_list[RENDER_LIST_OPAQUE].sort_by_key_range(opaque_sort_runs[p_part].from, opaque_sort_runs[p_part].count);
 	} else if (p_part == runs) {
-		render_list[RENDER_LIST_MOTION].sort_by_key();
-	} else {
+		if (!main_sort_reused[RENDER_LIST_MOTION]) {
+			render_list[RENDER_LIST_MOTION].sort_by_key();
+		}
+	} else if (!main_sort_reused[RENDER_LIST_ALPHA]) {
 		render_list[RENDER_LIST_ALPHA].sort_by_reverse_depth_and_priority();
 	}
 }
+
+RenderForwardClustered::SortReuseEntry RenderForwardClustered::_sort_reuse_entry(const GeometryInstanceSurfaceDataCache *p_surface, bool p_depth) {
+	SortReuseEntry entry = { p_surface, p_surface->sort.sort_key1, p_surface->sort.sort_key2, 0u };
+	if (p_depth) {
+		memcpy(&entry.extra, &p_surface->owner->depth, sizeof(uint32_t));
+	}
+	return entry;
+}
+
+RenderForwardClustered::SortReuseEntry RenderForwardClustered::_sort_reuse_entry(const ShadowElement &p_element, bool) {
+	return { p_element.surface, p_element.sort_key1, p_element.sort_key2, p_element.cube_face_mask };
+}
+
+RenderForwardClustered::SortReuseList *RenderForwardClustered::_sort_reuse_list(uint64_t p_key) {
+	const uint64_t frame = RSG::rasterizer->get_frame_number();
+	if (frame != sort_reuse.frame) {
+		sort_reuse.frame = frame;
+		// Lists not sorted for a second are forgotten (a light out of view, a closed viewport).
+		LocalVector<uint64_t> stale;
+		for (const KeyValue<uint64_t, SortReuseList> &E : sort_reuse.lists) {
+			if (E.value.frame + 60 < frame) {
+				stale.push_back(E.key);
+			}
+		}
+		for (uint64_t key : stale) {
+			sort_reuse.lists.erase(key);
+		}
+	}
+	return sort_reuse.lists.getptr(p_key);
+}
+
+template <typename T>
+bool RenderForwardClustered::_sort_reuse_apply(uint64_t p_key, T *p_elements, uint32_t p_count, bool p_depth, LocalVector<T> &r_scratch) {
+	SortReuseList *list = _sort_reuse_list(p_key);
+	if (!list || list->entries.size() != p_count || p_count == 0u || list->surfaces_freed != surface_caches_freed) {
+		return false;
+	}
+	// No surface was freed since the order was kept: each of its surfaces can be marked with its place.
+	sort_reuse.mark = sort_reuse.mark == UINT32_MAX ? 1u : sort_reuse.mark + 1u;
+	const uint32_t mark = sort_reuse.mark;
+	for (uint32_t i = 0; i < p_count; i++) {
+		GeometryInstanceSurfaceDataCache *surface = const_cast<GeometryInstanceSurfaceDataCache *>(list->entries[i].surface);
+		surface->sort_reuse_mark = mark;
+		surface->sort_reuse_index = i;
+	}
+	r_scratch.resize(p_count);
+	for (uint32_t i = 0; i < p_count; i++) {
+		GeometryInstanceSurfaceDataCache *surface = _sort_reuse_surface(p_elements[i]);
+		if (surface->sort_reuse_mark != mark) {
+			return false; // Not in the kept order, or a second time.
+		}
+		const SortReuseEntry &kept = list->entries[surface->sort_reuse_index];
+		const SortReuseEntry current = _sort_reuse_entry(p_elements[i], p_depth);
+		if (kept.surface != current.surface || kept.sort_key1 != current.sort_key1 || kept.sort_key2 != current.sort_key2 || kept.extra != current.extra) {
+			return false;
+		}
+		surface->sort_reuse_mark = 0;
+		r_scratch[surface->sort_reuse_index] = p_elements[i];
+	}
+	for (uint32_t i = 0; i < p_count; i++) {
+		p_elements[i] = r_scratch[i];
+	}
+	list->frame = sort_reuse.frame;
+	return true;
+}
+
+template <typename T>
+void RenderForwardClustered::_sort_reuse_store(uint64_t p_key, const T *p_elements, uint32_t p_count, bool p_depth) {
+	SortReuseList *list = _sort_reuse_list(p_key);
+	if (!list) {
+		list = &sort_reuse.lists.insert(p_key, SortReuseList())->value;
+	}
+	list->entries.resize(p_count);
+	for (uint32_t i = 0; i < p_count; i++) {
+		list->entries[i] = _sort_reuse_entry(p_elements[i], p_depth);
+	}
+	list->frame = sort_reuse.frame;
+	list->surfaces_freed = surface_caches_freed;
+}
+
+#ifdef DEBUG_ENABLED
+template <typename T, typename Comparator>
+void RenderForwardClustered::_sort_reuse_verify(const T *p_elements, uint32_t p_count, const char *p_list) {
+	LocalVector<T> sorted;
+	sorted.resize(p_count);
+	for (uint32_t i = 0; i < p_count; i++) {
+		sorted[i] = p_elements[i];
+	}
+	SortArray<T, Comparator> sorter;
+	sorter.sort(sorted.ptr(), p_count);
+	for (uint32_t i = 0; i < p_count; i++) {
+		if (_sort_reuse_surface(sorted[i]) != _sort_reuse_surface(p_elements[i])) {
+			print_line(vformat("Sort reuse: the kept order of a %s list differs from its sort at element %d of %d (frame %d).", p_list, i, p_count, RSG::rasterizer->get_frame_number()));
+			return;
+		}
+	}
+}
+#endif
 
 void RenderForwardClustered::_render_shadow_sort_part(uint32_t p_part) {
 	// The same comparisons as RenderList::sort_by_key_range(), so the same order for a pass sorted in one run.
@@ -5739,6 +5899,7 @@ void RenderForwardClustered::GeometryInstanceForwardClustered::_mark_dirty() {
 		GeometryInstanceSurfaceDataCache *next = surf->next;
 		RenderForwardClustered::get_singleton()->_surface_slot_free(surf);
 		RenderForwardClustered::get_singleton()->geometry_instance_surface_alloc.free(surf);
+		RenderForwardClustered::get_singleton()->surface_caches_freed++;
 		surf = next;
 	}
 
@@ -6719,6 +6880,7 @@ void RenderForwardClustered::geometry_instance_free(RenderGeometryInstance *p_ge
 		GeometryInstanceSurfaceDataCache *next = surf->next;
 		_surface_slot_free(surf);
 		geometry_instance_surface_alloc.free(surf);
+		surface_caches_freed++;
 		surf = next;
 	}
 	memdelete(ginstance->data);
@@ -6866,6 +7028,7 @@ RenderForwardClustered::RenderForwardClustered() {
 		sort_ties_by_surface = OS::get_singleton()->get_environment("GODOT_STABLE_SORT") != "0";
 #ifdef DEBUG_ENABLED
 		instance_slots.check = OS::get_singleton()->get_environment("GODOT_INSTANCE_SLOTS_CHECK") == "1";
+		sort_reuse.check = OS::get_singleton()->get_environment("GODOT_SORT_REUSE_CHECK") == "1";
 #endif
 		instance_slot_buffer.slot_size = sizeof(InstanceSlotData);
 		surface_slot_buffer.slot_size = sizeof(SurfaceSlotData);
@@ -6888,6 +7051,7 @@ RenderForwardClustered::RenderForwardClustered() {
 		shadow_build_parallel = OS::get_singleton()->get_environment("GODOT_PARALLEL_SHADOW_BUILD") != "0";
 		shadow_build_merge = OS::get_singleton()->get_environment("GODOT_PARALLEL_SHADOW_MERGE") != "0";
 		list_sort_parallel = OS::get_singleton()->get_environment("GODOT_PARALLEL_SORT") != "0";
+		sort_reuse.enabled = OS::get_singleton()->get_environment("GODOT_SORT_REUSE") != "0";
 		shadow_passes_parallel = OS::get_singleton()->get_environment("GODOT_PARALLEL_SHADOW_PASSES") != "0";
 	}
 

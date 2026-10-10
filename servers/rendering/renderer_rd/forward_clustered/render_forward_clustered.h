@@ -351,6 +351,11 @@ protected:
 		uint64_t shadow_usec = 0; // Sorting the shadow passes and writing their instance data, either path.
 		uint64_t shadow_draw_calls = 0; // Deferred builds only.
 		uint64_t sort_usec = 0; // Sorting the main view's opaque, motion and alpha lists, either path.
+		uint32_t sorted_lists = 0; // Main lists and deferred shadow passes, and how many of them kept their last order.
+		uint32_t reused_lists = 0;
+		uint32_t sorted_shadow_passes = 0;
+		uint32_t reused_shadow_passes = 0;
+		uint64_t surface_caches_freed = 0; // surface_caches_freed when these statistics started.
 		uint32_t shadow_parallel_passes = 0; // Shadow passes recorded together ahead of their draw lists, and the time it took.
 		uint64_t shadow_parallel_usec = 0;
 		// _parallel_run(), all uses: parts, those run by the calling thread, sum of the parts' durations, wall time.
@@ -407,8 +412,9 @@ protected:
 		HashMap<const void *, uint32_t> previous_index;
 	} list_stability;
 
-	// Which light and pass the next _render_shadow_append() draws, set by _render_shadow_pass() for the statistics.
-	uint64_t shadow_append_stability_key = 0;
+	// Which light and pass the next _render_shadow_append() draws, set by _render_shadow_pass(): the pass's key for
+	// sort_reuse and list_stability.
+	uint64_t shadow_append_list_key = 0;
 	ListStabilityCategory shadow_append_stability_category = LIST_STABILITY_SHADOW_DIRECTIONAL;
 
 	void _list_stability_compare(uint64_t p_key, ListStabilityCategory p_category);
@@ -609,7 +615,7 @@ protected:
 			uint32_t draw_calls = 0;
 			int32_t cube_copy = -1; // The cube shadow to copy into the atlas once this pass is drawn (cube_shadow_copies).
 
-			uint64_t stability_key = 0; // list_stability.
+			uint64_t list_key = 0; // Light and pass: sort_reuse and list_stability.
 			ListStabilityCategory stability_category = LIST_STABILITY_SHADOW_DIRECTIONAL;
 		};
 
@@ -798,6 +804,10 @@ protected:
 		mutable RID rt_deformed_handle;
 
 		uint32_t surface_slot = UINT32_MAX; // Its place in surface_slots.
+
+		// Set by _sort_reuse_apply(): the check that last marked it, and its place in the order kept for that list.
+		uint32_t sort_reuse_mark = 0;
+		uint32_t sort_reuse_index = 0;
 
 		GeometryInstanceSurfaceDataCache *next = nullptr;
 		GeometryInstanceForwardClustered *owner = nullptr;
@@ -1174,8 +1184,52 @@ protected:
 	LocalVector<OpaqueSortRun> opaque_sort_runs;
 	LocalVector<GeometryInstanceSurfaceDataCache *> opaque_merge_buffer;
 
-	void _sort_render_lists();
+	bool main_sort_reused[RENDER_LIST_MAX] = {};
+
+	void _sort_render_lists(uint64_t p_view_key);
 	void _sort_render_lists_part(uint32_t p_part);
+
+	// Each sorted list keeps the order it had the last time it was sorted (main lists by view, shadow passes by light
+	// and pass). When it holds the same surfaces with the same sort inputs, that order is what sorting would give: every
+	// comparison breaks ties by surface, so there is only one. GODOT_SORT_REUSE=0 sorts every list again.
+	struct SortReuseEntry {
+		const GeometryInstanceSurfaceDataCache *surface = nullptr;
+		uint64_t sort_key1 = 0;
+		uint64_t sort_key2 = 0;
+		uint32_t extra = 0; // Alpha lists: the instance's depth (its bits). Shadow passes: the cube face mask.
+	};
+	struct SortReuseList {
+		LocalVector<SortReuseEntry> entries;
+		uint64_t frame = 0;
+		uint64_t surfaces_freed = 0; // surface_caches_freed when stored: its surfaces are all alive while it is unchanged.
+	};
+	struct SortReuse {
+		bool enabled = true;
+#ifdef DEBUG_ENABLED
+		bool check = false; // GODOT_SORT_REUSE_CHECK=1: sorts every reused list anyway and compares the orders.
+#endif
+		uint32_t mark = 0;
+		uint64_t frame = 0;
+		HashMap<uint64_t, SortReuseList> lists;
+		LocalVector<GeometryInstanceSurfaceDataCache *> scratch;
+		LocalVector<ShadowElement> shadow_scratch;
+		LocalVector<uint8_t> shadow_pass_reused;
+	} sort_reuse;
+	uint64_t surface_caches_freed = 0;
+
+	static _FORCE_INLINE_ GeometryInstanceSurfaceDataCache *_sort_reuse_surface(GeometryInstanceSurfaceDataCache *p_surface) { return p_surface; }
+	static _FORCE_INLINE_ GeometryInstanceSurfaceDataCache *_sort_reuse_surface(const ShadowElement &p_element) { return p_element.surface; }
+	static SortReuseEntry _sort_reuse_entry(const GeometryInstanceSurfaceDataCache *p_surface, bool p_depth);
+	static SortReuseEntry _sort_reuse_entry(const ShadowElement &p_element, bool p_depth);
+	SortReuseList *_sort_reuse_list(uint64_t p_key);
+	template <typename T>
+	bool _sort_reuse_apply(uint64_t p_key, T *p_elements, uint32_t p_count, bool p_depth, LocalVector<T> &r_scratch);
+	template <typename T>
+	void _sort_reuse_store(uint64_t p_key, const T *p_elements, uint32_t p_count, bool p_depth);
+#ifdef DEBUG_ENABLED
+	template <typename T, typename Comparator>
+	void _sort_reuse_verify(const T *p_elements, uint32_t p_count, const char *p_list);
+#endif
 	bool shadow_build_deferred = false;
 
 	void _render_shadow_build();
