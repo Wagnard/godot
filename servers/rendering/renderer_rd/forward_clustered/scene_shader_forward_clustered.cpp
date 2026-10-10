@@ -1033,7 +1033,7 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 		actions.default_filter = ShaderLanguage::FILTER_LINEAR_MIPMAP;
 		actions.default_repeat = ShaderLanguage::REPEAT_ENABLE;
 		actions.global_buffer_array_variable = "global_shader_uniforms.data";
-		actions.instance_uniform_index_variable = "instance_data_instance_uniforms_ofs(instance_index_interp)";
+		actions.instance_uniform_index_variable = "instance_uniform_base";
 
 		actions.check_multiview_samplers = true;
 

@@ -370,7 +370,7 @@ layout(set = 1, binding = 1, std430) buffer restrict readonly InstanceDataBuffer
 }
 instances;
 
-#define INSTANCE_DATA_TRANSFORM(m_index) instances.data[m_index].transform
+#define INSTANCE_TRANSFORM instances.data[instance_index].transform
 
 #ifdef USE_RADIANCE_OCTMAP_ARRAY
 

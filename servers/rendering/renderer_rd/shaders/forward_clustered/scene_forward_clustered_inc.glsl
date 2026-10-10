@@ -422,23 +422,39 @@ layout(set = 1, binding = 38, std430) buffer restrict readonly SurfaceSlotBuffer
 }
 surface_slots;
 
-// Cube-layered shadow passes keep the face in bits 29-31 of instance_index_interp; masked here for every reader,
-// including the generated instance uniform code.
-#define ELEMENT_DATA(m_index) elements.data[(m_index) & 0x1FFFFFFFu]
-#define instance_data_flags(m_index) ELEMENT_DATA(m_index).flags
-#define instance_data_gi_offset(m_index) ELEMENT_DATA(m_index).gi_offset
-#define instance_data_transform(m_index) instance_slots.data[ELEMENT_DATA(m_index).instance_slot].transform
-#define instance_data_prev_transform(m_index) instance_slots.data[ELEMENT_DATA(m_index).instance_slot].prev_transform
-#define instance_data_layer_mask(m_index) instance_slots.data[ELEMENT_DATA(m_index).instance_slot].layer_mask
-#define instance_data_instance_uniforms_ofs(m_index) instance_slots.data[ELEMENT_DATA(m_index).instance_slot].instance_uniforms_ofs
-#define instance_data_lightmap_uv_scale(m_index) instance_slots.data[ELEMENT_DATA(m_index).instance_slot].lightmap_uv_scale
-#define instance_data_model_precision(m_index) instance_slots.data[ELEMENT_DATA(m_index).instance_slot].model_precision
-#define instance_data_prev_model_precision(m_index) instance_slots.data[ELEMENT_DATA(m_index).instance_slot].prev_model_precision
-#define instance_data_compressed_aabb_position_pad(m_index) surface_slots.data[ELEMENT_DATA(m_index).surface_slot].compressed_aabb_position_pad
-#define instance_data_compressed_aabb_size_pad(m_index) surface_slots.data[ELEMENT_DATA(m_index).surface_slot].compressed_aabb_size_pad
-#define instance_data_uv_scale(m_index) surface_slots.data[ELEMENT_DATA(m_index).surface_slot].uv_scale
+// The element of this invocation, loaded once: not every shader compiler merges repeated buffer loads, and the light
+// loops read the layer mask for every light. The vertex stage reads the buffers (load_element_data()) and passes the
+// values on (instance_data_interp), so the fragment stage reads no buffer for them (load_element_data_interp()).
+uint instance_slot;
+uint surface_slot;
+uint instance_flags;
+uint instance_gi_offset;
+uint instance_layer_mask;
+uint instance_uniform_base;
 
-#define INSTANCE_DATA_TRANSFORM(m_index) instance_data_transform(m_index)
+void load_element_data(uint p_index) {
+	ElementData element = elements.data[p_index];
+	instance_slot = element.instance_slot;
+	surface_slot = element.surface_slot;
+	instance_flags = element.flags;
+	instance_gi_offset = element.gi_offset;
+	instance_layer_mask = instance_slots.data[instance_slot].layer_mask;
+	instance_uniform_base = instance_slots.data[instance_slot].instance_uniforms_ofs;
+}
+
+// Cube-layered shadow passes keep the face in bits 29-31 of the instance slot.
+void load_element_data_interp(uvec4 p_data) {
+	instance_slot = p_data.x & 0x1FFFFFFFu;
+	surface_slot = 0; // Only the vertex stage reads surface slots.
+	instance_flags = p_data.y;
+	instance_gi_offset = p_data.z;
+	instance_layer_mask = p_data.w;
+	instance_uniform_base = instance_slots.data[instance_slot].instance_uniforms_ofs;
+}
+
+#define INSTANCE_SLOT instance_slots.data[instance_slot]
+#define SURFACE_SLOT surface_slots.data[surface_slot]
+#define INSTANCE_TRANSFORM INSTANCE_SLOT.transform
 
 #ifdef USE_RADIANCE_OCTMAP_ARRAY
 

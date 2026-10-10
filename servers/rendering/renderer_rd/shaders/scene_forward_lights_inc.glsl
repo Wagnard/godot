@@ -131,13 +131,11 @@ void light_compute(hvec3 N, hvec3 L, hvec3 V, half A, hvec3 light_color, bool is
 
 #ifdef USING_MOBILE_RENDERER
 	uint instance_index = draw_call.instance_index;
-#else
-	uint instance_index = instance_index_interp;
 #endif
 
-	mat4 read_model_matrix = transpose(mat4(INSTANCE_DATA_TRANSFORM(instance_index)[0],
-			INSTANCE_DATA_TRANSFORM(instance_index)[1],
-			INSTANCE_DATA_TRANSFORM(instance_index)[2],
+	mat4 read_model_matrix = transpose(mat4(INSTANCE_TRANSFORM[0],
+			INSTANCE_TRANSFORM[1],
+			INSTANCE_TRANSFORM[2],
 			vec4(0.0, 0.0, 0.0, 1.0)));
 
 #undef projection_matrix
@@ -1162,13 +1160,11 @@ void light_process_area(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 
 #ifdef USING_MOBILE_RENDERER
 	uint instance_index = draw_call.instance_index;
-#else
-	uint instance_index = instance_index_interp;
 #endif
 
-	mat4 read_model_matrix = transpose(mat4(INSTANCE_DATA_TRANSFORM(instance_index)[0],
-			INSTANCE_DATA_TRANSFORM(instance_index)[1],
-			INSTANCE_DATA_TRANSFORM(instance_index)[2],
+	mat4 read_model_matrix = transpose(mat4(INSTANCE_TRANSFORM[0],
+			INSTANCE_TRANSFORM[1],
+			INSTANCE_TRANSFORM[2],
 			vec4(0.0, 0.0, 0.0, 1.0)));
 
 #undef projection_matrix
