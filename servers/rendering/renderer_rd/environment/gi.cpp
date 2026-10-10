@@ -592,21 +592,21 @@ void GI::SDFGI::create(RID p_env, const Vector3 &p_world_position, uint32_t p_re
 			Vector<RD::Uniform> uniforms;
 			{
 				RD::Uniform u;
-				u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
+				u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
 				u.binding = 1;
 				u.append_id(render_sdf[(passes & 1) ? 1 : 0]); //if passes are even, we read from buffer 0, else we read from buffer 1
 				uniforms.push_back(u);
 			}
 			{
 				RD::Uniform u;
-				u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
+				u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
 				u.binding = 2;
 				u.append_id(render_albedo);
 				uniforms.push_back(u);
 			}
 			{
 				RD::Uniform u;
-				u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
+				u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
 				u.binding = 3;
 				for (int j = 0; j < 8; j++) {
 					u.append_id(render_occlusion[j]);
@@ -615,21 +615,21 @@ void GI::SDFGI::create(RID p_env, const Vector3 &p_world_position, uint32_t p_re
 			}
 			{
 				RD::Uniform u;
-				u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
+				u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
 				u.binding = 4;
 				u.append_id(render_emission);
 				uniforms.push_back(u);
 			}
 			{
 				RD::Uniform u;
-				u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
+				u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
 				u.binding = 5;
 				u.append_id(render_emission_aniso);
 				uniforms.push_back(u);
 			}
 			{
 				RD::Uniform u;
-				u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
+				u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
 				u.binding = 6;
 				u.append_id(render_geom_facing);
 				uniforms.push_back(u);
@@ -727,7 +727,7 @@ void GI::SDFGI::create(RID p_env, const Vector3 &p_world_position, uint32_t p_re
 			}
 			{
 				RD::Uniform u;
-				u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
+				u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
 				u.binding = 2;
 				u.append_id(occlusion_data);
 				uniforms.push_back(u);
@@ -840,7 +840,7 @@ void GI::SDFGI::create(RID p_env, const Vector3 &p_world_position, uint32_t p_re
 		Vector<RD::Uniform> uniforms;
 		{
 			RD::Uniform u;
-			u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
+			u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
 			u.binding = 1;
 			u.append_id(render_albedo);
 			uniforms.push_back(u);
@@ -860,7 +860,7 @@ void GI::SDFGI::create(RID p_env, const Vector3 &p_world_position, uint32_t p_re
 		Vector<RD::Uniform> uniforms;
 		{
 			RD::Uniform u;
-			u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
+			u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
 			u.binding = 1;
 			u.append_id(render_albedo);
 			uniforms.push_back(u);
@@ -881,7 +881,7 @@ void GI::SDFGI::create(RID p_env, const Vector3 &p_world_position, uint32_t p_re
 		Vector<RD::Uniform> uniforms;
 		{
 			RD::Uniform u;
-			u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
+			u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
 			u.binding = 1;
 			u.append_id(render_sdf[0]);
 			uniforms.push_back(u);
@@ -906,7 +906,7 @@ void GI::SDFGI::create(RID p_env, const Vector3 &p_world_position, uint32_t p_re
 		Vector<RD::Uniform> uniforms;
 		{
 			RD::Uniform u;
-			u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
+			u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
 			u.binding = 1;
 			u.append_id(render_sdf_half[0]);
 			uniforms.push_back(u);
@@ -932,14 +932,14 @@ void GI::SDFGI::create(RID p_env, const Vector3 &p_world_position, uint32_t p_re
 		Vector<RD::Uniform> uniforms;
 		{
 			RD::Uniform u;
-			u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
+			u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
 			u.binding = 1;
 			u.append_id(render_albedo);
 			uniforms.push_back(u);
 		}
 		{
 			RD::Uniform u;
-			u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
+			u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
 			u.binding = 2;
 			u.append_id(render_sdf_half[(passes & 1) ? 0 : 1]); //reverse pass order because half size
 			uniforms.push_back(u);
@@ -977,7 +977,7 @@ void GI::SDFGI::create(RID p_env, const Vector3 &p_world_position, uint32_t p_re
 		}
 		{
 			RD::Uniform u;
-			u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
+			u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
 			u.binding = 3;
 			u.append_id(render_geom_facing);
 			uniforms.push_back(u);
