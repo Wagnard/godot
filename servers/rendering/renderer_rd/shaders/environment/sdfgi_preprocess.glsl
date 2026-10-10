@@ -4,6 +4,11 @@
 
 #VERSION_DEFINES
 
+// Inputs only read are textures read with texelFetch(), not readonly images: the same texel, no filtering, through the
+// texture cache. On an Arc B580 a readonly image read took 2 to 3 times as long, on Vulkan and D3D12 alike (Godot's
+// D3D12 driver binds such images as UAVs). Images both read and written in one dispatch stay images.
+#extension GL_EXT_samplerless_texture_functions : require
+
 #ifdef MODE_JUMPFLOOD_OPTIMIZED
 #define GROUP_SIZE 8
 
@@ -20,18 +25,18 @@ layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
 #endif
 
 #if defined(MODE_INITIALIZE_JUMP_FLOOD) || defined(MODE_INITIALIZE_JUMP_FLOOD_HALF)
-layout(r16ui, set = 0, binding = 1) uniform restrict readonly uimage3D src_color;
+layout(set = 0, binding = 1) uniform utexture3D src_color;
 layout(rgba8ui, set = 0, binding = 2) uniform restrict writeonly uimage3D dst_positions;
 #endif
 
 #ifdef MODE_UPSCALE_JUMP_FLOOD
-layout(r16ui, set = 0, binding = 1) uniform restrict readonly uimage3D src_color;
-layout(rgba8ui, set = 0, binding = 2) uniform restrict readonly uimage3D src_positions_half;
+layout(set = 0, binding = 1) uniform utexture3D src_color;
+layout(set = 0, binding = 2) uniform utexture3D src_positions_half;
 layout(rgba8ui, set = 0, binding = 3) uniform restrict writeonly uimage3D dst_positions;
 #endif
 
 #if defined(MODE_JUMPFLOOD) || defined(MODE_JUMPFLOOD_OPTIMIZED)
-layout(rgba8ui, set = 0, binding = 1) uniform restrict readonly uimage3D src_positions;
+layout(set = 0, binding = 1) uniform utexture3D src_positions;
 layout(rgba8ui, set = 0, binding = 2) uniform restrict writeonly uimage3D dst_positions;
 #endif
 
@@ -55,7 +60,7 @@ uvec4 group_load(ivec3 p_pos) {
 
 layout(r16ui, set = 0, binding = 1) uniform restrict readonly uimage3D src_color;
 layout(r8, set = 0, binding = 2) uniform restrict image3D dst_occlusion[8];
-layout(r32ui, set = 0, binding = 3) uniform restrict readonly uimage3D src_facing;
+layout(set = 0, binding = 3) uniform utexture3D src_facing;
 
 const uvec2 group_size_offset[11] = uvec2[](uvec2(1, 0), uvec2(3, 1), uvec2(6, 4), uvec2(10, 10), uvec2(15, 20), uvec2(21, 35), uvec2(28, 56), uvec2(36, 84), uvec2(42, 120), uvec2(46, 162), uvec2(48, 208));
 const uint group_pos[256] = uint[](0,
@@ -82,12 +87,12 @@ uint get_facing(ivec3 p_pos) {
 
 #ifdef MODE_STORE
 
-layout(rgba8ui, set = 0, binding = 1) uniform restrict readonly uimage3D src_positions;
-layout(r16ui, set = 0, binding = 2) uniform restrict readonly uimage3D src_albedo;
-layout(r8, set = 0, binding = 3) uniform restrict readonly image3D src_occlusion[8];
-layout(r32ui, set = 0, binding = 4) uniform restrict readonly uimage3D src_light;
-layout(r32ui, set = 0, binding = 5) uniform restrict readonly uimage3D src_light_aniso;
-layout(r32ui, set = 0, binding = 6) uniform restrict readonly uimage3D src_facing;
+layout(set = 0, binding = 1) uniform utexture3D src_positions;
+layout(set = 0, binding = 2) uniform utexture3D src_albedo;
+layout(set = 0, binding = 3) uniform texture3D src_occlusion[8];
+layout(set = 0, binding = 4) uniform utexture3D src_light;
+layout(set = 0, binding = 5) uniform utexture3D src_light_aniso;
+layout(set = 0, binding = 6) uniform utexture3D src_facing;
 
 layout(r8, set = 0, binding = 7) uniform restrict writeonly image3D dst_sdf;
 layout(r16ui, set = 0, binding = 8) uniform restrict writeonly uimage3D dst_occlusion;
@@ -151,7 +156,7 @@ src_process_voxels;
 #ifdef MODE_SCROLL_OCCLUSION
 
 layout(r8, set = 0, binding = 1) uniform restrict image3D dst_occlusion[8];
-layout(r16ui, set = 0, binding = 2) uniform restrict readonly uimage3D src_occlusion;
+layout(set = 0, binding = 2) uniform utexture3D src_occlusion;
 
 #endif
 
@@ -211,9 +216,9 @@ void main() {
 	ivec3 write_pos = pos + max(ivec3(0), params.scroll);
 
 	read_pos.z += params.cascade * params.grid_size;
-	uint occlusion = imageLoad(src_occlusion, read_pos).r;
+	uint occlusion = texelFetch(src_occlusion, read_pos, 0).r;
 	read_pos.x += params.grid_size;
-	occlusion |= imageLoad(src_occlusion, read_pos).r << 16;
+	occlusion |= texelFetch(src_occlusion, read_pos, 0).r << 16;
 
 	const uint occlusion_shift[8] = uint[](12, 8, 4, 0, 28, 24, 20, 16);
 
@@ -228,7 +233,7 @@ void main() {
 
 	ivec3 pos = ivec3(gl_GlobalInvocationID.xyz);
 
-	uint c = imageLoad(src_color, pos).r;
+	uint c = texelFetch(src_color, pos, 0).r;
 	uvec4 v;
 	if (bool(c & 0x1)) {
 		//bit set means this is solid
@@ -254,7 +259,7 @@ void main() {
 
 	for (uint i = 0; i < 8; i++) {
 		ivec3 src_pos = base_pos + ((ivec3(i) >> ivec3(0, 1, 2)) & ivec3(1, 1, 1));
-		uint c = imageLoad(src_color, src_pos).r;
+		uint c = texelFetch(src_color, src_pos, 0).r;
 		if (bool(c & 1)) {
 			uvec4 v = uvec4(uvec3(src_pos), 255);
 			closest[closest_count] = v;
@@ -283,7 +288,7 @@ void main() {
 		posf = posf * 2.0 + 0.5;
 	}
 
-	uvec4 p = imageLoad(src_positions, pos);
+	uvec4 p = texelFetch(src_positions, pos, 0);
 
 	if (!params.half_size && p == uvec4(uvec3(pos), 255)) {
 		imageStore(dst_positions, pos, p);
@@ -332,7 +337,7 @@ void main() {
 		if (any(lessThan(ofs, ivec3(0))) || any(greaterThanEqual(ofs, ivec3(params.grid_size)))) {
 			continue;
 		}
-		uvec4 q = imageLoad(src_positions, ofs);
+		uvec4 q = texelFetch(src_positions, ofs, 0);
 
 		if (q.w == 0) {
 			continue; //was not initialized yet, ignore
@@ -364,7 +369,7 @@ void main() {
 			ivec3 load_global_pos = group_pos + (load_pos - ivec3(1)) * params.step_size;
 			uvec4 q;
 			if (all(greaterThanEqual(load_global_pos, ivec3(0))) && all(lessThan(load_global_pos, ivec3(params.grid_size)))) {
-				q = imageLoad(src_positions, load_global_pos);
+				q = texelFetch(src_positions, load_global_pos, 0);
 			} else {
 				q = uvec4(0); //unused
 			}
@@ -447,14 +452,14 @@ void main() {
 
 	ivec3 pos = ivec3(gl_GlobalInvocationID.xyz);
 
-	uint c = imageLoad(src_color, pos).r;
+	uint c = texelFetch(src_color, pos, 0).r;
 	uvec4 v;
 	if (bool(c & 1)) {
 		//bit set means this is solid
 		v.xyz = uvec3(pos);
 		v.w = 255; //not zero means used
 	} else {
-		v = imageLoad(src_positions_half, pos >> 1);
+		v = texelFetch(src_positions_half, pos >> 1, 0);
 		float d = length(vec3(ivec3(v.xyz) - pos));
 
 		ivec3 vbase = ivec3(v.xyz - (v.xyz & uvec3(1)));
@@ -466,7 +471,7 @@ void main() {
 
 			float d2 = length(vec3(p - pos));
 			if (d2 < d) { //check valid distance before test so we avoid a read
-				uint c2 = imageLoad(src_color, p).r;
+				uint c2 = texelFetch(src_color, p, 0).r;
 				if (bool(c2 & 1)) {
 					v.xyz = uvec3(p);
 					d = d2;
@@ -517,7 +522,7 @@ void main() {
 			for (int j = 0; j < 4; j++) {
 				ivec3 foffset = region_offset + offset + ivec3(j, 0, 0);
 				if (all(greaterThanEqual(foffset, ivec3(0))) && all(lessThan(foffset, ivec3(params.grid_size)))) {
-					uint f = imageLoad(src_facing, foffset).r;
+					uint f = texelFetch(src_facing, foffset, 0).r;
 					facing_pack |= f << (j * 8);
 				}
 			}
@@ -950,7 +955,7 @@ void main() {
 	ivec3 local = ivec3(gl_LocalInvocationID.xyz);
 	ivec3 pos = ivec3(gl_GlobalInvocationID.xyz);
 	// store SDF
-	uvec4 p = imageLoad(src_positions, pos);
+	uvec4 p = texelFetch(src_positions, pos, 0);
 
 	bool solid = false;
 	float d;
@@ -972,7 +977,7 @@ void main() {
 	uint occlusion = 0;
 	const uint occlusion_shift[8] = uint[](12, 8, 4, 0, 28, 24, 20, 16);
 	for (int i = 0; i < 8; i++) {
-		float occ = imageLoad(src_occlusion[i], pos).r;
+		float occ = texelFetch(src_occlusion[i], pos, 0).r;
 		occlusion |= uint(clamp(occ * 15.0, 0.0, 15.0)) << occlusion_shift[i];
 	}
 	{
@@ -1008,7 +1013,7 @@ void main() {
 					}
 					ivec3 npos = pos + ivec3(i, j, k);
 					if (all(greaterThanEqual(npos, ivec3(0))) && all(lessThan(npos, ivec3(params.grid_size)))) {
-						p = imageLoad(src_positions, npos);
+						p = texelFetch(src_positions, npos, 0);
 						if (ivec3(p.xyz) == pos) {
 							neighbour_bits |= (1 << bit_index);
 						}
@@ -1018,8 +1023,8 @@ void main() {
 			}
 		}
 
-		uint rgb = imageLoad(src_albedo, pos).r;
-		uint facing = imageLoad(src_facing, pos).r;
+		uint rgb = texelFetch(src_albedo, pos, 0).r;
+		uint facing = texelFetch(src_facing, pos, 0).r;
 
 		store_positions[index].albedo = rgb >> 1; //store as it comes (555) to avoid precision loss (and move away the alpha bit)
 		store_positions[index].albedo |= (facing & 0x3F) << 15; // store facing in bits 15-21
@@ -1027,8 +1032,8 @@ void main() {
 		store_positions[index].albedo |= neighbour_bits << 21; //store lower 11 bits of neighbors with remaining albedo
 		store_positions[index].position |= (neighbour_bits >> 11) << 21; //store 11 bits more of neighbors with position
 
-		store_positions[index].light = imageLoad(src_light, pos).r;
-		store_positions[index].light_aniso = imageLoad(src_light_aniso, pos).r;
+		store_positions[index].light = texelFetch(src_light, pos, 0).r;
+		store_positions[index].light_aniso = texelFetch(src_light_aniso, pos, 0).r;
 		//add neighbors
 		store_positions[index].light |= (neighbour_bits >> 22) << 30; //store 2 bits more of neighbors with light
 		store_positions[index].light_aniso |= (neighbour_bits >> 24) << 30; //store 2 bits more of neighbors with aniso
