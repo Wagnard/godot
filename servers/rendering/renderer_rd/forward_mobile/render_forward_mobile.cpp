@@ -2737,19 +2737,20 @@ void RenderForwardMobile::GeometryInstanceForwardMobile::set_use_lightmap(RID p_
 }
 
 void RenderForwardMobile::GeometryInstanceForwardMobile::set_lightmap_capture(const Color *p_sh9) {
+	// The scene cull sets the capture every frame for captured instances and the list fill reads it every frame: the
+	// surfaces are rebuilt only when it appears or goes away (whether they can use a lightmap).
 	if (p_sh9) {
 		if (lightmap_sh == nullptr) {
 			lightmap_sh = RenderForwardMobile::get_singleton()->geometry_instance_lightmap_sh.alloc();
+			_mark_dirty();
 		}
 
 		memcpy(lightmap_sh->sh, p_sh9, sizeof(Color) * 9);
-	} else {
-		if (lightmap_sh != nullptr) {
-			RenderForwardMobile::get_singleton()->geometry_instance_lightmap_sh.free(lightmap_sh);
-			lightmap_sh = nullptr;
-		}
+	} else if (lightmap_sh != nullptr) {
+		RenderForwardMobile::get_singleton()->geometry_instance_lightmap_sh.free(lightmap_sh);
+		lightmap_sh = nullptr;
+		_mark_dirty();
 	}
-	_mark_dirty();
 }
 
 void RenderForwardMobile::geometry_instance_free(RenderGeometryInstance *p_geometry_instance) {

@@ -176,19 +176,20 @@ void RasterizerSceneGLES3::GeometryInstanceGLES3::set_use_lightmap(RID p_lightma
 }
 
 void RasterizerSceneGLES3::GeometryInstanceGLES3::set_lightmap_capture(const Color *p_sh9) {
+	// The scene cull sets the capture every frame for captured instances and drawing reads it: the surfaces are
+	// rebuilt only when it appears or goes away.
 	if (p_sh9) {
 		if (lightmap_sh == nullptr) {
 			lightmap_sh = memnew(GeometryInstanceLightmapSH);
+			_mark_dirty();
 		}
 
 		memcpy(lightmap_sh->sh, p_sh9, sizeof(Color) * 9);
-	} else {
-		if (lightmap_sh != nullptr) {
-			memdelete(lightmap_sh);
-			lightmap_sh = nullptr;
-		}
+	} else if (lightmap_sh != nullptr) {
+		memdelete(lightmap_sh);
+		lightmap_sh = nullptr;
+		_mark_dirty();
 	}
-	_mark_dirty();
 }
 
 void RasterizerSceneGLES3::_update_dirty_geometry_instances() {
