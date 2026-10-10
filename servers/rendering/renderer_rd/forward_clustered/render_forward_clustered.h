@@ -786,6 +786,8 @@ protected:
 
 		mutable RID rt_deformed_handle;
 
+		uint32_t surface_slot = UINT32_MAX; // Its place in surface_slots.
+
 		GeometryInstanceSurfaceDataCache *next = nullptr;
 		GeometryInstanceForwardClustered *owner = nullptr;
 		SelfList<GeometryInstanceSurfaceDataCache> compilation_dirty_element;
@@ -901,11 +903,27 @@ protected:
 		String first_mismatch;
 	} instance_slots;
 
+	// Step 2: the part of InstanceData that belongs to the mesh surface (compressed AABB, UV scale), one place per
+	// surface cache, written when the cache is built (a mesh change rebuilds the caches through _mark_dirty()).
+	struct SurfaceSlotData {
+		float compressed_aabb_position[4];
+		float compressed_aabb_size[4];
+		float uv_scale[4];
+	};
+
+	struct SurfaceSlots {
+		LocalVector<SurfaceSlotData> data;
+		LocalVector<uint32_t> free_slots;
+	} surface_slots;
+
+	void _surface_slot_alloc(GeometryInstanceSurfaceDataCache *p_surface);
+	void _surface_slot_free(GeometryInstanceSurfaceDataCache *p_surface);
+
 	void _instance_slot_alloc(GeometryInstanceForwardClustered *p_instance);
 	void _instance_slot_free(GeometryInstanceForwardClustered *p_instance);
 	void _instance_slots_flush();
 	static void _instance_slot_compute(const GeometryInstanceForwardClustered *p_instance, InstanceSlotData &r_data);
-	void _instance_slot_check(const GeometryInstanceForwardClustered *p_instance, const SceneState::InstanceData &p_data);
+	void _instance_slot_check(const GeometryInstanceForwardClustered *p_instance, const GeometryInstanceSurfaceDataCache *p_surface, const SceneState::InstanceData &p_data);
 
 	// These are not used in the Forward+ path, it has different light clustering tech.
 	virtual uint32_t get_max_lights_total() override { return 0; }

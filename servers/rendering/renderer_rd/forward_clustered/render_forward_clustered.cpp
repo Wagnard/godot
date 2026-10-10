@@ -1230,6 +1230,49 @@ void RenderForwardClustered::_instance_slot_compute(const GeometryInstanceForwar
 	r_data.lightmap_uv_scale[3] = p_instance->lightmap_uv_scale.size.y;
 }
 
+void RenderForwardClustered::_surface_slot_alloc(GeometryInstanceSurfaceDataCache *p_surface) {
+	SurfaceSlots &slots = surface_slots;
+	uint32_t slot;
+	if (!slots.free_slots.is_empty()) {
+		slot = slots.free_slots[slots.free_slots.size() - 1];
+		slots.free_slots.resize(slots.free_slots.size() - 1);
+	} else {
+		slot = slots.data.size();
+		slots.data.push_back(SurfaceSlotData());
+	}
+	p_surface->surface_slot = slot;
+
+	// The surface's share of _store_instance_data().
+	AABB aabb = AABB(Vector3(0.0, 0.0, 0.0), Vector3(1.0, 1.0, 1.0));
+	Vector4 uv_scale = Vector4(0.0, 0.0, 0.0, 0.0);
+	RendererRD::MeshStorage *mesh_storage = RendererRD::MeshStorage::get_singleton();
+	if (mesh_storage->mesh_surface_get_format(p_surface->surface) & RSE::ARRAY_FLAG_COMPRESS_ATTRIBUTES) {
+		aabb = mesh_storage->mesh_surface_get_aabb(p_surface->surface);
+		uv_scale = mesh_storage->mesh_surface_get_uv_scale(p_surface->surface);
+	}
+	SurfaceSlotData &data = slots.data[slot];
+	data.compressed_aabb_position[0] = aabb.position.x;
+	data.compressed_aabb_position[1] = aabb.position.y;
+	data.compressed_aabb_position[2] = aabb.position.z;
+	data.compressed_aabb_position[3] = 0.0f;
+	data.compressed_aabb_size[0] = aabb.size.x;
+	data.compressed_aabb_size[1] = aabb.size.y;
+	data.compressed_aabb_size[2] = aabb.size.z;
+	data.compressed_aabb_size[3] = 0.0f;
+	data.uv_scale[0] = uv_scale.x;
+	data.uv_scale[1] = uv_scale.y;
+	data.uv_scale[2] = uv_scale.z;
+	data.uv_scale[3] = uv_scale.w;
+}
+
+void RenderForwardClustered::_surface_slot_free(GeometryInstanceSurfaceDataCache *p_surface) {
+	if (p_surface->surface_slot == UINT32_MAX) {
+		return;
+	}
+	surface_slots.free_slots.push_back(p_surface->surface_slot);
+	p_surface->surface_slot = UINT32_MAX;
+}
+
 void RenderForwardClustered::_instance_slot_alloc(GeometryInstanceForwardClustered *p_instance) {
 	InstanceSlots &slots = instance_slots;
 	uint32_t slot;
@@ -1277,8 +1320,8 @@ void RenderForwardClustered::_instance_slots_flush() {
 			slots.frames++;
 			if (slots.frames == 240) {
 				MutexLock lock(slots.first_mismatch_mutex);
-				print_line(vformat("Instance slots: %d in use, %.1f written per frame; %.0f elements checked per frame, %d differences%s.",
-						slots.owners.size() - slots.free_slots.size(), slots.written / 240.0, slots.checked.get() / 240.0, slots.mismatches.get(), slots.first_mismatch.is_empty() ? String() : " (first: " + slots.first_mismatch + ")"));
+				print_line(vformat("Instance slots: %d in use, %.1f written per frame, %d surface slots; %.0f elements checked per frame, %d differences%s.",
+						slots.owners.size() - slots.free_slots.size(), slots.written / 240.0, surface_slots.data.size() - surface_slots.free_slots.size(), slots.checked.get() / 240.0, slots.mismatches.get(), slots.first_mismatch.is_empty() ? String() : " (first: " + slots.first_mismatch + ")"));
 				slots.frames = 0;
 				slots.written = 0;
 				slots.checked.set(0);
@@ -1302,7 +1345,7 @@ void RenderForwardClustered::_instance_slots_flush() {
 	slots.dirty.clear();
 }
 
-void RenderForwardClustered::_instance_slot_check(const GeometryInstanceForwardClustered *p_instance, const SceneState::InstanceData &p_data) {
+void RenderForwardClustered::_instance_slot_check(const GeometryInstanceForwardClustered *p_instance, const GeometryInstanceSurfaceDataCache *p_surface, const SceneState::InstanceData &p_data) {
 	InstanceSlots &slots = instance_slots;
 	slots.checked.increment();
 	if (p_instance->instance_slot == UINT32_MAX) {
@@ -1324,6 +1367,16 @@ void RenderForwardClustered::_instance_slot_check(const GeometryInstanceForwardC
 	} else if (memcmp(slot.model_precision, p_data.model_precision, sizeof(float) * 3) != 0 || memcmp(slot.prev_model_precision, p_data.prev_model_precision, sizeof(float) * 3) != 0) {
 		field = "model_precision";
 #endif
+	} else if (p_surface->surface_slot != UINT32_MAX) {
+		// The fourth component of the AABB vectors is never written in InstanceData, nor read.
+		const SurfaceSlotData &surface = surface_slots.data[p_surface->surface_slot];
+		if (memcmp(surface.compressed_aabb_position, p_data.compressed_aabb_position, sizeof(float) * 3) != 0 || memcmp(surface.compressed_aabb_size, p_data.compressed_aabb_size, sizeof(float) * 3) != 0) {
+			field = "compressed_aabb";
+		} else if (memcmp(surface.uv_scale, p_data.uv_scale, sizeof(surface.uv_scale)) != 0) {
+			field = "uv_scale";
+		}
+	} else {
+		field = "surface without slot";
 	}
 	if (field && slots.mismatches.increment() == 1) {
 		MutexLock lock(slots.first_mismatch_mutex);
@@ -1431,7 +1484,7 @@ void RenderForwardClustered::_fill_instance_data_range(RenderListType p_render_l
 		SceneState::InstanceData instance_data;
 		_store_instance_data(inst, surface, inst->flags_cache, inst->gi_offset_cache, &instance_data);
 		if (unlikely(instance_slots.check)) {
-			_instance_slot_check(inst, instance_data);
+			_instance_slot_check(inst, surface, instance_data);
 		}
 
 		scene_state.curr_gpu_ptr[p_render_list][i + p_offset] = instance_data;
@@ -4164,7 +4217,7 @@ void RenderForwardClustered::_render_shadow_instance_range(uint32_t p_from, uint
 		SceneState::InstanceData instance_data;
 		_store_instance_data(inst, surface, element.flags, element.gi_offset, &instance_data);
 		if (unlikely(instance_slots.check)) {
-			_instance_slot_check(inst, instance_data);
+			_instance_slot_check(inst, surface, instance_data);
 		}
 		gpu_ptr[i] = instance_data;
 
@@ -5578,6 +5631,7 @@ void RenderForwardClustered::GeometryInstanceForwardClustered::_mark_dirty() {
 
 	while (surf) {
 		GeometryInstanceSurfaceDataCache *next = surf->next;
+		RenderForwardClustered::get_singleton()->_surface_slot_free(surf);
 		RenderForwardClustered::get_singleton()->geometry_instance_surface_alloc.free(surf);
 		surf = next;
 	}
@@ -5706,6 +5760,7 @@ void RenderForwardClustered::_geometry_instance_add_surface_with_material(Geomet
 	sdcache->surface = mesh_storage->mesh_get_surface(p_mesh, p_surface);
 	sdcache->primitive = mesh_storage->mesh_surface_get_primitive(sdcache->surface);
 	sdcache->surface_index = p_surface;
+	_surface_slot_alloc(sdcache);
 
 	if (ginstance->data->dirty_dependencies) {
 		RSG::utilities->base_update_dependency(p_mesh, &ginstance->data->dependency_tracker);
@@ -6555,6 +6610,7 @@ void RenderForwardClustered::geometry_instance_free(RenderGeometryInstance *p_ge
 	GeometryInstanceSurfaceDataCache *surf = ginstance->surface_caches;
 	while (surf) {
 		GeometryInstanceSurfaceDataCache *next = surf->next;
+		_surface_slot_free(surf);
 		geometry_instance_surface_alloc.free(surf);
 		surf = next;
 	}
