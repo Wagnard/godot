@@ -1044,6 +1044,16 @@
 				Returns the shape's type.
 			</description>
 		</method>
+		<method name="shape_prebuild">
+			<return type="void" />
+			<param index="0" name="shape" type="RID" />
+			<description>
+				Builds the physics engine's internal representation of the shape now, on the calling thread, instead of lazily when a body or query first uses it. Use it to move the build cost of large shapes (such as a [ConcavePolygonShape3D]) off the main thread, for example on a worker thread after a threaded scene load and before the scene is instantiated.
+				This method is safe to call from any thread, but not concurrently with [method shape_set_data] on the same shape, and the shape must stay alive for the duration of the call. A built shape is kept until its data changes.
+				[b]Note:[/b] When called from a thread other than the physics server's thread, this first waits for the server's pending commands to be applied (such as [method shape_set_data] queued by a threaded resource load), which happens at the next physics synchronization. Do not call it from a thread the main thread is waiting on, or it will deadlock.
+				[b]Note:[/b] This does nothing in Godot Physics, which has no lazy build step. It is implemented by Jolt Physics.
+			</description>
+		</method>
 		<method name="shape_set_data">
 			<return type="void" />
 			<param index="0" name="shape" type="RID" />

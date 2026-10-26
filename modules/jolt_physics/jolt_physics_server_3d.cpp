@@ -145,6 +145,13 @@ Variant JoltPhysicsServer3D::shape_get_data(RID p_shape) const {
 	return shape->get_data();
 }
 
+void JoltPhysicsServer3D::shape_prebuild(RID p_shape) {
+	JoltShape3D *shape = shape_owner.get_or_null(p_shape);
+	ERR_FAIL_NULL(shape);
+
+	shape->try_build();
+}
+
 void JoltPhysicsServer3D::shape_set_custom_solver_bias(RID p_shape, real_t p_bias) {
 	JoltShape3D *shape = shape_owner.get_or_null(p_shape);
 	ERR_FAIL_NULL(shape);
