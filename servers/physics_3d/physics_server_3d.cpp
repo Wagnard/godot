@@ -714,6 +714,7 @@ void PhysicsServer3D::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("shape_get_type", "shape"), &PhysicsServer3D::shape_get_type);
 	ClassDB::bind_method(D_METHOD("shape_get_data", "shape"), &PhysicsServer3D::shape_get_data);
+	ClassDB::bind_method(D_METHOD("shape_prebuild", "shape"), &PhysicsServer3D::shape_prebuild);
 	ClassDB::bind_method(D_METHOD("shape_get_margin", "shape"), &PhysicsServer3D::shape_get_margin);
 
 	ClassDB::bind_method(D_METHOD("space_create"), &PhysicsServer3D::space_create);

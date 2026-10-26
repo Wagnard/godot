@@ -278,6 +278,9 @@ public:
 
 	virtual ShapeType shape_get_type(RID p_shape) const = 0;
 	virtual Variant shape_get_data(RID p_shape) const = 0;
+	// Builds the backend shape now, on the calling thread, instead of lazily on first use. Safe from a worker for a shape
+	// nothing uses yet. No-op unless the backend overrides it (Jolt).
+	virtual void shape_prebuild(RID p_shape) {}
 
 	virtual void shape_set_margin(RID p_shape, real_t p_margin) = 0;
 	virtual real_t shape_get_margin(RID p_shape) const = 0;
