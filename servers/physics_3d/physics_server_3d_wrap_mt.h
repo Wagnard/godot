@@ -100,7 +100,8 @@ public:
 
 	FUNC1RC(ShapeType, shape_get_type, RID);
 	FUNC1RC(Variant, shape_get_data, RID);
-	FUNC1(shape_prebuild, RID);
+	// Thread-safe in the backend; run on the caller's thread instead of queuing it.
+	virtual void shape_prebuild(RID p_shape) override { physics_server_3d->shape_prebuild(p_shape); }
 	FUNC1RC(real_t, shape_get_custom_solver_bias, RID);
 #if 0
 	//these work well, but should be used from the main thread only
