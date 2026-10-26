@@ -43,6 +43,7 @@
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_server_default.h"
+#include "servers/rendering/shadow_flicker_diag.h"
 #include "servers/rendering/storage/ltc_lut.gen.h"
 
 #ifdef _MSC_VER
@@ -4848,6 +4849,34 @@ void RenderForwardClustered::_render_shadow_end() {
 	for (uint32_t i = 0; i < pass_count; i++) {
 		SceneState::ShadowPass &shadow_pass = shadow_passes[i];
 		const BitField<RD::DrawFlags> draw_flags = shadow_pass.clear_depth ? RD::DRAW_CLEAR_DEPTH : RD::DRAW_DEFAULT_ALL;
+
+		if (ShadowFlickerDiag::enabled() && (shadow_pass.cube_copy >= 0 || shadow_pass.pass_mode == PASS_MODE_SHADOW_CUBE || shadow_pass.pass_mode == PASS_MODE_SHADOW_DP || shadow_pass.rect != Rect2i())) {
+			// DIAG: what this positional shadow pass draws: its elements (surface, faces, instancing run), the instance
+			// slot data they read, and where it goes.
+			const RenderList &rl = render_list[RENDER_LIST_SECONDARY];
+			uint64_t element_hash = 0;
+			uint64_t slot_hash = 0;
+			for (uint32_t k = shadow_pass.element_from; k < shadow_pass.element_from + shadow_pass.element_count; k++) {
+				const GeometryInstanceSurfaceDataCache *surface = rl.elements[k];
+				const RenderElementInfo &info = rl.element_info[k];
+				element_hash = hash_murmur3_one_64(uint64_t(surface), hash_murmur3_one_64(uint64_t(info.cube_face_mask) | (uint64_t(info.repeat) << 8) | (uint64_t(info.lod_index) << 32), element_hash));
+				const uint32_t slot = surface->owner->instance_slot;
+				slot_hash = hash_murmur3_one_64(slot, slot_hash);
+				if (slot < instance_slots.data.size()) {
+					slot_hash = hash_murmur3_buffer(&instance_slots.data[slot], sizeof(InstanceSlotData), slot_hash);
+				}
+			}
+			int64_t copy_x = -1;
+			int64_t copy_y = -1;
+			if (shadow_pass.cube_copy >= 0) {
+				copy_x = cube_shadow_copies[shadow_pass.cube_copy].atlas_rect.position.x;
+				copy_y = cube_shadow_copies[shadow_pass.cube_copy].atlas_rect.position.y;
+			}
+			// Not the scene UBO's index: it shifts whenever another light gains or loses a pass.
+			static const char *const names[] = { "mode", "elements", "element_hash", "slot_hash", "clear", "framebuffer", "parts", "rect_x", "rect_y", "copy_x", "copy_y" };
+			const uint64_t fields[] = { uint64_t(shadow_pass.pass_mode), shadow_pass.element_count, element_hash, slot_hash, shadow_pass.clear_depth, shadow_pass.framebuffer.get_id(), part_count > 0 ? shadow_pass_part_count[i] : 0u, uint64_t(int64_t(shadow_pass.rect.position.x)), uint64_t(int64_t(shadow_pass.rect.position.y)), uint64_t(copy_x), uint64_t(copy_y) };
+			ShadowFlickerDiag::get().record("shadow pass", names, shadow_pass.list_key, RSG::rasterizer->get_frame_number(), fields, 11);
+		}
 		if (part_count > 0) {
 			RD::get_singleton()->draw_list_begin(shadow_pass.framebuffer, draw_flags, Vector<Color>(), 0.0f, 0, shadow_pass.rect);
 			for (uint32_t k = 0; k < shadow_pass_part_count[i]; k++) {
