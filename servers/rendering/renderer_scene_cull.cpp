@@ -2402,6 +2402,29 @@ void RendererSceneCull::_light_instance_setup_directional_shadow(int p_shadow_in
 	}
 }
 
+// Whether a shadow caster of the list animates its material. Tight caster culling keeps only the casters that can shadow
+// the view, so this is asked before it, of all of the light's casters: asked after, a static light whose only animated
+// casters are out of view would be made dirty again by its full updates but not by its tight ones, and alternate
+// between both every frame (Wagnard/godot#1). With it, such a light gets a tight update every frame, as a moving light.
+bool RendererSceneCull::_shadow_casters_animated(const PagedArray<Instance *> &p_casters, const Instance *p_light, uint32_t p_visible_layers) const {
+	const uint32_t caster_mask = p_visible_layers & RSG::light_storage->light_get_shadow_caster_mask(p_light->base);
+	for (uint64_t i = 0; i < p_casters.size(); i++) {
+		const Instance *instance = p_casters[i];
+		if (!instance->visible || !((1 << instance->base_type) & RSE::INSTANCE_GEOMETRY_MASK) || !(instance->layer_mask & caster_mask)) {
+			continue;
+		}
+		const InstanceGeometryData *geometry = static_cast<const InstanceGeometryData *>(instance->base_data);
+		if (!geometry->can_cast_shadows || !geometry->material_is_animated) {
+			continue;
+		}
+		if (instance->base_type == RSE::INSTANCE_PARTICLES && RSG::particles_storage->particles_is_inactive(instance->base)) {
+			continue;
+		}
+		return true;
+	}
+	return false;
+}
+
 bool RendererSceneCull::_light_instance_update_shadow(Instance *p_instance, const Transform3D p_cam_transform, const Projection &p_cam_projection, bool p_cam_orthogonal, bool p_cam_vaspect, RID p_shadow_atlas, Scenario *p_scenario, float p_screen_mesh_lod_threshold, uint32_t p_visible_layers) {
 	InstanceLightData *light = static_cast<InstanceLightData *>(p_instance->base_data);
 
@@ -2457,6 +2480,7 @@ bool RendererSceneCull::_light_instance_update_shadow(Instance *p_instance, cons
 					RendererSceneRender::RenderShadowData &shadow_data = render_shadow_data[max_shadows_used++];
 
 					if (!light->is_shadow_update_full()) {
+						animated_material_found = animated_material_found || _shadow_casters_animated(instance_shadow_cull_result, p_instance, p_visible_layers);
 						light_culler->cull_regular_light(instance_shadow_cull_result);
 					}
 
@@ -2552,6 +2576,7 @@ bool RendererSceneCull::_light_instance_update_shadow(Instance *p_instance, cons
 					RendererSceneRender::RenderShadowData &shadow_data = render_shadow_data[max_shadows_used++];
 
 					if (!light->is_shadow_update_full()) {
+						animated_material_found = animated_material_found || _shadow_casters_animated(instance_shadow_cull_result, p_instance, p_visible_layers);
 						light_culler->cull_regular_light(instance_shadow_cull_result);
 					}
 
@@ -2621,6 +2646,7 @@ bool RendererSceneCull::_light_instance_update_shadow(Instance *p_instance, cons
 			RendererSceneRender::RenderShadowData &shadow_data = render_shadow_data[max_shadows_used++];
 
 			if (!light->is_shadow_update_full()) {
+				animated_material_found = animated_material_found || _shadow_casters_animated(instance_shadow_cull_result, p_instance, p_visible_layers);
 				light_culler->cull_regular_light(instance_shadow_cull_result);
 			}
 
@@ -2688,6 +2714,7 @@ bool RendererSceneCull::_light_instance_update_shadow(Instance *p_instance, cons
 			RendererSceneRender::RenderShadowData &shadow_data = render_shadow_data[max_shadows_used++];
 
 			if (!light->is_shadow_update_full()) {
+				animated_material_found = animated_material_found || _shadow_casters_animated(instance_shadow_cull_result, p_instance, p_visible_layers);
 				light_culler->cull_regular_light(instance_shadow_cull_result);
 			}
 
