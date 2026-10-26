@@ -104,6 +104,8 @@ public:
 	virtual void shape_prebuild(RID p_shape) override {
 		if (ASYNC_COND_PUSH) {
 			command_queue.sync(); // Apply pending commands (e.g. shape_set_data from the loader) before building.
+		} else {
+			command_queue.flush_if_pending();
 		}
 		physics_server_3d->shape_prebuild(p_shape);
 	}
