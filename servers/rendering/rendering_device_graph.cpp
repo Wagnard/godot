@@ -2524,6 +2524,14 @@ void RenderingDeviceGraph::initialize(RDD *p_driver, RenderPassCreationFunction 
 	if (graph_check_enabled) {
 		print_line("RenderingDeviceGraph: GODOT_RD_GRAPH_CHECK=1, every frame's levels are checked against the recorded accesses (debugging, slow).");
 	}
+	order_chain_enabled = OS::get_singleton()->get_environment("GODOT_SHADOW_CHAIN_ORDER") == "1";
+	if (order_chain_enabled) {
+		print_line("RenderingDeviceGraph: GODOT_SHADOW_CHAIN_ORDER=1, shadow passes and their cube-to-DP copies keep submission order (debugging).");
+	}
+	updates_in_place = OS::get_singleton()->get_environment("GODOT_RD_UPDATES_IN_PLACE") == "1";
+	if (updates_in_place) {
+		print_line("RenderingDeviceGraph: GODOT_RD_UPDATES_IN_PLACE=1, buffer and texture updates no longer move above the previous command (debugging).");
+	}
 	// GODOT_PARALLEL_RECORDING_SPLIT_DRAW_LISTS=0 keeps every draw list in one slice.
 	parallel_split_draw_lists = driver->api_trait_get(RDD::API_TRAIT_RESUMABLE_RENDER_PASSES) && OS::get_singleton()->get_environment("GODOT_PARALLEL_RECORDING_SPLIT_DRAW_LISTS") != "0";
 	print_verbose(vformat("RenderingDeviceGraph: parallel recording in up to %d command buffers.", parallel_slice_count));
@@ -2567,6 +2575,8 @@ void RenderingDeviceGraph::begin() {
 	command_synchronization_pending = false;
 	command_tlas_build_index = -1;
 	command_label_index = -1;
+	order_chain_active = false;
+	order_chain_last = -1;
 	graph_check_accesses.clear();
 	if (unlikely(!graph_dump_directory.is_empty())) {
 		const String trigger = graph_dump_directory.path_join("dump_now");
@@ -2791,6 +2801,10 @@ void RenderingDeviceGraph::add_buffer_update(RDD::BufferID p_dst, ResourceTracke
 
 	ResourceUsage buffer_usage = RESOURCE_USAGE_COPY_TO;
 	_add_command_to_graph(&p_dst_tracker, &buffer_usage, 1, command_index, command);
+
+	if (unlikely(updates_in_place) && command_index > 0) {
+		_add_adjacent_command(command_index - 1, command_index, command);
+	}
 }
 
 void RenderingDeviceGraph::add_driver_callback(RDD::DriverCallback p_callback, void *p_userdata, VectorView<ResourceTracker *> p_trackers, VectorView<RenderingDeviceGraph::ResourceUsage> p_usages) {
@@ -3352,6 +3366,14 @@ void RenderingDeviceGraph::add_draw_list_end() {
 		DEV_ASSERT(offset == instruction_data_size);
 	}
 	_add_command_to_graph(draw_instruction_list.command_trackers.ptr(), draw_instruction_list.command_tracker_usages.ptr(), draw_instruction_list.command_trackers.size(), command_index, command);
+
+	if (unlikely(order_chain_active)) {
+		// GODOT_SHADOW_CHAIN_ORDER: after the chain's previous draw list.
+		if (order_chain_last >= 0) {
+			_add_adjacent_command(order_chain_last, command_index, command);
+		}
+		order_chain_last = command_index;
+	}
 }
 
 void RenderingDeviceGraph::add_texture_clear_color(RDD::TextureID p_dst, ResourceTracker *p_dst_tracker, const Color &p_color, const RDD::TextureSubresourceRange &p_range) {
@@ -3514,6 +3536,10 @@ void RenderingDeviceGraph::add_texture_update(RDD::TextureID p_dst, ResourceTrac
 		ResourceUsage usage = RESOURCE_USAGE_COPY_TO;
 		_add_command_to_graph(&p_dst_tracker, &usage, 1, command_index, command);
 	}
+
+	if (unlikely(updates_in_place) && command_index > 0) {
+		_add_adjacent_command(command_index - 1, command_index, command);
+	}
 }
 
 void RenderingDeviceGraph::add_capture_timestamp(RDD::QueryPoolID p_query_pool, uint32_t p_index) {
@@ -3531,6 +3557,17 @@ void RenderingDeviceGraph::add_synchronization() {
 	if (command_count > 0) {
 		command_synchronization_pending = true;
 	}
+}
+
+void RenderingDeviceGraph::debug_order_chain_begin() {
+	if (order_chain_enabled) {
+		order_chain_active = true;
+		order_chain_last = -1;
+	}
+}
+
+void RenderingDeviceGraph::debug_order_chain_end() {
+	order_chain_active = false;
 }
 
 void RenderingDeviceGraph::begin_label(const Span<char> &p_label_name, const Color &p_color) {

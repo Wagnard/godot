@@ -1009,6 +1009,14 @@ private:
 	bool graph_check_enabled = false;
 	bool serialize_levels = false;
 
+	// Debugging (Wagnard/godot#1). GODOT_SHADOW_CHAIN_ORDER=1: the draw lists recorded between debug_order_chain_begin()
+	// and debug_order_chain_end() keep their submission order. GODOT_RD_UPDATES_IN_PLACE=1: a buffer or texture update
+	// runs after the command submitted before it instead of being moved up.
+	bool order_chain_enabled = false;
+	bool order_chain_active = false;
+	int32_t order_chain_last = -1;
+	bool updates_in_place = false;
+
 	// GODOT_RD_GRAPH_DUMP=<directory> (debugging): when <directory>/dump_now appears, the next 4 frames' commands are written
 	// to <directory>, in level order with their accesses. Shared by the graphs that alternate frames.
 	String graph_dump_directory;
@@ -1146,6 +1154,8 @@ public:
 	void add_texture_update(RDD::TextureID p_dst, ResourceTracker *p_dst_tracker, VectorView<RecordedBufferToTextureCopy> p_buffer_copies, VectorView<ResourceTracker *> p_buffer_trackers = VectorView<ResourceTracker *>());
 	void add_capture_timestamp(RDD::QueryPoolID p_query_pool, uint32_t p_index);
 	void add_synchronization();
+	void debug_order_chain_begin();
+	void debug_order_chain_end();
 	void begin_label(const Span<char> &p_label_name, const Color &p_color);
 	void end_label();
 	void end(bool p_reorder_commands, bool p_full_barriers, RDD::CommandBufferID &r_command_buffer, CommandBufferPool &r_command_buffer_pool);

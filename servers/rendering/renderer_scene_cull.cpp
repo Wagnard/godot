@@ -36,7 +36,6 @@
 #include "core/object/callable_mp.h"
 #include "core/object/worker_thread_pool.h"
 #include "servers/rendering/rendering_light_culler.h"
-#include "servers/rendering/shadow_flicker_diag.h"
 #include "servers/rendering/rendering_server.h"
 #include "servers/rendering/rendering_server_default.h"
 
@@ -3824,13 +3823,6 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 				continue;
 			}
 
-			// DIAG (ShadowFlickerDiag): the redraw decision of this light, for this atlas.
-			const bool diag_was_dirty = light->is_shadow_dirty();
-			bool diag_allow_redraw = false;
-			bool diag_drawn = false;
-			bool diag_full = false;
-			const uint32_t diag_first_pass = max_shadows_used;
-
 			if (light->is_shadow_dirty()) {
 				// Dirty shadows have no need to be drawn if
 				// the light volume doesn't intersect the camera frustum.
@@ -3852,44 +3844,21 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 					light->last_version++;
 					light->decrement_shadow_dirty();
 				}
-				diag_allow_redraw = allow_redraw;
 			}
 
 			bool redraw = RSG::light_storage->shadow_atlas_update_light(p_shadow_atlas, light->instance, coverage, light->last_version);
 
-			bool diag_animated = false;
 			if (redraw && max_shadows_used < MAX_UPDATE_SHADOWS) {
 				//must redraw!
 				RENDER_TIMESTAMP("> Render Light3D " + itos(i));
-				diag_full = light->is_shadow_update_full();
 				if (_light_instance_update_shadow(ins, p_camera_data->main_transform, p_camera_data->main_projection, p_camera_data->is_orthogonal, p_camera_data->vaspect, p_shadow_atlas, scenario, p_screen_mesh_lod_threshold, p_visible_layers)) {
 					light->make_shadow_dirty();
-					diag_animated = true;
 				}
-				diag_drawn = max_shadows_used > diag_first_pass;
 				RENDER_TIMESTAMP("< Render Light3D " + itos(i));
 			} else {
 				if (redraw) {
 					light->make_shadow_dirty();
 				}
-			}
-
-			if (ShadowFlickerDiag::enabled()) {
-				// Casters per pass: count and a hash of (pass, geometry instance), whatever their order.
-				uint64_t caster_count = 0;
-				uint64_t caster_hash = 0;
-				for (uint32_t p = diag_first_pass; p < max_shadows_used; p++) {
-					const RendererSceneRender::RenderShadowData &shadow = render_shadow_data[p];
-					caster_count += shadow.instances.size();
-					for (uint64_t k = 0; k < shadow.instances.size(); k++) {
-						caster_hash += hash_murmur3_one_64(uint64_t(shadow.instances[k]), uint32_t(shadow.pass));
-					}
-				}
-				// Not the coverage: DLSS's camera jitter moves it every frame and it only picks the atlas place, which [light data]
-				// already follows.
-				static const char *const names[] = { "dirty", "allow", "redraw", "drawn", "full", "animated", "passes", "casters", "caster_hash", "viewport", "pos_x_cm", "pos_y_cm", "pos_z_cm" };
-				const uint64_t fields[] = { diag_was_dirty, diag_allow_redraw, redraw, diag_drawn, diag_full, diag_animated, max_shadows_used - diag_first_pass, caster_count, caster_hash, p_viewport.get_id(), uint64_t(int64_t(Math::round(ins->transform.origin.x * 100.0))), uint64_t(int64_t(Math::round(ins->transform.origin.y * 100.0))), uint64_t(int64_t(Math::round(ins->transform.origin.z * 100.0))) };
-				ShadowFlickerDiag::get().record("cull", names, light->instance.get_id() ^ (p_shadow_atlas.get_id() << 24), RSG::rasterizer->get_frame_number(), fields, 13);
 			}
 		}
 	}
