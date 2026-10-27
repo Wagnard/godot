@@ -6770,6 +6770,9 @@ void RenderingDevice::draw_list_draw(DrawListID p_list, bool p_use_indices, uint
 				_draw_list_uniform_set_bound(split, uniform_set);
 				batch_has_dynamic_buffers = batch_has_dynamic_buffers || uniform_set->has_dynamic_buffers;
 
+				if (unlikely(graph_check_uniform_sets)) {
+					_graph_check_uniform_set(uniform_set);
+				}
 				draw_graph->add_draw_list_usages(uniform_set->draw_trackers, uniform_set->draw_trackers_usage, graph_split);
 				dl->state.sets[i].bound = true;
 
@@ -6914,6 +6917,9 @@ void RenderingDevice::draw_list_draw_indirect(DrawListID p_list, bool p_use_indi
 			ERR_FAIL_NULL(uniform_set);
 			_draw_list_uniform_set_bound(split, uniform_set);
 
+			if (unlikely(graph_check_uniform_sets)) {
+				_graph_check_uniform_set(uniform_set);
+			}
 			draw_graph->add_draw_list_usages(uniform_set->draw_trackers, uniform_set->draw_trackers_usage, graph_split);
 
 			dl->state.sets[i].bound = true;
@@ -7830,6 +7836,9 @@ void RenderingDevice::compute_list_dispatch(ComputeListID p_list, uint32_t p_x_g
 			_uniform_set_update_clears(uniform_set);
 			batch_has_dynamic_buffers = batch_has_dynamic_buffers || uniform_set->has_dynamic_buffers;
 
+			if (unlikely(graph_check_uniform_sets)) {
+				_graph_check_uniform_set(uniform_set);
+			}
 			draw_graph->add_compute_list_usages(uniform_set->draw_trackers, uniform_set->draw_trackers_usage);
 			compute_list.state.sets[i].bound = true;
 		}
@@ -7970,6 +7979,9 @@ void RenderingDevice::compute_list_dispatch_indirect(ComputeListID p_list, RID p
 			_uniform_set_update_clears(uniform_set);
 			batch_has_dynamic_buffers = batch_has_dynamic_buffers || uniform_set->has_dynamic_buffers;
 
+			if (unlikely(graph_check_uniform_sets)) {
+				_graph_check_uniform_set(uniform_set);
+			}
 			draw_graph->add_compute_list_usages(uniform_set->draw_trackers, uniform_set->draw_trackers_usage);
 			compute_list.state.sets[i].bound = true;
 		}
@@ -8474,6 +8486,34 @@ bool RenderingDevice::_index_array_make_mutable(IndexArray *p_index_array, RDG::
 		// Index array should assign the tracker from the buffer.
 		p_index_array->draw_tracker = p_resource_tracker;
 		return true;
+	}
+}
+
+void RenderingDevice::_graph_check_uniform_set(const UniformSet *p_uniform_set) {
+	auto report = [&](RID p_resource, const String &p_what) {
+		const uint64_t key = hash_murmur3_one_64(p_resource.get_id(), hash_murmur3_one_64(uint64_t(p_uniform_set)));
+		MutexLock lock(graph_check_mutex);
+		if (graph_check_reported.has(key)) {
+			return;
+		}
+		graph_check_reported.insert(key);
+		print_line(vformat("RenderingDevice check: a uniform set reads %s without the graph tracking it (resource %s): its commands can be reordered around the writes.", p_what, String::num_uint64(p_resource.get_id(), 16)));
+	};
+
+	for (const KeyValue<RID, RDG::ResourceUsage> &E : p_uniform_set->untracked_usage) {
+		if (const Texture *texture = texture_owner.get_or_null(E.key)) {
+			const Texture *owner = texture->owner.is_valid() ? texture_owner.get_or_null(texture->owner) : nullptr;
+			const String what = vformat("a %dx%d texture (format %d, %d layers, %s)", texture->width, texture->height, int(texture->format), texture->layers, owner ? "a view of another texture" : "its own resource");
+			if (texture->draw_tracker != nullptr) {
+				report(E.key, what + ", left untracked although it is tracked now");
+			} else if (owner != nullptr && owner->draw_tracker != nullptr) {
+				report(E.key, what + ", whose texture is tracked but the view is not");
+			}
+		} else if (const Buffer *buffer = _get_buffer_from_owner(E.key)) {
+			if (buffer->draw_tracker != nullptr) {
+				report(E.key, vformat("a %d-byte buffer, left untracked although it is tracked now", buffer->size));
+			}
+		}
 	}
 }
 
@@ -9791,6 +9831,7 @@ Error RenderingDevice::initialize(RenderingContextDriver *p_context, DisplayServ
 	// Create draw graph and start it initialized as well.
 	for (RenderingDeviceGraph &graph : draw_graphs) {
 		graph.initialize(driver, &_render_pass_create_from_graph, frames.size(), main_queue_family, SECONDARY_COMMAND_BUFFERS_PER_FRAME);
+		graph_check_uniform_sets = OS::get_singleton()->get_environment("GODOT_RD_GRAPH_CHECK") == "1";
 	}
 	draw_graph->begin();
 

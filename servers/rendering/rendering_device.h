@@ -1972,6 +1972,12 @@ private:
 	bool _vertex_array_make_mutable(VertexArray *p_vertex_array, RID p_resource_id, RDG::ResourceTracker *p_resource_tracker);
 	bool _index_array_make_mutable(IndexArray *p_index_array, RDG::ResourceTracker *p_resource_tracker);
 	bool _uniform_set_make_mutable(UniformSet *p_uniform_set, RID p_resource_id, RDG::ResourceTracker *p_resource_tracker);
+	// GODOT_RD_GRAPH_CHECK=1: a resource a uniform set reads without the graph knowing (left in untracked_usage although it
+	// is tracked now, or a view without a tracker of a tracked texture) is reported once.
+	bool graph_check_uniform_sets = false;
+	Mutex graph_check_mutex;
+	HashSet<uint64_t> graph_check_reported;
+	void _graph_check_uniform_set(const UniformSet *p_uniform_set);
 	bool _acceleration_structure_make_mutable(AccelerationStructure *p_acceleration_structure, RID p_resource_id, RDG::ResourceTracker *p_resource_tracker);
 	bool _dependency_make_mutable(RID p_id, RID p_resource_id, RDG::ResourceTracker *p_resource_tracker);
 	bool _dependencies_make_mutable_recursive(RID p_id, RDG::ResourceTracker *p_resource_tracker);
