@@ -232,6 +232,8 @@ private:
 		CubeToDpShaderRD shader;
 		RID shader_version;
 		PipelineCacheRD pipeline;
+		// Debugging (GODOT_SHADOW_DP_CLEAR=1): clear each dual paraboloid region before the copy writes it.
+		bool clear_region = false;
 	} cube_to_dp;
 
 	// Copy to Octmap

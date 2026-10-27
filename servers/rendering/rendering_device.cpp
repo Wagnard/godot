@@ -8920,7 +8920,9 @@ void RenderingDevice::swap_buffers(bool p_present) {
 
 	// Advance to the next frame and begin recording again, into the other graph.
 	frame = (frame + 1) % frames.size();
-	draw_graph = draw_graph == &draw_graphs[0] ? &draw_graphs[1] : &draw_graphs[0];
+	if (!single_draw_graph) {
+		draw_graph = draw_graph == &draw_graphs[0] ? &draw_graphs[1] : &draw_graphs[0];
+	}
 
 	if (frame_stats.enabled) {
 		const uint64_t now = OS::get_singleton()->get_ticks_usec();
@@ -9856,6 +9858,14 @@ Error RenderingDevice::initialize(RenderingContextDriver *p_context, DisplayServ
 		}
 #endif
 	}
+	// Debugging (Wagnard/godot#1): GODOT_RD_SINGLE_GRAPH=1 records every frame into the same graph instead of
+	// alternating two, which only the replay thread needs. The frame slots keep alternating, so a defect that
+	// alternates with the frames tells per-graph state from per-slot state.
+	single_draw_graph = main_surface != 0 && OS::get_singleton()->get_environment("GODOT_RD_SINGLE_GRAPH") == "1";
+	if (single_draw_graph) {
+		print_line("GODOT_RD_SINGLE_GRAPH=1: every frame is recorded into the same graph; the replay thread is off.");
+	}
+
 	submit_thread_enabled = main_surface != 0 && submit_thread_api && OS::get_singleton()->get_environment("GODOT_SUBMIT_THREAD") != "0";
 	if (submit_thread_enabled) {
 		submit_frame_job.resize(frames.size());
@@ -9866,7 +9876,7 @@ Error RenderingDevice::initialize(RenderingContextDriver *p_context, DisplayServ
 		print_verbose("RenderingDevice: frames are submitted and presented by a thread of their own.");
 
 		// And replayed by another (GODOT_RD_REPLAY_THREAD=0 disables it).
-		replay_thread_enabled = OS::get_singleton()->get_environment("GODOT_RD_REPLAY_THREAD") != "0";
+		replay_thread_enabled = !single_draw_graph && OS::get_singleton()->get_environment("GODOT_RD_REPLAY_THREAD") != "0";
 		if (replay_thread_enabled) {
 			replay_thread.start(_replay_thread_func, this);
 			print_verbose("RenderingDevice: recorded frames are replayed by a thread of their own.");

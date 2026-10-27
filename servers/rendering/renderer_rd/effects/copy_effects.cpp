@@ -31,6 +31,7 @@
 #include "copy_effects.h"
 
 #include "core/config/project_settings.h"
+#include "core/os/os.h"
 #include "servers/rendering/renderer_rd/renderer_compositor_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
@@ -166,6 +167,13 @@ CopyEffects::CopyEffects(BitField<RasterEffects> p_raster_effects) {
 		dss.depth_compare_operator = RD::COMPARE_OP_ALWAYS;
 		dss.enable_depth_write = true;
 		cube_to_dp.pipeline.setup(shader, RD::RENDER_PRIMITIVE_TRIANGLES, RD::PipelineRasterizationState(), RD::PipelineMultisampleState(), dss, RD::PipelineColorBlendState(), 0);
+
+		// The copy writes every texel of the region (depth test ALWAYS), so a clear changes no pixel: it only
+		// changes how the driver starts the depth surface's region. For Wagnard/godot#1, debugging only.
+		cube_to_dp.clear_region = OS::get_singleton()->get_environment("GODOT_SHADOW_DP_CLEAR") == "1";
+		if (cube_to_dp.clear_region) {
+			print_line("GODOT_SHADOW_DP_CLEAR=1: omni shadow copies clear their atlas region before writing it.");
+		}
 	}
 
 	{
@@ -1146,7 +1154,7 @@ void CopyEffects::copy_cubemap_to_dp(RID p_source_rd_texture, RID p_dst_framebuf
 	RID shader = cube_to_dp.shader.version_get_shader(cube_to_dp.shader_version, 0);
 	ERR_FAIL_COND(shader.is_null());
 
-	RD::DrawListID draw_list = RD::get_singleton()->draw_list_begin(p_dst_framebuffer, RD::DRAW_DEFAULT_ALL, Vector<Color>(), 1.0f, 0, screen_rect);
+	RD::DrawListID draw_list = RD::get_singleton()->draw_list_begin(p_dst_framebuffer, cube_to_dp.clear_region ? RD::DRAW_CLEAR_DEPTH : RD::DRAW_DEFAULT_ALL, Vector<Color>(), 1.0f, 0, screen_rect);
 	RD::get_singleton()->draw_list_bind_render_pipeline(draw_list, cube_to_dp.pipeline.get_render_pipeline(RD::INVALID_ID, RD::get_singleton()->framebuffer_get_format(p_dst_framebuffer)));
 	RD::get_singleton()->draw_list_bind_uniform_set(draw_list, uniform_set_cache->get_cache(shader, 0, u_source_rd_texture), 0);
 	RD::get_singleton()->draw_list_bind_index_array(draw_list, material_storage->get_quad_index_array());
