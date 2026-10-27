@@ -128,6 +128,7 @@ private:
 		uint64_t id = 0;
 	};
 	bool replay_thread_enabled = false;
+	bool single_draw_graph = false; // GODOT_RD_SINGLE_GRAPH=1, debugging.
 	Thread replay_thread;
 	ConditionVariable replay_condition; // A job was pushed, or the thread must exit (under submit_mutex).
 	LocalVector<ReplayJob> replay_jobs; // FIFO, under submit_mutex.

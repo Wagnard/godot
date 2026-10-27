@@ -5732,8 +5732,10 @@ void RenderingDeviceDriverD3D12::_bind_vertex_buffers(CommandBufferInfo *p_cmd_b
 }
 
 void RenderingDeviceDriverD3D12::command_render_set_blend_constants(CommandBufferID p_cmd_buffer, const Color &p_constants) {
-	const CommandBufferInfo *cmd_buf_info = (const CommandBufferInfo *)p_cmd_buffer.id;
+	CommandBufferInfo *cmd_buf_info = (CommandBufferInfo *)p_cmd_buffer.id;
 	cmd_buf_info->cmd_list->OMSetBlendFactor(p_constants.components);
+	// The bound blend factor changed: a pipeline bound next must not skip setting its own.
+	cmd_buf_info->dyn_params.blend_constant = p_constants;
 }
 
 void RenderingDeviceDriverD3D12::command_render_set_line_width(CommandBufferID p_cmd_buffer, float p_width) {
