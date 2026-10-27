@@ -992,6 +992,26 @@ private:
 		uint32_t slice_on_calling_thread[MAX_SLICES] = {};
 	};
 	bool parallel_stats = false;
+
+	// GODOT_RD_GRAPH_CHECK=1 (debugging): every access of a command to a resource is kept, and once the levels are computed,
+	// any two accesses that conflict (a write, overlapping subresources and draw list regions) must be in increasing levels,
+	// else the sort may run them out of order. A violation means a dependency the graph did not record.
+	struct GraphCheckAccess {
+		ResourceTracker *tracker = nullptr; // The parent's for a slice.
+		Rect2i subresources; // Mipmaps x layers.
+		Rect2i region; // The draw list's region for an attachment usage.
+		int32_t command_index = -1;
+		ResourceUsage usage = RESOURCE_USAGE_NONE;
+		bool write = false;
+		bool region_write = false; // An attachment write to only a region of the texture.
+	};
+	bool graph_check_enabled = false;
+	LocalVector<GraphCheckAccess> graph_check_accesses;
+	LocalVector<uint32_t> graph_check_order;
+	uint64_t graph_check_frames = 0;
+	uint64_t graph_check_violation_frames = 0;
+	uint64_t graph_check_last_print_msec = 0;
+	void _graph_check_levels(const RecordedCommandSort *p_levels_by_command);
 	ParallelStats parallel_stats_data;
 	uint64_t stats_callback_usec = 0; // This frame's driver callbacks; they are all recorded by the calling thread.
 	uint64_t parallel_launch_usec = 0;

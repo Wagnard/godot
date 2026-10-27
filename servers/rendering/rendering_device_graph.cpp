@@ -251,6 +251,88 @@ bool RenderingDeviceGraph::_check_command_partial_coverage(ResourceTracker *p_re
 	return !draw_list_command.region.encloses(texture_region);
 }
 
+void RenderingDeviceGraph::_graph_check_levels(const RecordedCommandSort *p_levels_by_command) {
+	// Accesses grouped by resource, in recording order.
+	graph_check_order.resize(graph_check_accesses.size());
+	for (uint32_t i = 0; i < graph_check_order.size(); i++) {
+		graph_check_order[i] = i;
+	}
+	struct ByTrackerThenCommand {
+		const GraphCheckAccess *accesses = nullptr;
+		_FORCE_INLINE_ bool operator()(uint32_t p_a, uint32_t p_b) const {
+			const GraphCheckAccess &a = accesses[p_a];
+			const GraphCheckAccess &b = accesses[p_b];
+			if (a.tracker != b.tracker) {
+				return a.tracker < b.tracker;
+			}
+			return p_a < p_b; // Recording order.
+		}
+	};
+	SortArray<uint32_t, ByTrackerThenCommand> sorter;
+	sorter.compare.accesses = graph_check_accesses.ptr();
+	sorter.sort(graph_check_order.ptr(), graph_check_order.size());
+
+	graph_check_frames++;
+	uint32_t violations = 0;
+	String first_violations;
+	const uint32_t MAX_LOOKBACK = 256;
+	for (uint32_t i = 0; i < graph_check_order.size(); i++) {
+		const GraphCheckAccess &current = graph_check_accesses[graph_check_order[i]];
+		uint32_t steps = 0;
+		for (int64_t j = int64_t(i) - 1; j >= 0 && steps < MAX_LOOKBACK; j--, steps++) {
+			const GraphCheckAccess &previous = graph_check_accesses[graph_check_order[j]];
+			if (previous.tracker != current.tracker) {
+				break;
+			}
+			if (previous.command_index == current.command_index) {
+				continue;
+			}
+			if (!previous.write && !current.write) {
+				continue;
+			}
+			if (!previous.subresources.intersects(current.subresources)) {
+				continue;
+			}
+			if (previous.region_write && current.region_write && !previous.region.intersects(current.region)) {
+				continue;
+			}
+
+			// Conflicting accesses: the earlier command must be in a lower level.
+			if (p_levels_by_command[previous.command_index].level >= p_levels_by_command[current.command_index].level) {
+				violations++;
+				if (violations <= 4) {
+					auto describe = [&](const GraphCheckAccess &p_access) {
+						const RecordedCommand *command = reinterpret_cast<const RecordedCommand *>(&command_data[command_data_offsets[p_access.command_index]]);
+						String label = "-";
+						if (command->label_index >= 0 && uint32_t(command->label_index) < command_label_offsets.size()) {
+							label = String::utf8(&command_label_chars[command_label_offsets[command->label_index]]);
+						}
+						return vformat("command #%d (type %d, label \"%s\", level %d) %s %s, subresources %s, region %s", p_access.command_index, int(command->type), label,
+								p_levels_by_command[p_access.command_index].level, p_access.write ? "writes" : "reads", _usage_to_string(p_access.usage), p_access.subresources, p_access.region_write ? String(p_access.region) : String("whole"));
+					};
+					const ResourceTracker *tracker = current.tracker;
+					first_violations += vformat("\n  %s %s, size %s:\n    earlier %s\n    later   %s", tracker->texture_driver_id.id != 0 ? "texture" : (tracker->buffer_driver_id.id != 0 ? "buffer" : "resource"),
+							String::num_uint64(uint64_t(tracker->texture_driver_id.id != 0 ? tracker->texture_driver_id.id : tracker->buffer_driver_id.id), 16), tracker->texture_size, describe(previous), describe(current));
+				}
+			}
+
+			// An earlier write of the whole subresources is ordered before this one: what precedes it was checked against it.
+			if (previous.write && !previous.region_write && previous.subresources.encloses(current.subresources)) {
+				break;
+			}
+		}
+	}
+
+	if (violations > 0) {
+		graph_check_violation_frames++;
+		const uint64_t now = OS::get_singleton()->get_ticks_msec();
+		if (graph_check_last_print_msec == 0 || now - graph_check_last_print_msec > 5000) {
+			graph_check_last_print_msec = now;
+			print_line(vformat("RenderingDeviceGraph check: %d accesses out of order in this frame (%d of %d frames so far):%s", violations, graph_check_violation_frames, graph_check_frames, first_violations));
+		}
+	}
+}
+
 int32_t RenderingDeviceGraph::_add_to_command_list(int32_t p_command_index, int32_t p_list_index) {
 	DEV_ASSERT(p_command_index < int32_t(command_count));
 	DEV_ASSERT(p_list_index < int32_t(command_list_nodes.size()));
@@ -628,6 +710,22 @@ void RenderingDeviceGraph::_add_command_to_graph(ResourceTracker **p_resource_tr
 		}
 
 		bool write_usage_has_partial_coverage = !different_usage && _check_command_partial_coverage(resource_tracker, p_command_index);
+
+		if (unlikely(graph_check_enabled)) {
+			GraphCheckAccess access;
+			access.tracker = search_tracker;
+			access.subresources = search_tracker_rect;
+			access.command_index = p_command_index;
+			access.usage = new_resource_usage;
+			access.write = write_usage;
+			const RecordedCommand *command = reinterpret_cast<const RecordedCommand *>(&command_data[command_data_offsets[p_command_index]]);
+			const bool attachment = new_resource_usage == RESOURCE_USAGE_ATTACHMENT_COLOR_READ_WRITE || new_resource_usage == RESOURCE_USAGE_ATTACHMENT_DEPTH_STENCIL_READ_WRITE;
+			if (attachment && command->type == RecordedCommand::TYPE_DRAW_LIST) {
+				access.region = reinterpret_cast<const RecordedDrawListCommand *>(command)->region;
+				access.region_write = !access.region.encloses(Rect2i(Point2i(), resource_tracker->texture_size));
+			}
+			graph_check_accesses.push_back(access);
+		}
 		if (search_tracker->write_command_or_list_index >= 0) {
 			if (search_tracker->write_command_list_enabled) {
 				// Make this command adjacent to any commands that wrote to this resource and intersect with the slice if it applies.
@@ -2352,6 +2450,10 @@ void RenderingDeviceGraph::initialize(RDD *p_driver, RenderPassCreationFunction 
 	const String parallel_min_env = OS::get_singleton()->get_environment("GODOT_PARALLEL_RECORDING_MIN");
 	parallel_min_size = parallel_min_env.is_empty() ? 16384 : uint32_t(MAX(parallel_min_env.to_int(), 0));
 	parallel_stats = OS::get_singleton()->get_environment("GODOT_PARALLEL_RECORDING_STATS") == "1";
+	graph_check_enabled = OS::get_singleton()->get_environment("GODOT_RD_GRAPH_CHECK") == "1";
+	if (graph_check_enabled) {
+		print_line("RenderingDeviceGraph: GODOT_RD_GRAPH_CHECK=1, every frame's levels are checked against the recorded accesses (debugging, slow).");
+	}
 	// GODOT_PARALLEL_RECORDING_SPLIT_DRAW_LISTS=0 keeps every draw list in one slice.
 	parallel_split_draw_lists = driver->api_trait_get(RDD::API_TRAIT_RESUMABLE_RENDER_PASSES) && OS::get_singleton()->get_environment("GODOT_PARALLEL_RECORDING_SPLIT_DRAW_LISTS") != "0";
 	print_verbose(vformat("RenderingDeviceGraph: parallel recording in up to %d command buffers.", parallel_slice_count));
@@ -2395,6 +2497,7 @@ void RenderingDeviceGraph::begin() {
 	command_synchronization_pending = false;
 	command_tlas_build_index = -1;
 	command_label_index = -1;
+	graph_check_accesses.clear();
 	frames[frame].secondary_command_buffers_used = 0;
 	draw_instruction_list.index = 0;
 	compute_instruction_list.index = 0;
@@ -3483,6 +3586,10 @@ void RenderingDeviceGraph::end(bool p_reorder_commands, bool p_full_barriers, RD
 
 			commands_sorted[sorted_command_index].index = sorted_command_index;
 			commands_sorted[sorted_command_index].priority = PriorityTable[recorded_command.type];
+		}
+
+		if (unlikely(graph_check_enabled)) {
+			_graph_check_levels(commands_sorted.ptr());
 		}
 	} else {
 		commands_sorted.clear();
