@@ -36,6 +36,7 @@
 
 #ifdef DEV_ENABLED
 #include "core/templates/rb_map.h"
+#include "core/templates/safe_refcount.h"
 #endif
 
 // Buffer barriers have not shown any significant improvement or shown to be
@@ -1007,6 +1008,14 @@ private:
 	};
 	bool graph_check_enabled = false;
 	bool serialize_levels = false;
+
+	// GODOT_RD_GRAPH_DUMP=<directory> (debugging): when <directory>/dump_now appears, the next 4 frames' commands are written
+	// to <directory>, in level order with their accesses. Shared by the graphs that alternate frames.
+	String graph_dump_directory;
+	static inline SafeNumeric<int32_t> graph_dump_frames_left;
+	static inline SafeNumeric<uint32_t> graph_dump_serial;
+	bool graph_dump_active = false;
+	void _graph_dump(const RecordedCommandSort *p_sorted_commands, uint32_t p_count);
 	LocalVector<GraphCheckAccess> graph_check_accesses;
 	LocalVector<uint32_t> graph_check_order;
 	uint64_t graph_check_frames = 0;
