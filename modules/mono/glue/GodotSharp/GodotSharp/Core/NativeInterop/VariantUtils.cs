@@ -337,7 +337,14 @@ namespace Godot.NativeInterop
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static godot_variant CreateFromGodotObject(GodotObject? from)
-            => from != null ? CreateFromGodotObjectPtr(GodotObject.GetPtr(from)) : default;
+        {
+            if (from == null)
+                return default;
+            // The variant references the object only once the native call returns: not finalized before.
+            godot_variant ret = CreateFromGodotObjectPtr(GodotObject.GetPtr(from));
+            GC.KeepAlive(from);
+            return ret;
+        }
 
         // We avoid the internal call if the stored type is the same we want.
 

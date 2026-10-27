@@ -77,6 +77,7 @@ namespace Godot
                 return null;
 
             NativeFuncs.godotsharp_weakref(GetPtr(obj), out godot_ref weakRef);
+            GC.KeepAlive(obj);
             using (weakRef)
             {
                 if (weakRef.IsNull)
