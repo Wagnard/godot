@@ -36,7 +36,6 @@
 #include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
 #include "servers/rendering/rendering_server_globals.h"
-#include "servers/rendering/shadow_flicker_diag.h"
 
 using namespace RendererRD;
 
@@ -1286,19 +1285,6 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 			}
 		} else {
 			light_data.shadow_opacity = 0.0;
-		}
-
-		if (ShadowFlickerDiag::enabled() && type != RSE::LIGHT_AREA) {
-			// DIAG: what the scene shader reads of this light's shadow this frame (every omni and spot light, so a shadow
-			// that is there one frame and not the next is seen too).
-			static const char *const names[] = { "needs_shadow", "in_range", "atlas_key", "rect_x", "rect_y", "rect_w", "opacity", "matrix_hash", "dp_offset", "shadow", "pos_x_cm", "pos_y_cm", "pos_z_cm" };
-			uint32_t rect_bits[3];
-			memcpy(rect_bits, light_data.atlas_rect, sizeof(rect_bits));
-			uint32_t opacity_bits;
-			memcpy(&opacity_bits, &light_data.shadow_opacity, sizeof(opacity_bits));
-			const bool owns = owns_shadow_atlas(p_shadow_atlas) && shadow_atlas_owns_light_instance(p_shadow_atlas, light_instance->self);
-			const uint64_t fields[] = { needs_shadow, in_shadow_range, owns ? uint64_t(shadow_atlas_get_light_instance_key(p_shadow_atlas, light_instance->self)) : UINT64_MAX, rect_bits[0], rect_bits[1], rect_bits[2], opacity_bits, hash_murmur3_buffer(light_data.shadow_matrix, sizeof(light_data.shadow_matrix)), uint64_t(int64_t(light_data.direction[0]) & 0xffff) | (uint64_t(int64_t(light_data.direction[1]) & 0xffff) << 16), uint64_t(light->shadow) | (uint64_t(type) << 4), uint64_t(int64_t(Math::round(light_transform.origin.x * 100.0))), uint64_t(int64_t(Math::round(light_transform.origin.y * 100.0))), uint64_t(int64_t(Math::round(light_transform.origin.z * 100.0))) };
-			ShadowFlickerDiag::get().record("light data", names, light_instance->self.get_id() ^ (p_shadow_atlas.get_id() << 24), RSG::rasterizer->get_frame_number(), fields, 13);
 		}
 
 		light_instance->cull_mask = light->cull_mask;

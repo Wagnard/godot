@@ -6240,7 +6240,7 @@ RenderingDevice::DrawListID RenderingDevice::draw_list_begin(RID p_framebuffer, 
 		clear_values[i] = clear_value;
 	}
 
-	draw_graph->add_draw_list_begin(framebuffer->framebuffer_cache, Rect2i(viewport_offset, viewport_size), operations, clear_values, stages, p_breadcrumb);
+	draw_graph->add_draw_list_begin(framebuffer->framebuffer_cache, Rect2i(viewport_offset, viewport_size), operations, clear_values, stages, p_breadcrumb, shadow_section_split && shadow_section_active);
 	draw_graph->add_draw_list_usages(resource_trackers, resource_usages);
 
 	// Mark textures as bound.
@@ -7257,6 +7257,18 @@ void RenderingDevice::draw_list_end() {
 	}
 
 	draw_list_bound_textures.clear();
+}
+
+void RenderingDevice::debug_shadow_section_begin() {
+	ERR_RENDER_THREAD_GUARD();
+	shadow_section_active = true;
+	draw_graph->debug_order_chain_begin();
+}
+
+void RenderingDevice::debug_shadow_section_end() {
+	ERR_RENDER_THREAD_GUARD();
+	shadow_section_active = false;
+	draw_graph->debug_order_chain_end();
 }
 
 /***************************/
@@ -9864,6 +9876,10 @@ Error RenderingDevice::initialize(RenderingContextDriver *p_context, DisplayServ
 	single_draw_graph = main_surface != 0 && OS::get_singleton()->get_environment("GODOT_RD_SINGLE_GRAPH") == "1";
 	if (single_draw_graph) {
 		print_line("GODOT_RD_SINGLE_GRAPH=1: every frame is recorded into the same graph; the replay thread is off.");
+	}
+	shadow_section_split = main_surface != 0 && OS::get_singleton()->get_environment("GODOT_RD_SHADOW_SPLIT") == "1";
+	if (shadow_section_split) {
+		print_line("GODOT_RD_SHADOW_SPLIT=1: each shadow draw list starts a command buffer of its own (debugging).");
 	}
 
 	submit_thread_enabled = main_surface != 0 && submit_thread_api && OS::get_singleton()->get_environment("GODOT_SUBMIT_THREAD") != "0";

@@ -129,6 +129,8 @@ private:
 	};
 	bool replay_thread_enabled = false;
 	bool single_draw_graph = false; // GODOT_RD_SINGLE_GRAPH=1, debugging.
+	bool shadow_section_split = false; // GODOT_RD_SHADOW_SPLIT=1, debugging.
+	bool shadow_section_active = false;
 	Thread replay_thread;
 	ConditionVariable replay_condition; // A job was pushed, or the thread must exit (under submit_mutex).
 	LocalVector<ReplayJob> replay_jobs; // FIFO, under submit_mutex.
@@ -1779,6 +1781,11 @@ public:
 	DrawListID draw_list_switch_to_next_pass();
 
 	void draw_list_end();
+
+	// Debugging (Wagnard/godot#1): the scene renderer marks its shadow passes, for GODOT_SHADOW_CHAIN_ORDER (they keep
+	// submission order) and GODOT_RD_SHADOW_SPLIT (each of their draw lists starts a command buffer of its own).
+	void debug_shadow_section_begin();
+	void debug_shadow_section_end();
 
 	// Splits the active draw list in p_count parts that other threads may record at the same time, each with the
 	// DrawListID it gets in r_split_ids and the usual draw_list_*() functions. Each part starts with nothing bound.
