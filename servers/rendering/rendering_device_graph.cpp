@@ -30,6 +30,8 @@
 
 #include "rendering_device_graph.h"
 
+#include "core/io/dir_access.h"
+#include "core/io/file_access.h"
 #include "core/os/os.h"
 #include "core/os/thread.h"
 #include "core/templates/hash_set.h"
@@ -249,6 +251,64 @@ bool RenderingDeviceGraph::_check_command_partial_coverage(ResourceTracker *p_re
 
 	Rect2i texture_region(Point2i(0, 0), p_resource_tracker->texture_size);
 	return !draw_list_command.region.encloses(texture_region);
+}
+
+void RenderingDeviceGraph::_graph_dump(const RecordedCommandSort *p_sorted_commands, uint32_t p_count) {
+	const uint32_t serial = graph_dump_serial.increment();
+	const String path = graph_dump_directory.path_join(vformat("frame_%03d.txt", serial));
+	Ref<FileAccess> file = FileAccess::open(path, FileAccess::WRITE);
+	if (file.is_null()) {
+		graph_dump_frames_left.decrement();
+		return;
+	}
+
+	static const char *type_names[] = { "none", "blas build", "tlas build", "buffer clear", "buffer copy", "buffer get data", "buffer update", "compute list", "raytracing list", "draw list", "texture clear color", "texture clear depth", "texture copy", "texture get data", "texture resolve", "texture update", "timestamp", "driver callback", "blas update", "omm build" };
+	static_assert(std_size(type_names) == RecordedCommand::TYPE_MAX, "One name per RecordedCommand::Type");
+
+	// The accesses are recorded command after command: where each command's start.
+	LocalVector<int32_t> first_access;
+	first_access.resize(command_count + 1);
+	for (uint32_t i = 0; i <= command_count; i++) {
+		first_access[i] = -1;
+	}
+	for (uint32_t i = 0; i < graph_check_accesses.size(); i++) {
+		const int32_t command = graph_check_accesses[i].command_index;
+		if (first_access[command] < 0) {
+			first_access[command] = int32_t(i);
+		}
+	}
+
+	file->store_line(vformat("graph %s, dump %d, frame %d commands, levels and accesses in execution order (GODOT_RD_GRAPH_DUMP)", String::num_uint64(uint64_t(this), 16), serial, p_count));
+	for (uint32_t i = 0; i < p_count; i++) {
+		const int32_t index = p_sorted_commands[i].index;
+		const RecordedCommand *command = reinterpret_cast<const RecordedCommand *>(&command_data[command_data_offsets[index]]);
+		String label;
+		if (command->label_index >= 0 && uint32_t(command->label_index) < command_label_offsets.size()) {
+			label = String::utf8(&command_label_chars[command_label_offsets[command->label_index]]);
+		}
+		String line = vformat("L%d #%d %s", p_sorted_commands[i].level, index, type_names[command->type]);
+		if (command->type == RecordedCommand::TYPE_DRAW_LIST) {
+			line += vformat(" region %s", reinterpret_cast<const RecordedDrawListCommand *>(command)->region);
+		}
+		if (!label.is_empty()) {
+			line += " \"" + label + "\"";
+		}
+		file->store_line(line);
+		if (first_access[index] < 0) {
+			continue;
+		}
+		for (uint32_t a = uint32_t(first_access[index]); a < graph_check_accesses.size() && graph_check_accesses[a].command_index == index; a++) {
+			const GraphCheckAccess &access = graph_check_accesses[a];
+			const ResourceTracker *tracker = access.tracker;
+			const bool texture = tracker->texture_driver_id.id != 0;
+			file->store_line(vformat("    %s %s %s %s%s, subresources %s%s", access.write ? "W" : "R", texture ? "texture" : "buffer", String::num_uint64(uint64_t(texture ? tracker->texture_driver_id.id : tracker->buffer_driver_id.id), 16),
+					texture ? vformat("%dx%d ", tracker->texture_size.x, tracker->texture_size.y) : String(), _usage_to_string(access.usage), access.subresources, access.region_write ? vformat(", region %s", access.region) : String()));
+		}
+	}
+	file.unref();
+	if (graph_dump_frames_left.decrement() <= 0) {
+		print_line(vformat("RenderingDeviceGraph: dump written to %s.", graph_dump_directory));
+	}
 }
 
 void RenderingDeviceGraph::_graph_check_levels(const RecordedCommandSort *p_levels_by_command) {
@@ -711,7 +771,7 @@ void RenderingDeviceGraph::_add_command_to_graph(ResourceTracker **p_resource_tr
 
 		bool write_usage_has_partial_coverage = !different_usage && _check_command_partial_coverage(resource_tracker, p_command_index);
 
-		if (unlikely(graph_check_enabled)) {
+		if (unlikely(graph_check_enabled || graph_dump_active)) {
 			GraphCheckAccess access;
 			access.tracker = search_tracker;
 			access.subresources = search_tracker_rect;
@@ -2454,6 +2514,10 @@ void RenderingDeviceGraph::initialize(RDD *p_driver, RenderPassCreationFunction 
 	// GODOT_RD_SERIALIZE_LEVELS=1 (debugging, slow): the commands keep the graph's order, but each one runs after a full
 	// barrier carrying its own transitions, instead of a level's commands sharing one barrier and running together.
 	serialize_levels = OS::get_singleton()->get_environment("GODOT_RD_SERIALIZE_LEVELS") == "1";
+	graph_dump_directory = OS::get_singleton()->get_environment("GODOT_RD_GRAPH_DUMP");
+	if (!graph_dump_directory.is_empty()) {
+		print_line(vformat("RenderingDeviceGraph: GODOT_RD_GRAPH_DUMP: create %s to dump the next 4 frames' commands (debugging).", graph_dump_directory.path_join("dump_now")));
+	}
 	if (serialize_levels) {
 		print_line("RenderingDeviceGraph: GODOT_RD_SERIALIZE_LEVELS=1, every command runs alone after a full barrier, in the reordered order (debugging, slow).");
 	}
@@ -2504,6 +2568,15 @@ void RenderingDeviceGraph::begin() {
 	command_tlas_build_index = -1;
 	command_label_index = -1;
 	graph_check_accesses.clear();
+	if (unlikely(!graph_dump_directory.is_empty())) {
+		const String trigger = graph_dump_directory.path_join("dump_now");
+		if (graph_dump_frames_left.get() <= 0 && FileAccess::exists(trigger)) {
+			DirAccess::remove_absolute(trigger);
+			graph_dump_frames_left.set(4);
+			print_line(vformat("RenderingDeviceGraph: dumping the next 4 frames' commands to %s.", graph_dump_directory));
+		}
+		graph_dump_active = graph_dump_frames_left.get() > 0;
+	}
 	frames[frame].secondary_command_buffers_used = 0;
 	draw_instruction_list.index = 0;
 	compute_instruction_list.index = 0;
@@ -3629,6 +3702,10 @@ void RenderingDeviceGraph::end(bool p_reorder_commands, bool p_full_barriers, RD
 #endif
 
 			commands_sorted.sort();
+
+			if (unlikely(graph_dump_active)) {
+				_graph_dump(commands_sorted.ptr(), command_count);
+			}
 
 #if PRINT_RENDER_GRAPH
 			print_line("AFTER SORT");
