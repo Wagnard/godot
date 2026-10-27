@@ -9164,7 +9164,18 @@ void RenderingDevice::_replay_frame(uint32_t p_frame, RenderingDeviceGraph *p_gr
 	}
 
 	GodotProfileZoneGrouped(_profile_zone, "draw_graph->end");
-	p_graph->end(RENDER_GRAPH_REORDER == 1, RENDER_GRAPH_FULL_BARRIERS == 1, command_buffer, frames[p_frame].command_buffer_pool);
+	// The two settings above can also be changed when launching, to debug synchronization without a rebuild:
+	// GODOT_RD_NO_REORDER=1 records the commands in submission order, GODOT_RD_FULL_BARRIERS=1 issues full barriers.
+	static const bool reorder_commands = RENDER_GRAPH_REORDER == 1 && OS::get_singleton()->get_environment("GODOT_RD_NO_REORDER") != "1";
+	static const bool full_barriers = RENDER_GRAPH_FULL_BARRIERS == 1 || OS::get_singleton()->get_environment("GODOT_RD_FULL_BARRIERS") == "1";
+	static bool settings_printed = false;
+	if (!settings_printed) {
+		settings_printed = true;
+		if (!reorder_commands || full_barriers) {
+			print_line(vformat("RenderingDevice: command graph %s, %s (debugging, slow).", reorder_commands ? "reordered" : "in submission order", full_barriers ? "full barriers" : "minimal barriers"));
+		}
+	}
+	p_graph->end(reorder_commands, full_barriers, command_buffer, frames[p_frame].command_buffer_pool);
 	GodotProfileZoneGrouped(_profile_zone, "driver->command_buffer_end");
 	driver->command_buffer_end(command_buffer);
 	GodotProfileZoneGrouped(_profile_zone, "driver->end_segment");
