@@ -1006,6 +1006,7 @@ private:
 		bool region_write = false; // An attachment write to only a region of the texture.
 	};
 	bool graph_check_enabled = false;
+	bool serialize_levels = false;
 	LocalVector<GraphCheckAccess> graph_check_accesses;
 	LocalVector<uint32_t> graph_check_order;
 	uint64_t graph_check_frames = 0;

@@ -2451,6 +2451,12 @@ void RenderingDeviceGraph::initialize(RDD *p_driver, RenderPassCreationFunction 
 	parallel_min_size = parallel_min_env.is_empty() ? 16384 : uint32_t(MAX(parallel_min_env.to_int(), 0));
 	parallel_stats = OS::get_singleton()->get_environment("GODOT_PARALLEL_RECORDING_STATS") == "1";
 	graph_check_enabled = OS::get_singleton()->get_environment("GODOT_RD_GRAPH_CHECK") == "1";
+	// GODOT_RD_SERIALIZE_LEVELS=1 (debugging, slow): the commands keep the graph's order, but each one runs after a full
+	// barrier carrying its own transitions, instead of a level's commands sharing one barrier and running together.
+	serialize_levels = OS::get_singleton()->get_environment("GODOT_RD_SERIALIZE_LEVELS") == "1";
+	if (serialize_levels) {
+		print_line("RenderingDeviceGraph: GODOT_RD_SERIALIZE_LEVELS=1, every command runs alone after a full barrier, in the reordered order (debugging, slow).");
+	}
 	if (graph_check_enabled) {
 		print_line("RenderingDeviceGraph: GODOT_RD_GRAPH_CHECK=1, every frame's levels are checked against the recorded accesses (debugging, slow).");
 	}
@@ -3633,7 +3639,7 @@ void RenderingDeviceGraph::end(bool p_reorder_commands, bool p_full_barriers, RD
 			print_line(vformat("Recording %d commands", command_count));
 #endif
 
-			if (parallel_slice_count > 1 && command_label_count == 0) {
+			if (parallel_slice_count > 1 && command_label_count == 0 && !serialize_levels) {
 				// Boost the priorities of every level first. A level's boost only depends on the levels before it, so
 				// this gives the order the serial loop records in.
 				uint32_t boosted_priority = 0;
@@ -3752,7 +3758,15 @@ void RenderingDeviceGraph::end(bool p_reorder_commands, bool p_full_barriers, RD
 				uint32_t boosted_priority = 0;
 				uint32_t current_level = commands_sorted[0].level;
 				uint32_t current_level_start = 0;
-				for (uint32_t i = 0; i < command_count; i++) {
+				if (serialize_levels) {
+					// The reordered order, each command after a full barrier with its own transitions.
+					for (uint32_t i = 0; i < command_count; i++) {
+						_group_barriers_for_render_commands(barrier_group, r_command_buffer, &commands_sorted[i], 1, true);
+						_run_render_commands(commands_sorted[i].level, &commands_sorted[i], 1, r_command_buffer, r_command_buffer_pool, current_label_index, current_label_level);
+					}
+					current_level_start = command_count;
+				}
+				for (uint32_t i = current_level_start; i < command_count; i++) {
 					if (current_level != commands_sorted[i].level) {
 						RecordedCommandSort *level_command_ptr = &commands_sorted[current_level_start];
 						uint32_t level_command_count = i - current_level_start;
@@ -3764,11 +3778,13 @@ void RenderingDeviceGraph::end(bool p_reorder_commands, bool p_full_barriers, RD
 					}
 				}
 
-				RecordedCommandSort *level_command_ptr = &commands_sorted[current_level_start];
-				uint32_t level_command_count = command_count - current_level_start;
-				_boost_priority_for_render_commands(level_command_ptr, level_command_count, boosted_priority);
-				_group_barriers_for_render_commands(barrier_group, r_command_buffer, level_command_ptr, level_command_count, p_full_barriers);
-				_run_render_commands(current_level, level_command_ptr, level_command_count, r_command_buffer, r_command_buffer_pool, current_label_index, current_label_level);
+				if (current_level_start < command_count) {
+					RecordedCommandSort *level_command_ptr = &commands_sorted[current_level_start];
+					uint32_t level_command_count = command_count - current_level_start;
+					_boost_priority_for_render_commands(level_command_ptr, level_command_count, boosted_priority);
+					_group_barriers_for_render_commands(barrier_group, r_command_buffer, level_command_ptr, level_command_count, p_full_barriers);
+					_run_render_commands(current_level, level_command_ptr, level_command_count, r_command_buffer, r_command_buffer_pool, current_label_index, current_label_level);
+				}
 
 #if PRINT_RENDER_GRAPH
 				print_line("COMMANDS", command_count, "LEVELS", current_level + 1);
