@@ -3885,12 +3885,11 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 						caster_hash += hash_murmur3_one_64(uint64_t(shadow.instances[k]), uint32_t(shadow.pass));
 					}
 				}
-				static const char *const names[] = { "dirty", "allow", "redraw", "drawn", "full", "animated", "passes", "casters", "caster_hash", "coverage_bits", "viewport", "pos_x_cm", "pos_y_cm", "pos_z_cm" };
-				const float coverage_value = coverage;
-				uint32_t coverage_bits;
-				memcpy(&coverage_bits, &coverage_value, sizeof(coverage_bits));
-				const uint64_t fields[] = { diag_was_dirty, diag_allow_redraw, redraw, diag_drawn, diag_full, diag_animated, max_shadows_used - diag_first_pass, caster_count, caster_hash, uint64_t(coverage_bits >> 16), p_viewport.get_id(), uint64_t(int64_t(Math::round(ins->transform.origin.x * 100.0))), uint64_t(int64_t(Math::round(ins->transform.origin.y * 100.0))), uint64_t(int64_t(Math::round(ins->transform.origin.z * 100.0))) };
-				ShadowFlickerDiag::get().record("cull", names, light->instance.get_id() ^ (p_shadow_atlas.get_id() << 24), RSG::rasterizer->get_frame_number(), fields, 14);
+				// Not the coverage: DLSS's camera jitter moves it every frame and it only picks the atlas place, which [light data]
+				// already follows.
+				static const char *const names[] = { "dirty", "allow", "redraw", "drawn", "full", "animated", "passes", "casters", "caster_hash", "viewport", "pos_x_cm", "pos_y_cm", "pos_z_cm" };
+				const uint64_t fields[] = { diag_was_dirty, diag_allow_redraw, redraw, diag_drawn, diag_full, diag_animated, max_shadows_used - diag_first_pass, caster_count, caster_hash, p_viewport.get_id(), uint64_t(int64_t(Math::round(ins->transform.origin.x * 100.0))), uint64_t(int64_t(Math::round(ins->transform.origin.y * 100.0))), uint64_t(int64_t(Math::round(ins->transform.origin.z * 100.0))) };
+				ShadowFlickerDiag::get().record("cull", names, light->instance.get_id() ^ (p_shadow_atlas.get_id() << 24), RSG::rasterizer->get_frame_number(), fields, 13);
 			}
 		}
 	}
