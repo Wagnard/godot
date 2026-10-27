@@ -447,6 +447,34 @@ void finalize_theme_db() {
 #define MAIN_PRINT(m_txt)
 #endif
 
+#if defined(WINDOWS_ENABLED) || defined(LINUXBSD_ENABLED) || defined(MACOS_ENABLED)
+#ifdef WINDOWS_ENABLED
+#include <stdlib.h>
+#define MAIN_ENVIRON _environ
+#else
+extern char **environ;
+#define MAIN_ENVIRON environ
+#endif
+
+// Prints the GODOT_* environment variables set for this process: the engine's debugging and off switches. The values are
+// quoted, so a stray space (cmd's `set NAME=0 && ...` stores "0 ") shows.
+static void _print_godot_environment() {
+	if (MAIN_ENVIRON == nullptr) {
+		return;
+	}
+	for (char **entry = MAIN_ENVIRON; *entry != nullptr; entry++) {
+		const String variable = String::utf8(*entry);
+		if (!variable.begins_with("GODOT_")) {
+			continue;
+		}
+		const int equals = variable.find_char('=');
+		print_line(vformat("Environment: %s=\"%s\"", variable.substr(0, equals), equals >= 0 ? variable.substr(equals + 1) : String()));
+	}
+}
+#else
+static void _print_godot_environment() {}
+#endif
+
 void Main::print_header(bool p_rich) {
 	if (GODOT_VERSION_TIMESTAMP > 0) {
 		// Version timestamp available.
@@ -3089,6 +3117,7 @@ Error Main::setup2(bool p_show_boot_logo) {
 
 	// Don't use rich formatting to prevent ANSI escape codes from being written to log files.
 	print_header(false);
+	_print_godot_environment();
 
 #ifdef TOOLS_ENABLED
 	int accessibility_mode_editor = 0;
