@@ -117,13 +117,16 @@ vec2 alpha_texture_coordinate = vec2(0.0);
 // The hit groups: what vertex() wrote, interpolated at the hit (0) and at the neighboring pixels' barycentrics in x (1) and
 // y (2), summed corner by corner as each vertex() returns (raytracing_custom_fragment_inc.glsl). Keeping the three corners
 // until the loop ended held every output of two corners live through the last vertex(): the hit groups' register peak.
-vec3 rt_point_vertex[RT_INTERP_POINTS];
-vec3 rt_point_normal[RT_INTERP_POINTS];
-vec3 rt_point_tangent[RT_INTERP_POINTS];
-vec3 rt_point_binormal[RT_INTERP_POINTS];
-vec2 rt_point_uv[RT_INTERP_POINTS];
-vec2 rt_point_uv2[RT_INTERP_POINTS];
-vec4 rt_point_color[RT_INTERP_POINTS];
+// One variable per point, not an array indexed in the corner loop: that loop holds the whole vertex() and is not unrolled,
+// so Mesa kept such arrays as local arrays in DXIL, which AMD's D3D12 compiler puts in scratch memory (godot3d's Terrain3D
+// hit shader: frames over 2 s on an RX 6600, TDR). Points 1 and 2 exist only with RT_INTERP_POINTS 3.
+vec3 rt_p0_vertex, rt_p1_vertex, rt_p2_vertex;
+vec3 rt_p0_normal, rt_p1_normal, rt_p2_normal;
+vec3 rt_p0_tangent, rt_p1_tangent, rt_p2_tangent;
+vec3 rt_p0_binormal, rt_p1_binormal, rt_p2_binormal;
+vec2 rt_p0_uv, rt_p1_uv, rt_p2_uv;
+vec2 rt_p0_uv2, rt_p1_uv2, rt_p2_uv2;
+vec4 rt_p0_color, rt_p1_color, rt_p2_color;
 #else
 // What vertex() wrote at the triangle's three vertices.
 vec3 rt_corner_vertex[3];
@@ -188,14 +191,37 @@ void rt_fragment_inputs_to_view() {
 #ifdef RT_INTERPOLATE_AT_POINTS
 // The fragment inputs at point p_point (0: the hit, 1 and 2: its neighboring pixels in x and y).
 void rt_set_fragment_inputs(int p_point) {
-	vertex = rt_point_vertex[p_point];
-	normal = rt_point_normal[p_point];
-	tangent = rt_point_tangent[p_point];
-	binormal = rt_point_binormal[p_point];
-	uv_interp = rt_point_uv[p_point];
-	uv2_interp = rt_point_uv2[p_point];
-	color_interp = rt_point_color[p_point];
-	/* RT_CUSTOM_VARYING_SELECT */
+#if RT_INTERP_POINTS > 1
+	if (p_point == 1) {
+		vertex = rt_p1_vertex;
+		normal = rt_p1_normal;
+		tangent = rt_p1_tangent;
+		binormal = rt_p1_binormal;
+		uv_interp = rt_p1_uv;
+		uv2_interp = rt_p1_uv2;
+		color_interp = rt_p1_color;
+		/* RT_CUSTOM_VARYING_SELECT_1 */
+	} else if (p_point == 2) {
+		vertex = rt_p2_vertex;
+		normal = rt_p2_normal;
+		tangent = rt_p2_tangent;
+		binormal = rt_p2_binormal;
+		uv_interp = rt_p2_uv;
+		uv2_interp = rt_p2_uv2;
+		color_interp = rt_p2_color;
+		/* RT_CUSTOM_VARYING_SELECT_2 */
+	} else
+#endif
+	{
+		vertex = rt_p0_vertex;
+		normal = rt_p0_normal;
+		tangent = rt_p0_tangent;
+		binormal = rt_p0_binormal;
+		uv_interp = rt_p0_uv;
+		uv2_interp = rt_p0_uv2;
+		color_interp = rt_p0_color;
+		/* RT_CUSTOM_VARYING_SELECT_0 */
+	}
 	rt_fragment_inputs_to_view();
 }
 #else

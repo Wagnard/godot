@@ -88,19 +88,23 @@ if ((rt_geom.flags & FLAG_PROCEDURAL) == 0u) {
 	// interpolation c0 * b.x + c1 * b.y + c2 * b.z evaluates, so the result is the same to the bit while only the sums,
 	// not every corner, stay live through the next vertex() (NVIDIA, Ray Tracing Best Practices: live state and register
 	// usage limit occupancy).
-#ifdef RT_STAGE_ANY_HIT
-	vec3 rt_point_bary[RT_INTERP_POINTS] = vec3[RT_INTERP_POINTS](rt_bary);
-#else
+	// Vectors and one variable per point, the corner's component picked with selects: no array and no dynamic vector index in
+	// the loop (see rt_p0_vertex in raytracing_custom_globals_inc.glsl; re-spirv does not handle OpVectorExtractDynamic).
+#ifndef RT_STAGE_ANY_HIT
 	hit_barycentric_derivatives(rt_geom, rt_i0, rt_i1, rt_i2, rt_bary, rt_hit_bary_ddx, rt_hit_bary_ddy);
-	vec3 rt_point_bary[RT_INTERP_POINTS] = vec3[RT_INTERP_POINTS](rt_bary, rt_bary + rt_hit_bary_ddx, rt_bary + rt_hit_bary_ddy);
+#endif
+	const vec3 rt_p0_bary = rt_bary;
+#if RT_INTERP_POINTS > 1
+	const vec3 rt_p1_bary = rt_bary + rt_hit_bary_ddx;
+	const vec3 rt_p2_bary = rt_bary + rt_hit_bary_ddy;
 #endif
 	bool rt_removed = false;
-	uint rt_corner_index[3] = uint[3](rt_i0, rt_i1, rt_i2);
+	const uvec3 rt_corner_index = uvec3(rt_i0, rt_i1, rt_i2);
 #ifdef ENABLE_INSTANCE_CUSTOM
 	instance_custom = fetch_instance_custom(rt_geom, rt_i0);
 #endif
 	for (int rt_corner = 0; rt_corner < 3; rt_corner++) {
-		uint rt_index = rt_corner_index[rt_corner];
+		uint rt_index = rt_corner == 0 ? rt_corner_index.x : (rt_corner == 1 ? rt_corner_index.y : rt_corner_index.z);
 		vec3 rt_rest = (rt_geom.flags & FLAG_DISPLACED) != 0u ? fetch_rest_vertex(rt_geom, rt_index) : fetch_mesh_position(rt_geom, rt_index);
 		TBNResult rt_tbn;
 		rt_tbn.normal = vec3(0.0, 1.0, 0.0);
@@ -146,27 +150,65 @@ if ((rt_geom.flags & FLAG_PROCEDURAL) == 0u) {
 		/* RT_CUSTOM_VERTEX_CALL */
 
 		rt_removed = rt_removed || any(isnan(vertex));
-		for (int rt_point = 0; rt_point < RT_INTERP_POINTS; rt_point++) {
-			const float rt_w = rt_point_bary[rt_point][rt_corner];
-			if (rt_corner == 0) {
-				rt_point_vertex[rt_point] = vertex * rt_w;
-				rt_point_normal[rt_point] = normal * rt_w;
-				rt_point_tangent[rt_point] = tangent * rt_w;
-				rt_point_binormal[rt_point] = binormal * rt_w;
-				rt_point_uv[rt_point] = uv_interp * rt_w;
-				rt_point_uv2[rt_point] = uv2_interp * rt_w;
-				rt_point_color[rt_point] = color_interp * rt_w;
-				/* RT_CUSTOM_VARYING_ACCUMULATE_FIRST */
-			} else {
-				rt_point_vertex[rt_point] = rt_point_vertex[rt_point] + vertex * rt_w;
-				rt_point_normal[rt_point] = rt_point_normal[rt_point] + normal * rt_w;
-				rt_point_tangent[rt_point] = rt_point_tangent[rt_point] + tangent * rt_w;
-				rt_point_binormal[rt_point] = rt_point_binormal[rt_point] + binormal * rt_w;
-				rt_point_uv[rt_point] = rt_point_uv[rt_point] + uv_interp * rt_w;
-				rt_point_uv2[rt_point] = rt_point_uv2[rt_point] + uv2_interp * rt_w;
-				rt_point_color[rt_point] = rt_point_color[rt_point] + color_interp * rt_w;
-				/* RT_CUSTOM_VARYING_ACCUMULATE */
-			}
+		const float rt_w0 = rt_corner == 0 ? rt_p0_bary.x : (rt_corner == 1 ? rt_p0_bary.y : rt_p0_bary.z);
+#if RT_INTERP_POINTS > 1
+		const float rt_w1 = rt_corner == 0 ? rt_p1_bary.x : (rt_corner == 1 ? rt_p1_bary.y : rt_p1_bary.z);
+		const float rt_w2 = rt_corner == 0 ? rt_p2_bary.x : (rt_corner == 1 ? rt_p2_bary.y : rt_p2_bary.z);
+#endif
+		if (rt_corner == 0) {
+			rt_p0_vertex = vertex * rt_w0;
+			rt_p0_normal = normal * rt_w0;
+			rt_p0_tangent = tangent * rt_w0;
+			rt_p0_binormal = binormal * rt_w0;
+			rt_p0_uv = uv_interp * rt_w0;
+			rt_p0_uv2 = uv2_interp * rt_w0;
+			rt_p0_color = color_interp * rt_w0;
+			/* RT_CUSTOM_VARYING_ACCUMULATE_FIRST_0 */
+#if RT_INTERP_POINTS > 1
+			rt_p1_vertex = vertex * rt_w1;
+			rt_p1_normal = normal * rt_w1;
+			rt_p1_tangent = tangent * rt_w1;
+			rt_p1_binormal = binormal * rt_w1;
+			rt_p1_uv = uv_interp * rt_w1;
+			rt_p1_uv2 = uv2_interp * rt_w1;
+			rt_p1_color = color_interp * rt_w1;
+			/* RT_CUSTOM_VARYING_ACCUMULATE_FIRST_1 */
+			rt_p2_vertex = vertex * rt_w2;
+			rt_p2_normal = normal * rt_w2;
+			rt_p2_tangent = tangent * rt_w2;
+			rt_p2_binormal = binormal * rt_w2;
+			rt_p2_uv = uv_interp * rt_w2;
+			rt_p2_uv2 = uv2_interp * rt_w2;
+			rt_p2_color = color_interp * rt_w2;
+			/* RT_CUSTOM_VARYING_ACCUMULATE_FIRST_2 */
+#endif
+		} else {
+			rt_p0_vertex = rt_p0_vertex + vertex * rt_w0;
+			rt_p0_normal = rt_p0_normal + normal * rt_w0;
+			rt_p0_tangent = rt_p0_tangent + tangent * rt_w0;
+			rt_p0_binormal = rt_p0_binormal + binormal * rt_w0;
+			rt_p0_uv = rt_p0_uv + uv_interp * rt_w0;
+			rt_p0_uv2 = rt_p0_uv2 + uv2_interp * rt_w0;
+			rt_p0_color = rt_p0_color + color_interp * rt_w0;
+			/* RT_CUSTOM_VARYING_ACCUMULATE_0 */
+#if RT_INTERP_POINTS > 1
+			rt_p1_vertex = rt_p1_vertex + vertex * rt_w1;
+			rt_p1_normal = rt_p1_normal + normal * rt_w1;
+			rt_p1_tangent = rt_p1_tangent + tangent * rt_w1;
+			rt_p1_binormal = rt_p1_binormal + binormal * rt_w1;
+			rt_p1_uv = rt_p1_uv + uv_interp * rt_w1;
+			rt_p1_uv2 = rt_p1_uv2 + uv2_interp * rt_w1;
+			rt_p1_color = rt_p1_color + color_interp * rt_w1;
+			/* RT_CUSTOM_VARYING_ACCUMULATE_1 */
+			rt_p2_vertex = rt_p2_vertex + vertex * rt_w2;
+			rt_p2_normal = rt_p2_normal + normal * rt_w2;
+			rt_p2_tangent = rt_p2_tangent + tangent * rt_w2;
+			rt_p2_binormal = rt_p2_binormal + binormal * rt_w2;
+			rt_p2_uv = rt_p2_uv + uv_interp * rt_w2;
+			rt_p2_uv2 = rt_p2_uv2 + uv2_interp * rt_w2;
+			rt_p2_color = rt_p2_color + color_interp * rt_w2;
+			/* RT_CUSTOM_VARYING_ACCUMULATE_2 */
+#endif
 		}
 	}
 	if (rt_removed) {

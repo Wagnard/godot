@@ -531,37 +531,56 @@ static String _clamp_uniform_array_indices(const String &p_code, const String &p
 // integer varyings take the first vertex); dFdx() and dFdy() evaluate their argument again with the neighboring pixel's
 // values. The code each material's varyings need for that, and its replacement in a hit group or displacement template.
 // The hit groups (RT_INTERPOLATE_AT_POINTS) sum each corner into the values at the points they read as the corner's
-// vertex() returns (accumulate); the other templates keep the three corners (save) and interpolate them later (blend).
+// vertex() returns (accumulate), one variable per point (rt_p<N>_<name>: an array indexed in the corner loop became a local
+// array in DXIL, in scratch memory on AMD, see raytracing_custom_globals_inc.glsl); the other templates keep the three
+// corners (save) and interpolate them later (blend).
 static String _apply_varying_code(const String &p_template, const Vector<ShaderCompiler::GeneratedCode::Varying> &p_varyings) {
-	String storage, save, blend, accumulate_first, accumulate, select, push, pop;
+	const int POINTS = 3;
+	String storage, save, blend, push, pop;
+	String accumulate_first[POINTS], accumulate[POINTS], select[POINTS];
 	for (const ShaderCompiler::GeneratedCode::Varying &varying : p_varyings) {
 		const String corners = "rt_corner_" + varying.name;
-		const String points = "rt_point_" + varying.name;
 		const String saved = "rt_saved_" + varying.name;
 		const String array = varying.array_size > 0 ? "[" + itos(varying.array_size) + "]" : String();
-		storage += "#ifdef RT_INTERPOLATE_AT_POINTS\n" + varying.type + " " + points + "[RT_INTERP_POINTS]" + array + ";\n#else\n";
-		storage += varying.type + " " + corners + "[3]" + array + ";\n#endif\n";
+		storage += "#ifdef RT_INTERPOLATE_AT_POINTS\n";
+		for (int p = 0; p < POINTS; p++) {
+			storage += varying.type + " rt_p" + itos(p) + "_" + varying.name + array + ";\n";
+		}
+		storage += "#else\n" + varying.type + " " + corners + "[3]" + array + ";\n#endif\n";
 		storage += varying.type + " " + saved + array + ";\n";
 		save += corners + "[rt_corner] = " + varying.name + ";\n";
-		select += varying.name + " = " + points + "[p_point];\n";
 		push += saved + " = " + varying.name + ";\n";
 		pop += varying.name + " = " + saved + ";\n";
+		for (int p = 0; p < POINTS; p++) {
+			const String point = "rt_p" + itos(p) + "_" + varying.name;
+			const String w = "rt_w" + itos(p);
+			select[p] += varying.name + " = " + point + ";\n";
+			if (!varying.interpolated) {
+				accumulate_first[p] += point + " = " + varying.name + ";\n";
+			} else if (varying.array_size > 0) {
+				const String elements = "for (int rt_element = 0; rt_element < " + itos(varying.array_size) + "; rt_element++) {\n";
+				accumulate_first[p] += elements + point + "[rt_element] = " + varying.name + "[rt_element] * " + w + ";\n}\n";
+				accumulate[p] += elements + point + "[rt_element] = " + point + "[rt_element] + " + varying.name + "[rt_element] * " + w + ";\n}\n";
+			} else {
+				accumulate_first[p] += point + " = " + varying.name + " * " + w + ";\n";
+				accumulate[p] += point + " = " + point + " + " + varying.name + " * " + w + ";\n";
+			}
+		}
 		if (!varying.interpolated) {
 			blend += varying.name + " = " + corners + "[0];\n";
-			accumulate_first += points + "[rt_point] = " + varying.name + ";\n";
 		} else if (varying.array_size > 0) {
-			const String elements = "for (int rt_element = 0; rt_element < " + itos(varying.array_size) + "; rt_element++) {\n";
-			blend += elements;
+			blend += "for (int rt_element = 0; rt_element < " + itos(varying.array_size) + "; rt_element++) {\n";
 			blend += varying.name + "[rt_element] = " + corners + "[0][rt_element] * p_bary.x + " + corners + "[1][rt_element] * p_bary.y + " + corners + "[2][rt_element] * p_bary.z;\n}\n";
-			accumulate_first += elements + points + "[rt_point][rt_element] = " + varying.name + "[rt_element] * rt_w;\n}\n";
-			accumulate += elements + points + "[rt_point][rt_element] = " + points + "[rt_point][rt_element] + " + varying.name + "[rt_element] * rt_w;\n}\n";
 		} else {
 			blend += varying.name + " = " + corners + "[0] * p_bary.x + " + corners + "[1] * p_bary.y + " + corners + "[2] * p_bary.z;\n";
-			accumulate_first += points + "[rt_point] = " + varying.name + " * rt_w;\n";
-			accumulate += points + "[rt_point] = " + points + "[rt_point] + " + varying.name + " * rt_w;\n";
 		}
 	}
-	return p_template.replace("/* RT_CUSTOM_VARYING_STORAGE */", storage).replace("/* RT_CUSTOM_VARYING_SAVE */", save).replace("/* RT_CUSTOM_VARYING_BLEND */", blend).replace("/* RT_CUSTOM_VARYING_ACCUMULATE_FIRST */", accumulate_first).replace("/* RT_CUSTOM_VARYING_ACCUMULATE */", accumulate).replace("/* RT_CUSTOM_VARYING_SELECT */", select).replace("/* RT_CUSTOM_VARYING_PUSH */", push).replace("/* RT_CUSTOM_VARYING_POP */", pop);
+	String result = p_template.replace("/* RT_CUSTOM_VARYING_STORAGE */", storage).replace("/* RT_CUSTOM_VARYING_SAVE */", save).replace("/* RT_CUSTOM_VARYING_BLEND */", blend).replace("/* RT_CUSTOM_VARYING_PUSH */", push).replace("/* RT_CUSTOM_VARYING_POP */", pop);
+	for (int p = 0; p < POINTS; p++) {
+		const String suffix = itos(p) + " */";
+		result = result.replace("/* RT_CUSTOM_VARYING_ACCUMULATE_FIRST_" + suffix, accumulate_first[p]).replace("/* RT_CUSTOM_VARYING_ACCUMULATE_" + suffix, accumulate[p]).replace("/* RT_CUSTOM_VARYING_SELECT_" + suffix, select[p]);
+	}
+	return result;
 }
 
 // The hit shaders have no depth texture: every read of DEPTH_TEXTURE (any texture function on depth_buffer) becomes
