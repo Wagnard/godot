@@ -142,7 +142,7 @@ const RenderingDeviceDriverD3D12::D3D12Format RenderingDeviceDriverD3D12::RD_TO_
 	/* DATA_FORMAT_B8G8R8A8_SSCALED */ { DXGI_FORMAT_R8G8B8A8_TYPELESS, DXGI_FORMAT_R8G8B8A8_SINT },
 	/* DATA_FORMAT_B8G8R8A8_UINT */ { DXGI_FORMAT_R8G8B8A8_TYPELESS, DXGI_FORMAT_R8G8B8A8_UINT },
 	/* DATA_FORMAT_B8G8R8A8_SINT */ { DXGI_FORMAT_R8G8B8A8_TYPELESS, DXGI_FORMAT_R8G8B8A8_SINT },
-	/* DATA_FORMAT_B8G8R8A8_SRGB */ { DXGI_FORMAT_B8G8R8A8_TYPELESS, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB },
+	/* DATA_FORMAT_B8G8R8A8_SRGB */ { DXGI_FORMAT_B8G8R8A8_TYPELESS, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB },
 	/* DATA_FORMAT_A8B8G8R8_UNORM_PACK32 */ { DXGI_FORMAT_R8G8B8A8_TYPELESS, DXGI_FORMAT_R8G8B8A8_UNORM },
 	/* DATA_FORMAT_A8B8G8R8_SNORM_PACK32 */ { DXGI_FORMAT_R8G8B8A8_TYPELESS, DXGI_FORMAT_R8G8B8A8_SNORM },
 	/* DATA_FORMAT_A8B8G8R8_USCALED_PACK32 */ { DXGI_FORMAT_R8G8B8A8_TYPELESS, DXGI_FORMAT_R8G8B8A8_UINT },
@@ -1186,14 +1186,24 @@ uint64_t RenderingDeviceDriverD3D12::buffer_get_allocation_size(BufferID p_buffe
 uint8_t *RenderingDeviceDriverD3D12::buffer_map(BufferID p_buffer) {
 	const BufferInfo *buf_info = (const BufferInfo *)p_buffer.id;
 	void *data_ptr = nullptr;
-	HRESULT res = buf_info->resource->Map(0, &VOID_RANGE, &data_ptr);
+	// Map's pReadRange / Unmap's pWrittenRange: the CPU reads a READBACK buffer and writes the others (UPLOAD staging).
+	// nullptr is the whole buffer; VOID_RANGE told the runtime that nothing was read.
+	HRESULT res = buf_info->resource->Map(0, _buffer_is_readback(buf_info) ? nullptr : &VOID_RANGE, &data_ptr);
 	ERR_FAIL_COND_V_MSG(!SUCCEEDED(res), nullptr, "Map failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
 	return (uint8_t *)data_ptr;
 }
 
 void RenderingDeviceDriverD3D12::buffer_unmap(BufferID p_buffer) {
 	const BufferInfo *buf_info = (const BufferInfo *)p_buffer.id;
-	buf_info->resource->Unmap(0, &VOID_RANGE);
+	buf_info->resource->Unmap(0, _buffer_is_readback(buf_info) ? &VOID_RANGE : nullptr);
+}
+
+bool RenderingDeviceDriverD3D12::_buffer_is_readback(const BufferInfo *p_buf_info) {
+	D3D12_HEAP_PROPERTIES heap_properties = {};
+	if (FAILED(p_buf_info->resource->GetHeapProperties(&heap_properties, nullptr))) {
+		return false;
+	}
+	return heap_properties.Type == D3D12_HEAP_TYPE_READBACK || (heap_properties.Type == D3D12_HEAP_TYPE_CUSTOM && heap_properties.CPUPageProperty == D3D12_CPU_PAGE_PROPERTY_WRITE_BACK);
 }
 
 uint8_t *RenderingDeviceDriverD3D12::buffer_persistent_map_advance(BufferID p_buffer, uint64_t p_frames_drawn) {
@@ -1589,8 +1599,11 @@ RDD::TextureID RenderingDeviceDriverD3D12::texture_create(const TextureFormat &p
 	{
 		HRESULT res = E_FAIL;
 		if (barrier_capabilities.enhanced_barriers_supported || (cross_family_sharing && relaxed_casting_available)) {
-			// Create with undefined layout if enhanced barriers are supported. Leave as common otherwise for interop with legacy barriers.
-			D3D12_BARRIER_LAYOUT initial_layout = barrier_capabilities.enhanced_barriers_supported ? D3D12_BARRIER_LAYOUT_UNDEFINED : D3D12_BARRIER_LAYOUT_COMMON;
+			// COMMON, also with enhanced barriers: the transfer workers write initial data on a COPY queue, where "subresources
+			// used in Copy queues MUST be in the state D3D12_RESOURCE_STATE_COMMON" and "Copy queues do not support layout
+			// transition Barriers" (D3D12EnhancedBarriers, "Copy Queues"). The first use on the main queue still discards
+			// from UNDEFINED, which is valid whatever the current layout.
+			D3D12_BARRIER_LAYOUT initial_layout = D3D12_BARRIER_LAYOUT_COMMON;
 			res = allocator->CreateResource3(
 					&allocation_desc,
 					&resource_desc,
@@ -2731,6 +2744,9 @@ void RenderingDeviceDriverD3D12::command_pipeline_barrier(CommandBufferID p_cmd_
 		_push_split_global_barrier(global_barriers, global_barrier);
 	}
 
+	const CommandBufferInfo *cmd_buf_info = (const CommandBufferInfo *)(p_cmd_buffer.id);
+	const bool copy_list = cmd_buf_info->list_type == D3D12_COMMAND_LIST_TYPE_COPY;
+
 	D3D12_BUFFER_BARRIER buffer_barrier_d3d12 = {};
 	buffer_barrier_d3d12.Offset = 0;
 	buffer_barrier_d3d12.Size = UINT64_MAX; // The specification says this must be the size of the buffer barrier.
@@ -2786,6 +2802,13 @@ void RenderingDeviceDriverD3D12::command_pipeline_barrier(CommandBufferID p_cmd_
 			texture_barrier_d3d12.Subresources.NumPlanes = format_get_plane_count(texture_info->format);
 		}
 		texture_barrier_d3d12.Flags = (texture_barrier_rd.prev_layout == RDD::TEXTURE_LAYOUT_UNDEFINED) ? D3D12_TEXTURE_BARRIER_FLAG_DISCARD : D3D12_TEXTURE_BARRIER_FLAG_NONE;
+		if (copy_list) {
+			// "Copy queues do not support layout transition Barriers": a texture stays in COMMON there (it is created
+			// in it), so the barrier only orders the accesses.
+			texture_barrier_d3d12.LayoutBefore = D3D12_BARRIER_LAYOUT_COMMON;
+			texture_barrier_d3d12.LayoutAfter = D3D12_BARRIER_LAYOUT_COMMON;
+			texture_barrier_d3d12.Flags = D3D12_TEXTURE_BARRIER_FLAG_NONE;
+		}
 		texture_barriers.push_back(texture_barrier_d3d12);
 	}
 
@@ -2816,7 +2839,6 @@ void RenderingDeviceDriverD3D12::command_pipeline_barrier(CommandBufferID p_cmd_
 	}
 
 	if (barrier_groups_count) {
-		const CommandBufferInfo *cmd_buf_info = (const CommandBufferInfo *)(p_cmd_buffer.id);
 		cmd_buf_info->cmd_list_7->Barrier(barrier_groups_count, barrier_groups);
 	}
 }
@@ -3588,7 +3610,7 @@ D3D12_UNORDERED_ACCESS_VIEW_DESC RenderingDeviceDriverD3D12::_make_ranged_uav_fo
 		} break;
 		case D3D12_UAV_DIMENSION_TEXTURE1DARRAY: {
 			uav_desc.Texture1DArray.MipSlice = mip;
-			uav_desc.Texture1DArray.FirstArraySlice = mip;
+			uav_desc.Texture1DArray.FirstArraySlice = (p_add_bases ? p_texture_info->base_layer : 0) + p_layer_offset;
 			uav_desc.Texture1DArray.ArraySize = p_layers;
 		} break;
 		case D3D12_UAV_DIMENSION_TEXTURE2D: {
@@ -7071,8 +7093,15 @@ void RenderingDeviceDriverD3D12::timestamp_query_pool_get_results(QueryPoolID p_
 
 	ID3D12Resource *results_buffer = tqp_info->results_buffer_allocation->GetResource();
 
+	// The CPU reads the results: the read range covers them (Map, pReadRange), and nothing was written back.
+	const D3D12_RANGE read_range = { 0, sizeof(uint64_t) * p_query_count };
 	void *results_buffer_data = nullptr;
-	results_buffer->Map(0, &VOID_RANGE, &results_buffer_data);
+	HRESULT res = results_buffer->Map(0, &read_range, &results_buffer_data);
+	if (!SUCCEEDED(res) || results_buffer_data == nullptr) {
+		// A removed device fails here first when timestamps are on: no results rather than a read through null.
+		memset(r_results, 0, sizeof(uint64_t) * p_query_count);
+		ERR_FAIL_MSG("Map of the timestamp results failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
+	}
 	memcpy(r_results, results_buffer_data, sizeof(uint64_t) * p_query_count);
 	results_buffer->Unmap(0, &VOID_RANGE);
 }
@@ -7759,8 +7788,11 @@ Error RenderingDeviceDriverD3D12::_check_capabilities() {
 			if (options6.VariableShadingRateTier >= D3D12_VARIABLE_SHADING_RATE_TIER_2) {
 				fsr_capabilities.primitive_supported = true;
 				fsr_capabilities.attachment_supported = true;
+				// One tile size, square: "Tiles are square", "One dimension is retrieved, since the horizontal and
+				// vertical dimensions are always the same" (VariableRateShading, "Querying the tile size"). A max of 8
+				// made RD pick 8 on a GPU with 16x16 tiles.
 				fsr_capabilities.min_texel_size = Size2i(options6.ShadingRateImageTileSize, options6.ShadingRateImageTileSize);
-				fsr_capabilities.max_texel_size = Size2i(8, 8);
+				fsr_capabilities.max_texel_size = fsr_capabilities.min_texel_size;
 			}
 		}
 	}

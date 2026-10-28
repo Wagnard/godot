@@ -323,6 +323,8 @@ private:
 		bool is_dynamic() const { return flags.is_dynamic; }
 	};
 
+	static bool _buffer_is_readback(const BufferInfo *p_buf_info);
+
 	struct BufferDynamicInfo : BufferInfo {
 		uint32_t frame_idx = UINT32_MAX;
 		uint8_t *persistent_ptr = nullptr;
