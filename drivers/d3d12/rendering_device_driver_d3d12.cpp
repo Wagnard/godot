@@ -3742,7 +3742,13 @@ RDD::FramebufferID RenderingDeviceDriverD3D12::_framebuffer_create(RenderPassID 
 			fb_info->size = Size2i(tex_info->desc.Width, tex_info->desc.Height);
 		}
 
-		if ((tex_info->desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)) {
+		if (i == vrs_index) {
+			// First: the shading rate image is also a render target (VRS::update_vrs_texture() draws it), and taken for
+			// a colour attachment it was never bound. Also in attachments: the render pass code indexes them with the
+			// pass's attachment indices.
+			fb_info->vrs_attachment = p_attachments[i];
+			fb_info->attachments.push_back(p_attachments[i]);
+		} else if ((tex_info->desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)) {
 			D3D12_RENDER_TARGET_VIEW_DESC rtv_desc = _make_rtv_for_texture(tex_info, 0, 0, UINT32_MAX);
 			device->CreateRenderTargetView(tex_info->resource, &rtv_desc, get_cpu_handle(fb_info->rtv_alloc.cpu_handle, color_idx, rtv_descriptor_heap_pool.increment_size));
 
@@ -3756,14 +3762,12 @@ RDD::FramebufferID RenderingDeviceDriverD3D12::_framebuffer_create(RenderPassID 
 			fb_info->attachments_handle_inds[i] = depth_stencil_idx;
 			fb_info->attachments.push_back(p_attachments[i]);
 			depth_stencil_idx++;
-		} else if (i == vrs_index) {
-			fb_info->vrs_attachment = p_attachments[i];
 		} else {
 			DEV_ASSERT(false);
 		}
 	}
 
-	DEV_ASSERT(fb_info->attachments.size() == color_idx + depth_stencil_idx);
+	DEV_ASSERT(fb_info->attachments.size() == color_idx + depth_stencil_idx + (vrs_index != UINT32_MAX ? 1 : 0));
 	DEV_ASSERT((fb_info->vrs_attachment.id != 0) == (vrs_index != UINT32_MAX));
 
 	return FramebufferID(fb_info);
@@ -4993,6 +4997,9 @@ void RenderingDeviceDriverD3D12::command_begin_render_pass(CommandBufferID p_cmd
 		// Screen framebuffers must perform this transition even if enhanced barriers are supported.
 		for (uint32_t i = 0; i < fb_info->attachments.size(); i++) {
 			TextureInfo *tex_info = (TextureInfo *)fb_info->attachments[i].id;
+			if (fb_info->attachments[i] == fb_info->vrs_attachment) {
+				continue; // Transitioned below.
+			}
 			if ((tex_info->desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)) {
 				_transition_subresources(tex_info, D3D12_RESOURCE_STATE_RENDER_TARGET);
 			} else if ((tex_info->desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)) {
@@ -5041,6 +5048,8 @@ void RenderingDeviceDriverD3D12::command_begin_render_pass(CommandBufferID p_cmd
 			D3D12_SHADING_RATE_COMBINER_OVERRIDE,
 		};
 		cmd_buf_info->cmd_list_5->RSSetShadingRate(D3D12_SHADING_RATE_1X1, COMBINERS);
+		// The OVERRIDE combiner takes the rate from the image: without it bound every pixel stays 1x1.
+		cmd_buf_info->cmd_list_5->RSSetShadingRateImage(((const TextureInfo *)fb_info->vrs_attachment.id)->resource);
 	}
 
 	cmd_buf_info->render_pass_state.current_subpass = UINT32_MAX;
@@ -5286,7 +5295,7 @@ void RenderingDeviceDriverD3D12::command_end_render_pass(CommandBufferID p_cmd_b
 
 	if (!barrier_capabilities.enhanced_barriers_supported) {
 		for (uint32_t i = 0; i < pass_info->attachments.size(); i++) {
-			if (pass_info->attachments[i].store_op == ATTACHMENT_STORE_OP_DONT_CARE) {
+			if (pass_info->attachments[i].store_op == ATTACHMENT_STORE_OP_DONT_CARE && fb_info->attachments[i] != fb_info->vrs_attachment) {
 				TextureInfo *tex_info = (TextureInfo *)fb_info->attachments[i].id;
 				if ((tex_info->desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)) {
 					_transition_subresources(tex_info, D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -5312,7 +5321,9 @@ void RenderingDeviceDriverD3D12::command_end_render_pass(CommandBufferID p_cmd_b
 	_render_pass_enhanced_barriers_flush(p_cmd_buffer);
 
 	for (uint32_t i = 0; i < pass_info->attachments.size(); i++) {
-		if (pass_info->attachments[i].store_op == ATTACHMENT_STORE_OP_DONT_CARE) {
+		// The shading rate image is only read by the pass (RD gives it DONT_CARE as its store op): discarding it would lose
+		// the rates kept from frame to frame.
+		if (pass_info->attachments[i].store_op == ATTACHMENT_STORE_OP_DONT_CARE && fb_info->attachments[i] != fb_info->vrs_attachment) {
 			const TextureInfo *tex_info = (const TextureInfo *)fb_info->attachments[i].id;
 			_discard_texture_subresources(tex_info, cmd_buf_info);
 		}
@@ -5366,6 +5377,8 @@ void RenderingDeviceDriverD3D12::command_resume_render_pass(CommandBufferID p_cm
 			D3D12_SHADING_RATE_COMBINER_OVERRIDE,
 		};
 		cmd_buf_info->cmd_list_5->RSSetShadingRate(D3D12_SHADING_RATE_1X1, COMBINERS);
+		// The OVERRIDE combiner takes the rate from the image: without it bound every pixel stays 1x1.
+		cmd_buf_info->cmd_list_5->RSSetShadingRateImage(((const TextureInfo *)fb_info->vrs_attachment.id)->resource);
 	}
 
 	cmd_buf_info->render_pass_state.current_subpass = 0;
