@@ -5777,7 +5777,10 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 		RD::Uniform u;
 		u.binding = 42;
 		u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
-		const RID projector = light_storage->get_directional_projector_texture();
+		// Only the passes of a render (p_render_data) light anything. The others (depth prepass, shadows, SDFGI, material
+		// bakes) are built before this render's update_light_buffers(), so they would get the projector of whichever
+		// render ran last (a SubViewport's), and its texture would become a dependency of every shadow pass.
+		const RID projector = p_render_data != nullptr ? light_storage->get_directional_projector_texture() : RID();
 		u.append_id(projector.is_valid() ? projector : texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_WHITE));
 		uniforms.push_back(u);
 	}
