@@ -1428,6 +1428,8 @@ protected:
 		RID normal_roughness;
 		RID specular_hit_dist;
 		RID color_before_transparency;
+		// The unshaded transparent effects, drawn apart for RR to upscale without denoising (DLSS-RR Integration Guide, 3.4.10).
+		RID transparency_layer;
 		// In place of the depth buffer: a transparent surface's where its reflection dominates (RenderRaytracing::dlss_rr_get_depth()).
 		RID depth;
 	};

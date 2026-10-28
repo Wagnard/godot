@@ -462,6 +462,10 @@ void SceneShaderForwardClustered::ShaderData::_create_pipeline(PipelineKey p_pip
 
 	// Color pass -> attachment 0: Color/Diffuse, attachment 1: Separate Specular, attachment 2: Motion Vectors
 	RD::PipelineColorBlendState::Attachment blend_attachment = blend_mode_to_blend_attachment(BlendMode(blend_mode));
+	if (blend_mode == BLEND_MODE_ADD && int64_t(p_pipeline_key.framebuffer_format_id) == SceneShaderForwardClustered::rr_transparency_layer_framebuffer_format.load()) {
+		// Added light covers nothing: the layer's alpha (what DLSS-RR fades out under it) keeps what the other surfaces wrote.
+		blend_attachment.write_a = false;
+	}
 	RD::PipelineColorBlendState blend_state_color_blend;
 	blend_state_color_blend.attachments = { blend_attachment, RD::PipelineColorBlendState::Attachment(), RD::PipelineColorBlendState::Attachment() };
 	RD::PipelineColorBlendState blend_state_color_opaque = RD::PipelineColorBlendState::create_disabled(3);

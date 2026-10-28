@@ -33,6 +33,7 @@
 #include "core/os/os.h"
 #include "servers/rendering/renderer_rd/environment/fog.h"
 #include "servers/rendering/renderer_rd/forward_clustered/scene_shader_raytracing.h"
+#include "servers/rendering/renderer_rd/framebuffer_cache_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
 #include "servers/rendering/rendering_device.h"
@@ -178,6 +179,26 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 	int *render_info = p_render_data->render_info ? p_render_data->render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_VISIBLE] : (int *)nullptr;
 
 	render_list[RENDER_LIST_ALPHA].sort_by_reverse_depth_and_priority();
+	// DLSS-RR's transparency layer: the effects move to the end of the list, each part in its order, before their instance
+	// data is written; the transparent pass draws the two ranges into two targets.
+	uint32_t rr_layer_from = UINT32_MAX;
+	if (raytracing && raytracing->dlss_rr_has_buffers(rb.ptr()) && p_render_data->scene_data->view_count == 1 && rb->get_msaa_3d() == RSE::VIEWPORT_MSAA_DISABLED && _rr_transparency_layer_enabled()) {
+		LocalVector<GeometryInstanceSurfaceDataCache *> &elements = render_list[RENDER_LIST_ALPHA].elements;
+		thread_local LocalVector<GeometryInstanceSurfaceDataCache *> layer;
+		layer.clear();
+		uint32_t kept = 0;
+		for (uint32_t i = 0; i < elements.size(); i++) {
+			if (_rr_transparency_layer_surface(elements[i])) {
+				layer.push_back(elements[i]);
+			} else {
+				elements[kept++] = elements[i];
+			}
+		}
+		for (uint32_t i = 0; i < layer.size(); i++) {
+			elements[kept + i] = layer[i];
+		}
+		rr_layer_from = kept;
+	}
 	_fill_instance_data(RENDER_LIST_ALPHA, render_info);
 
 	// RT pipeline flags (packed with sample count / max bounces). Computed once
@@ -510,6 +531,7 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 		copy_effects->copy_to_rect(rb->get_internal_texture(), raytracing->dlss_rr_get_color_before_transparency(rb.ptr()), Rect2i(Point2i(), rb->get_internal_size()));
 	}
 
+	RID rr_transparency_layer;
 	{
 		RENDER_TIMESTAMP("Render 3D Transparent Pass");
 
@@ -544,7 +566,9 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 			}
 
 			RID alpha_framebuffer = rb_data->get_color_pass_fb(transparent_color_pass_flags);
-			RenderListParameters render_list_params(render_list[RENDER_LIST_ALPHA].elements.ptr(), render_list[RENDER_LIST_ALPHA].element_info.ptr(), render_list[RENDER_LIST_ALPHA].elements.size(), reverse_cull, PASS_MODE_COLOR, transparent_color_pass_flags, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, 0, base_specialization);
+			const uint32_t alpha_count = render_list[RENDER_LIST_ALPHA].elements.size();
+			const uint32_t lit_count = MIN(rr_layer_from, alpha_count);
+			RenderListParameters render_list_params(render_list[RENDER_LIST_ALPHA].elements.ptr(), render_list[RENDER_LIST_ALPHA].element_info.ptr(), lit_count, reverse_cull, PASS_MODE_COLOR, transparent_color_pass_flags, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, 0, base_specialization);
 			render_list_params.rt_shadow_texture_uniform_set = rt_shadow_texture_set;
 			// The alpha test reads the vertices through their addresses.
 			thread_local LocalVector<RID> rt_shadow_buffers;
@@ -554,6 +578,32 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 				render_list_params.buffer_dependencies = &rt_shadow_buffers;
 			}
 			_render_list_with_draw_list(&render_list_params, alpha_framebuffer, RD::DRAW_DEFAULT_ALL, Vector<Color>(), 0.0f, 0u, p_render_data->render_region);
+
+			if (rr_layer_from != UINT32_MAX) {
+				// The effects, into a target cleared to transparent with the same format as the color, tested against the
+				// same depth: the pipelines are the color pass' own. Mix and premultiplied alpha leave premultiplied color
+				// in RGB and the coverage in alpha, the layer DLSS-RR composites over its denoised output.
+				if (!rb->has_texture(RB_SCOPE_DLSS_RR, SNAME("transparency_layer"))) {
+					rb->create_texture(RB_SCOPE_DLSS_RR, SNAME("transparency_layer"), rb->get_base_data_format(), RD::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT, RD::TEXTURE_SAMPLES_1);
+				}
+				rr_transparency_layer = rb->get_texture(RB_SCOPE_DLSS_RR, SNAME("transparency_layer"));
+				RID layer_framebuffer;
+				if (rb->has_texture(RB_SCOPE_VRS, RB_TEXTURE)) {
+					layer_framebuffer = FramebufferCacheRD::get_singleton()->get_cache_multiview(1, rr_transparency_layer, RID(), RID(), rb->get_depth_texture(), rb->get_texture(RB_SCOPE_VRS, RB_TEXTURE));
+				} else {
+					layer_framebuffer = FramebufferCacheRD::get_singleton()->get_cache_multiview(1, rr_transparency_layer, RID(), RID(), rb->get_depth_texture());
+				}
+				// Its usage bits give it a framebuffer format of its own; were it the color's, the color pass' additive
+				// pipelines would lose their alpha too, so the layer then keeps them as they are.
+				const RD::FramebufferFormatID layer_format = RD::get_singleton()->framebuffer_get_format(layer_framebuffer);
+				const bool own_format = layer_format != RD::get_singleton()->framebuffer_get_format(alpha_framebuffer);
+				SceneShaderForwardClustered::rr_transparency_layer_framebuffer_format.store(own_format ? int64_t(layer_format) : -1);
+				RenderListParameters layer_params(render_list[RENDER_LIST_ALPHA].elements.ptr() + lit_count, render_list[RENDER_LIST_ALPHA].element_info.ptr() + lit_count, alpha_count - lit_count, reverse_cull, PASS_MODE_COLOR, transparent_color_pass_flags, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, lit_count, base_specialization);
+				layer_params.rt_shadow_texture_uniform_set = rt_shadow_texture_set;
+				layer_params.buffer_dependencies = render_list_params.buffer_dependencies;
+				const Vector<Color> transparent_black = { Color(0, 0, 0, 0) };
+				_render_list_with_draw_list(&layer_params, layer_framebuffer, RD::DRAW_CLEAR_COLOR_0, transparent_black, 0.0f, 0u, p_render_data->render_region);
+			}
 		}
 		front_layer_reflection = RID();
 
@@ -590,6 +640,7 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 			dlss_rr_guides.normal_roughness = raytracing->dlss_rr_get_normal_roughness(rb.ptr());
 			dlss_rr_guides.specular_hit_dist = raytracing->dlss_rr_get_specular_hit_dist(rb.ptr());
 			dlss_rr_guides.color_before_transparency = raytracing->dlss_rr_get_color_before_transparency(rb.ptr());
+			dlss_rr_guides.transparency_layer = rr_transparency_layer;
 			dlss_rr_guides.depth = raytracing->dlss_rr_get_depth(rb.ptr());
 		}
 		_render_3d_upscaling(p_render_data, scale_type, using_taa, time_step, dlss_rr_guides);
@@ -613,6 +664,25 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 }
 
 // Raytracing methods
+
+bool RenderForwardClusteredPT::_rr_transparency_layer_enabled() {
+	// GODOT_RR_TRANSPARENCY_LAYER=0: the effects stay in RR's noisy input, as before (comparisons).
+	static const bool off = OS::get_singleton()->get_environment("GODOT_RR_TRANSPARENCY_LAYER") == "0";
+	return !off;
+}
+
+bool RenderForwardClusteredPT::_rr_transparency_layer_surface(const GeometryInstanceSurfaceDataCache *p_surf) {
+	// Unshaded: nothing in it is traced, so nothing to denoise; RR smeared such effects (godot3d's buff halo and its
+	// sparkles, moving without motion vectors) as if they were noise. Add writes no alpha into the layer (its pipelines
+	// there, SceneShaderForwardClustered::rr_transparency_layer_framebuffer_format). Sub and mul darken what is under
+	// them, which the premultiplied layer cannot hold.
+	const SceneShaderForwardClustered::ShaderData *shader = p_surf->shader;
+	if (!shader || !shader->unshaded || shader->uses_screen_texture || shader->uses_depth_texture || shader->uses_normal_texture) {
+		return false;
+	}
+	return shader->blend_mode == RendererRD::MaterialStorage::ShaderData::BLEND_MODE_MIX || shader->blend_mode == RendererRD::MaterialStorage::ShaderData::BLEND_MODE_PREMULTIPLIED_ALPHA ||
+			shader->blend_mode == RendererRD::MaterialStorage::ShaderData::BLEND_MODE_ADD;
+}
 
 bool RenderForwardClusteredPT::_transparent_pass_traces_shadows() {
 	// GODOT_RT_TRANSPARENT_SHADOWS=0: the shadow maps instead, rendered for every light again (comparisons).

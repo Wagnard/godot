@@ -43,6 +43,11 @@ private:
 	static Mutex singleton_mutex;
 
 public:
+	// The path tracer's DLSS-RR transparency layer (RenderForwardClusteredPT): its pipelines blend an additive surface
+	// without writing alpha, which stays the coverage of what the layer hides. Its own framebuffer format, so its own
+	// pipelines.
+	static inline std::atomic<int64_t> rr_transparency_layer_framebuffer_format = { -1 };
+
 	enum ShaderGroup {
 		SHADER_GROUP_BASE, // Always compiled at the beginning.
 		SHADER_GROUP_ADVANCED,
