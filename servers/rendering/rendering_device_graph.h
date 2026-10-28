@@ -1012,10 +1012,19 @@ private:
 	// Debugging (Wagnard/godot#1). GODOT_SHADOW_CHAIN_ORDER=1: the draw lists recorded between debug_order_chain_begin()
 	// and debug_order_chain_end() keep their submission order. GODOT_RD_UPDATES_IN_PLACE=1: a buffer or texture update
 	// runs after the command submitted before it instead of being moved up.
+	// GODOT_RD_UPDATES_IN_PLACE_RANGE=a-b limits that to the updates submitted at indices a to b of the frame (the dump's
+	// #), GODOT_RD_UPDATES_IN_PLACE_ANCHOR=N makes them run after command N instead, and each such update is printed once.
+	// GODOT_SHADOW_SECTION_FENCE=1: every command submitted before the shadow section runs before it.
 	bool order_chain_enabled = false;
 	bool order_chain_active = false;
 	int32_t order_chain_last = -1;
 	bool updates_in_place = false;
+	int32_t updates_in_place_from = 0;
+	int32_t updates_in_place_to = INT32_MAX;
+	int32_t updates_in_place_anchor = -1;
+	LocalVector<int32_t> updates_in_place_logged;
+	bool shadow_section_fence = false;
+	void _debug_update_in_place(int32_t p_command_index, RecordedCommand *r_command, uint64_t p_destination, bool p_texture, uint64_t p_bytes);
 
 	// GODOT_RD_GRAPH_DUMP=<directory> (debugging): when <directory>/dump_now appears, the next 4 frames' commands are written
 	// to <directory>, in level order with their accesses. Shared by the graphs that alternate frames.

@@ -2532,6 +2532,19 @@ void RenderingDeviceGraph::initialize(RDD *p_driver, RenderPassCreationFunction 
 	if (updates_in_place) {
 		print_line("RenderingDeviceGraph: GODOT_RD_UPDATES_IN_PLACE=1, buffer and texture updates no longer move above the previous command (debugging).");
 	}
+	const String in_place_range = OS::get_singleton()->get_environment("GODOT_RD_UPDATES_IN_PLACE_RANGE");
+	if (!in_place_range.is_empty()) {
+		updates_in_place = true;
+		updates_in_place_from = in_place_range.get_slicec('-', 0).to_int();
+		updates_in_place_to = in_place_range.contains_char('-') ? in_place_range.get_slicec('-', 1).to_int() : updates_in_place_from;
+		const String anchor = OS::get_singleton()->get_environment("GODOT_RD_UPDATES_IN_PLACE_ANCHOR");
+		updates_in_place_anchor = anchor.is_empty() ? -1 : anchor.to_int();
+		print_line(vformat("RenderingDeviceGraph: GODOT_RD_UPDATES_IN_PLACE_RANGE=%d-%d, only the updates submitted at those indices stay after %s (debugging).", updates_in_place_from, updates_in_place_to, updates_in_place_anchor >= 0 ? vformat("command #%d", updates_in_place_anchor) : String("the previous command")));
+	}
+	shadow_section_fence = OS::get_singleton()->get_environment("GODOT_SHADOW_SECTION_FENCE") == "1";
+	if (shadow_section_fence) {
+		print_line("RenderingDeviceGraph: GODOT_SHADOW_SECTION_FENCE=1, every command submitted before the shadow passes runs before them (debugging).");
+	}
 	// GODOT_PARALLEL_RECORDING_SPLIT_DRAW_LISTS=0 keeps every draw list in one slice.
 	parallel_split_draw_lists = driver->api_trait_get(RDD::API_TRAIT_RESUMABLE_RENDER_PASSES) && OS::get_singleton()->get_environment("GODOT_PARALLEL_RECORDING_SPLIT_DRAW_LISTS") != "0";
 	print_verbose(vformat("RenderingDeviceGraph: parallel recording in up to %d command buffers.", parallel_slice_count));
@@ -2802,8 +2815,32 @@ void RenderingDeviceGraph::add_buffer_update(RDD::BufferID p_dst, ResourceTracke
 	ResourceUsage buffer_usage = RESOURCE_USAGE_COPY_TO;
 	_add_command_to_graph(&p_dst_tracker, &buffer_usage, 1, command_index, command);
 
-	if (unlikely(updates_in_place) && command_index > 0) {
-		_add_adjacent_command(command_index - 1, command_index, command);
+	if (unlikely(updates_in_place)) {
+		uint64_t bytes = 0;
+		for (uint32_t i = 0; i < command->buffer_copies_count; i++) {
+			bytes += buffer_copies[i].region.size;
+		}
+		_debug_update_in_place(command_index, command, p_dst_tracker->buffer_driver_id.id, false, bytes);
+	}
+}
+
+void RenderingDeviceGraph::_debug_update_in_place(int32_t p_command_index, RecordedCommand *r_command, uint64_t p_destination, bool p_texture, uint64_t p_bytes) {
+	if (p_command_index < updates_in_place_from || p_command_index > updates_in_place_to) {
+		return;
+	}
+	const int32_t previous = updates_in_place_anchor >= 0 ? updates_in_place_anchor : p_command_index - 1;
+	if (previous < 0 || previous >= p_command_index) {
+		return;
+	}
+	_add_adjacent_command(previous, p_command_index, r_command);
+
+	if (updates_in_place_from > 0 || updates_in_place_to < INT32_MAX) {
+		// Ranged: say once which update each index is, to name it.
+		if (updates_in_place_logged.find(p_command_index) < 0) {
+			updates_in_place_logged.push_back(p_command_index);
+			const String label = command_label_index >= 0 ? String::utf8(&command_label_chars[command_label_offsets[command_label_index]]) : String("(no label)");
+			print_line(vformat("RenderingDeviceGraph: update #%d kept after #%d: %s %s, %d bytes, label \"%s\".", p_command_index, previous, p_texture ? "texture" : "buffer", String::num_uint64(p_destination, 16), p_bytes, label));
+		}
 	}
 }
 
@@ -3537,8 +3574,8 @@ void RenderingDeviceGraph::add_texture_update(RDD::TextureID p_dst, ResourceTrac
 		_add_command_to_graph(&p_dst_tracker, &usage, 1, command_index, command);
 	}
 
-	if (unlikely(updates_in_place) && command_index > 0) {
-		_add_adjacent_command(command_index - 1, command_index, command);
+	if (unlikely(updates_in_place)) {
+		_debug_update_in_place(command_index, command, p_dst_tracker->texture_driver_id.id, true, 0);
 	}
 }
 
@@ -3560,6 +3597,9 @@ void RenderingDeviceGraph::add_synchronization() {
 }
 
 void RenderingDeviceGraph::debug_order_chain_begin() {
+	if (shadow_section_fence) {
+		add_synchronization();
+	}
 	if (order_chain_enabled) {
 		order_chain_active = true;
 		order_chain_last = -1;
