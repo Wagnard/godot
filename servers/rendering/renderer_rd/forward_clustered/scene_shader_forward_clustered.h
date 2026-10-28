@@ -261,6 +261,8 @@ public:
 		bool wireframe = false;
 
 		bool unshaded = false;
+		// render_mode front_layer_reflection_disabled: the path tracer's front layer leaves this transparent surface out.
+		bool front_layer_reflection_disabled = false;
 		bool uses_vertex = false;
 		bool uses_position = false;
 		bool uses_sss = false;

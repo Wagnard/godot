@@ -1434,11 +1434,13 @@ static void _rt_dispatch_linear(RenderingDevice *p_rd, RD::ComputeListID p_compu
 // reflection. One drawn without the depth test is not where its triangles are: raster draws it over everything, from its
 // fragment code (a decal or a volume projected from the depth buffer, in a box drawn cull_front). Traced, its box hid the
 // surfaces behind it, which lost their reflection, and lent its own to the water where its walls cross it (godot3d's
-// Rot Blossom: a dark outline on the water).
+// Rot Blossom: a dark outline on the water). And one whose shader declares render_mode front_layer_reflection_disabled:
+// the front layer keeps one surface per pixel, and a thin effect in front of water (godot3d's comet tails) took the water's
+// traced reflection from it, which fell back to the brighter radiance one (a white streak).
 bool RenderRaytracing::_front_layer_skipped(const void *p_surf) {
 	const RenderForwardClustered::GeometryInstanceSurfaceDataCache *surf =
 			static_cast<const RenderForwardClustered::GeometryInstanceSurfaceDataCache *>(p_surf);
-	return !surf->shader || surf->shader->unshaded ||
+	return !surf->shader || surf->shader->unshaded || surf->shader->front_layer_reflection_disabled ||
 			surf->shader->rt_depth_test() != SceneShaderForwardClustered::ShaderData::DEPTH_TEST_ENABLED;
 }
 

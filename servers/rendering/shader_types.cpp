@@ -293,6 +293,10 @@ ShaderTypes::ShaderTypes() {
 		shader_modes[RSE::SHADER_SPATIAL].modes.push_back({ PNAME("debug_shadow_splits") });
 		shader_modes[RSE::SHADER_SPATIAL].modes.push_back({ PNAME("fog_disabled") });
 		shader_modes[RSE::SHADER_SPATIAL].modes.push_back({ PNAME("specular_occlusion_disabled") });
+		// Path tracing: a transparent surface left out of the front layer, which traces the reflection of the nearest
+		// transparent surface only (as Unreal's per-material "Allow Front Layer Translucency"). A thin effect in front of
+		// water would otherwise take the water's traced reflection from it.
+		shader_modes[RSE::SHADER_SPATIAL].modes.push_back({ PNAME("front_layer_reflection_disabled") });
 		shader_modes[RSE::SHADER_SPATIAL].stencil_modes.push_back({ PNAME("read") });
 		shader_modes[RSE::SHADER_SPATIAL].stencil_modes.push_back({ PNAME("write") });
 		shader_modes[RSE::SHADER_SPATIAL].stencil_modes.push_back({ PNAME("write_depth_fail") });
