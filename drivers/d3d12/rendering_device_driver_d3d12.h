@@ -92,6 +92,8 @@ class RenderingDeviceDriverD3D12 : public RenderingDeviceDriver {
 	struct ShaderCapabilities {
 		D3D_SHADER_MODEL shader_model = (D3D_SHADER_MODEL)0;
 		bool native_16bit_ops = false;
+		// ResourceDescriptorHeap indexing (SM 6.6 + resource binding tier 3): buffer device addresses and ray tracing.
+		bool heap_indexing = false;
 	};
 
 	struct FormatCapabilities {

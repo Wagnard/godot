@@ -79,6 +79,66 @@ using Microsoft::WRL::ComPtr;
 
 static const D3D12_RANGE VOID_RANGE = {};
 
+// "If you use CopyTextureRegion with a depth-stencil buffer or a multisampled resource, you must copy the entire
+// subresource rectangle ... pass 0 to the DstX, DstY, and DstZ parameters and NULL to the pSrcBox parameter"
+// (ID3D12GraphicsCommandList::CopyTextureRegion, Remarks).
+static bool _copy_needs_whole_subresource(const CD3DX12_RESOURCE_DESC &p_desc) {
+	return (p_desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) || p_desc.SampleDesc.Count > 1;
+}
+
+static bool _copy_box_is_whole_subresource(const CD3DX12_RESOURCE_DESC &p_desc, uint32_t p_mipmap, uint32_t p_x, uint32_t p_y, uint32_t p_z, uint32_t p_width, uint32_t p_height, uint32_t p_depth) {
+	const uint64_t width = MAX(p_desc.Width >> p_mipmap, 1ull);
+	const uint32_t height = MAX(p_desc.Height >> p_mipmap, 1u);
+	const uint32_t depth = p_desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D ? MAX((uint32_t)p_desc.DepthOrArraySize >> p_mipmap, 1u) : 1u;
+	return p_x == 0 && p_y == 0 && p_z == 0 && p_width == width && p_height == height && p_depth == depth;
+}
+
+// The reinterpreting copies CopyTextureRegion makes between type groups, by family: "Format Conversion using Direct3D
+// 10.1" (Block Compression (Direct3D 10)), a table of 32, 64 and 128-bit uncompressed formats and their compressed
+// counterparts. Same family is a plain copy.
+static bool _copy_reinterprets_formats(DXGI_FORMAT p_family, DXGI_FORMAT p_other_family) {
+	switch (p_family) {
+		case DXGI_FORMAT_R32_TYPELESS:
+			return p_other_family == DXGI_FORMAT_R9G9B9E5_SHAREDEXP;
+		case DXGI_FORMAT_R16G16B16A16_TYPELESS:
+		case DXGI_FORMAT_R32G32_TYPELESS:
+			return p_other_family == DXGI_FORMAT_BC1_TYPELESS || p_other_family == DXGI_FORMAT_BC4_TYPELESS;
+		case DXGI_FORMAT_R32G32B32A32_TYPELESS:
+			return p_other_family == DXGI_FORMAT_BC2_TYPELESS || p_other_family == DXGI_FORMAT_BC3_TYPELESS || p_other_family == DXGI_FORMAT_BC5_TYPELESS;
+		default:
+			return false;
+	}
+}
+
+static bool _dxgi_format_is_integer(DXGI_FORMAT p_format) {
+	switch (p_format) {
+		case DXGI_FORMAT_R32G32B32A32_UINT:
+		case DXGI_FORMAT_R32G32B32A32_SINT:
+		case DXGI_FORMAT_R32G32B32_UINT:
+		case DXGI_FORMAT_R32G32B32_SINT:
+		case DXGI_FORMAT_R16G16B16A16_UINT:
+		case DXGI_FORMAT_R16G16B16A16_SINT:
+		case DXGI_FORMAT_R32G32_UINT:
+		case DXGI_FORMAT_R32G32_SINT:
+		case DXGI_FORMAT_R10G10B10A2_UINT:
+		case DXGI_FORMAT_R8G8B8A8_UINT:
+		case DXGI_FORMAT_R8G8B8A8_SINT:
+		case DXGI_FORMAT_R16G16_UINT:
+		case DXGI_FORMAT_R16G16_SINT:
+		case DXGI_FORMAT_R32_UINT:
+		case DXGI_FORMAT_R32_SINT:
+		case DXGI_FORMAT_R8G8_UINT:
+		case DXGI_FORMAT_R8G8_SINT:
+		case DXGI_FORMAT_R16_UINT:
+		case DXGI_FORMAT_R16_SINT:
+		case DXGI_FORMAT_R8_UINT:
+		case DXGI_FORMAT_R8_SINT:
+			return true;
+		default:
+			return false;
+	}
+}
+
 static const uint32_t MAX_DYNAMIC_BUFFERS = 8u; // Minimum guaranteed by Vulkan.
 
 /*****************/
@@ -1239,6 +1299,7 @@ uint64_t RenderingDeviceDriverD3D12::buffer_get_device_address(BufferID p_buffer
 	// Shaders cannot dereference a D3D12 GPU virtual address. A GPU pointer is the index of a raw UAV of the buffer in the
 	// shader-visible heap, shifted by 32 bits, plus an offset in the low bits, as Mesa's DXIL lowering of
 	// SPV_KHR_physical_storage_buffer reads it (createHandleFromHeap, SM 6.6).
+	ERR_FAIL_COND_V_MSG(!shader_capabilities.heap_indexing, 0, "D3D12: buffer device addresses need resource binding tier 3 and Shader Model 6.6.");
 	BufferInfo *buf_info = (BufferInfo *)p_buffer.id;
 	if (!buf_info->has_device_address_descriptor) {
 		ERR_FAIL_COND_V_MSG(!(buf_info->resource->GetDesc().Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS), 0, "D3D12: the device address of a buffer in CPU or upload memory cannot be read by shaders.");
@@ -1423,61 +1484,17 @@ void RenderingDeviceDriverD3D12::_discard_texture_subresources(const TextureInfo
 }
 
 bool RenderingDeviceDriverD3D12::_unordered_access_supported_by_format(DataFormat p_format) {
-	switch (p_format) {
-		case DATA_FORMAT_R4G4_UNORM_PACK8:
-		case DATA_FORMAT_R4G4B4A4_UNORM_PACK16:
-		case DATA_FORMAT_B4G4R4A4_UNORM_PACK16:
-		case DATA_FORMAT_R5G6B5_UNORM_PACK16:
-		case DATA_FORMAT_B5G6R5_UNORM_PACK16:
-		case DATA_FORMAT_R5G5B5A1_UNORM_PACK16:
-		case DATA_FORMAT_B5G5R5A1_UNORM_PACK16:
-		case DATA_FORMAT_A1R5G5B5_UNORM_PACK16:
-		case DATA_FORMAT_A8B8G8R8_UNORM_PACK32:
-		case DATA_FORMAT_A8B8G8R8_SNORM_PACK32:
-		case DATA_FORMAT_A8B8G8R8_USCALED_PACK32:
-		case DATA_FORMAT_A8B8G8R8_SSCALED_PACK32:
-		case DATA_FORMAT_A8B8G8R8_UINT_PACK32:
-		case DATA_FORMAT_A8B8G8R8_SINT_PACK32:
-		case DATA_FORMAT_A8B8G8R8_SRGB_PACK32:
-		case DATA_FORMAT_A2R10G10B10_UNORM_PACK32:
-		case DATA_FORMAT_A2R10G10B10_SNORM_PACK32:
-		case DATA_FORMAT_A2R10G10B10_USCALED_PACK32:
-		case DATA_FORMAT_A2R10G10B10_SSCALED_PACK32:
-		case DATA_FORMAT_A2R10G10B10_UINT_PACK32:
-		case DATA_FORMAT_A2R10G10B10_SINT_PACK32:
-		case DATA_FORMAT_A2B10G10R10_UNORM_PACK32:
-		case DATA_FORMAT_A2B10G10R10_SNORM_PACK32:
-		case DATA_FORMAT_A2B10G10R10_USCALED_PACK32:
-		case DATA_FORMAT_A2B10G10R10_SSCALED_PACK32:
-		case DATA_FORMAT_A2B10G10R10_UINT_PACK32:
-		case DATA_FORMAT_A2B10G10R10_SINT_PACK32:
-		case DATA_FORMAT_B10G11R11_UFLOAT_PACK32:
-		case DATA_FORMAT_E5B9G9R9_UFLOAT_PACK32:
-		case DATA_FORMAT_X8_D24_UNORM_PACK32:
-		case DATA_FORMAT_R10X6_UNORM_PACK16:
-		case DATA_FORMAT_R10X6G10X6_UNORM_2PACK16:
-		case DATA_FORMAT_R10X6G10X6B10X6A10X6_UNORM_4PACK16:
-		case DATA_FORMAT_G10X6B10X6G10X6R10X6_422_UNORM_4PACK16:
-		case DATA_FORMAT_B10X6G10X6R10X6G10X6_422_UNORM_4PACK16:
-		case DATA_FORMAT_G10X6_B10X6_R10X6_3PLANE_420_UNORM_3PACK16:
-		case DATA_FORMAT_G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16:
-		case DATA_FORMAT_G10X6_B10X6_R10X6_3PLANE_422_UNORM_3PACK16:
-		case DATA_FORMAT_G10X6_B10X6R10X6_2PLANE_422_UNORM_3PACK16:
-		case DATA_FORMAT_G10X6_B10X6_R10X6_3PLANE_444_UNORM_3PACK16:
-		case DATA_FORMAT_R12X4_UNORM_PACK16:
-		case DATA_FORMAT_R12X4G12X4_UNORM_2PACK16:
-		case DATA_FORMAT_R12X4G12X4B12X4A12X4_UNORM_4PACK16:
-		case DATA_FORMAT_G12X4B12X4G12X4R12X4_422_UNORM_4PACK16:
-		case DATA_FORMAT_B12X4G12X4R12X4G12X4_422_UNORM_4PACK16:
-		case DATA_FORMAT_G12X4_B12X4_R12X4_3PLANE_420_UNORM_3PACK16:
-		case DATA_FORMAT_G12X4_B12X4R12X4_2PLANE_420_UNORM_3PACK16:
-		case DATA_FORMAT_G12X4_B12X4_R12X4_3PLANE_422_UNORM_3PACK16:
-		case DATA_FORMAT_G12X4_B12X4R12X4_2PLANE_422_UNORM_3PACK16:
-		case DATA_FORMAT_G12X4_B12X4_R12X4_3PLANE_444_UNORM_3PACK16:
-			return false;
-		default:
-			return true;
+	// Asked to the device: with ALLOW_UNORDERED_ACCESS "the texture format must support unordered access capabilities"
+	// (D3D12_RESOURCE_FLAGS). A list of exclusions let compressed formats (BCn) through.
+	D3D12_FEATURE_DATA_FORMAT_SUPPORT format_support = {};
+	format_support.Format = RD_TO_D3D12_FORMAT[p_format].general_format;
+	if (format_support.Format == DXGI_FORMAT_UNKNOWN) {
+		return false;
 	}
+	if (FAILED(device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &format_support, sizeof(format_support)))) {
+		return false;
+	}
+	return (format_support.Support1 & D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW);
 }
 
 RDD::TextureID RenderingDeviceDriverD3D12::texture_create(const TextureFormat &p_format, const TextureView &p_view) {
@@ -1545,9 +1562,13 @@ RDD::TextureID RenderingDeviceDriverD3D12::texture_create(const TextureFormat &p
 	// Usage.
 	if ((p_format.usage_bits & TEXTURE_USAGE_COLOR_ATTACHMENT_BIT)) {
 		resource_desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
-	} else {
-		if ((p_format.usage_bits & TEXTURE_USAGE_CAN_COPY_TO_BIT) && _unordered_access_supported_by_format(p_format.format)) {
-			resource_desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS; // For clearing via UAV.
+	} else if (!(p_format.usage_bits & TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) {
+		// For clearing via UAV. Never on a depth-stencil texture: ALLOW_DEPTH_STENCIL "can't be used with
+		// D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS" (D3D12_RESOURCE_FLAGS); depth is cleared through its DSV.
+		// Nor on a multisampled one: a SampleDesc.Count above 1 is unsupported with ALLOW_UNORDERED_ACCESS
+		// (D3D12_RESOURCE_DESC, SampleDesc); it would have made the texture single-sampled.
+		if ((p_format.usage_bits & TEXTURE_USAGE_CAN_COPY_TO_BIT) && p_format.samples == TEXTURE_SAMPLES_1 && _unordered_access_supported_by_format(p_format.format)) {
+			resource_desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
 		}
 	}
 	if ((p_format.usage_bits & TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) {
@@ -1638,7 +1659,9 @@ RDD::TextureID RenderingDeviceDriverD3D12::texture_create(const TextureFormat &p
 	D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
 	{
 		srv_desc.Format = RD_TO_D3D12_FORMAT[p_view.format].general_format;
-		srv_desc.ViewDimension = p_format.samples == TEXTURE_SAMPLES_1 ? RD_TEXTURE_TYPE_TO_D3D12_VIEW_DIMENSION_FOR_SRV[p_format.texture_type] : RD_TEXTURE_TYPE_TO_D3D12_VIEW_DIMENSION_FOR_SRV_MS[p_format.texture_type];
+		// The resource's sample count, not the requested one: it is lowered above (no MSAA with UAV access, or the format's
+		// maximum), and a multisampled view of a single-sampled resource is invalid.
+		srv_desc.ViewDimension = resource_desc.SampleDesc.Count == 1 ? RD_TEXTURE_TYPE_TO_D3D12_VIEW_DIMENSION_FOR_SRV[p_format.texture_type] : RD_TEXTURE_TYPE_TO_D3D12_VIEW_DIMENSION_FOR_SRV_MS[p_format.texture_type];
 		srv_desc.Shader4ComponentMapping = _compute_component_mapping(p_view);
 
 		switch (srv_desc.ViewDimension) {
@@ -1679,7 +1702,7 @@ RDD::TextureID RenderingDeviceDriverD3D12::texture_create(const TextureFormat &p
 	D3D12_UNORDERED_ACCESS_VIEW_DESC main_uav_desc = {};
 	{
 		main_uav_desc.Format = RD_TO_D3D12_FORMAT[p_format.format].general_format;
-		main_uav_desc.ViewDimension = p_format.samples == TEXTURE_SAMPLES_1 ? RD_TEXTURE_TYPE_TO_D3D12_VIEW_DIMENSION_FOR_UAV[p_format.texture_type] : D3D12_UAV_DIMENSION_UNKNOWN;
+		main_uav_desc.ViewDimension = resource_desc.SampleDesc.Count == 1 ? RD_TEXTURE_TYPE_TO_D3D12_VIEW_DIMENSION_FOR_UAV[p_format.texture_type] : D3D12_UAV_DIMENSION_UNKNOWN;
 
 		switch (main_uav_desc.ViewDimension) {
 			case D3D12_UAV_DIMENSION_TEXTURE1DARRAY: {
@@ -2090,11 +2113,21 @@ bool RenderingDeviceDriverD3D12::texture_can_make_shared_with_format(TextureID p
 		return true;
 	}
 
-	if (tex_info->format == DATA_FORMAT_R16_UINT && p_format == DATA_FORMAT_R4G4B4A4_UNORM_PACK16) {
-		// Specific cases that require buffer reinterpretation.
+	// The fallback copies the texture into an alias of the view's format. Across type groups CopyTextureRegion only
+	// reinterprets the pairs of "Format Conversion using Direct3D 10.1" (Block Compression (Direct3D 10)); any other pair
+	// of the same texel size goes through a buffer (r_raw_reinterpretation), whose footprints are untyped bytes. For
+	// SDFGI: R32_UINT -> E5B9G9R9 is in the table, R16_UINT -> R4G4B4A4 is not.
+	const DXGI_FORMAT family = RD_TO_D3D12_FORMAT[tex_info->format].family;
+	const DXGI_FORMAT view_family = RD_TO_D3D12_FORMAT[p_format].family;
+	if (!_copy_reinterprets_formats(family, view_family) && !_copy_reinterprets_formats(view_family, family)) {
+		uint32_t block_w = 0, block_h = 0, view_block_w = 0, view_block_h = 0;
+		get_compressed_image_format_block_dimensions(tex_info->format, block_w, block_h);
+		get_compressed_image_format_block_dimensions(p_format, view_block_w, view_block_h);
+		const bool uncompressed = block_w == 1 && block_h == 1 && view_block_w == 1 && view_block_h == 1;
+		ERR_FAIL_COND_V_MSG(!uncompressed || get_image_format_pixel_size(tex_info->format) != get_image_format_pixel_size(p_format), false,
+				vformat("D3D12: no way to view a %s texture as %s (different texel sizes, or a compressed format outside the copy conversion table).", FORMAT_NAMES[tex_info->format], FORMAT_NAMES[p_format]));
 		r_raw_reinterpretation = true;
 	}
-	// Format family is different but copying resources directly is possible.
 	return false;
 }
 
@@ -4606,6 +4639,14 @@ void RenderingDeviceDriverD3D12::command_copy_texture(CommandBufferID p_cmd_buff
 			src_box.right = p_regions[i].src_offset.x + p_regions[i].size.x;
 			src_box.bottom = p_regions[i].src_offset.y + p_regions[i].size.y;
 			src_box.back = p_regions[i].src_offset.z + p_regions[i].size.z;
+			if (_copy_needs_whole_subresource(src_tex_info->desc) || _copy_needs_whole_subresource(dst_tex_info->desc)) {
+				const TextureCopyRegion &region = p_regions[i];
+				ERR_CONTINUE_MSG(!_copy_box_is_whole_subresource(src_tex_info->desc, region.src_subresources.mipmap, region.src_offset.x, region.src_offset.y, region.src_offset.z, region.size.x, region.size.y, region.size.z) ||
+								!_copy_box_is_whole_subresource(dst_tex_info->desc, region.dst_subresources.mipmap, region.dst_offset.x, region.dst_offset.y, region.dst_offset.z, region.size.x, region.size.y, region.size.z),
+						"D3D12: a depth-stencil or multisampled texture can only be copied whole, subresource by subresource.");
+				cmd_buf_info->cmd_list->CopyTextureRegion(&dst_location, 0, 0, 0, &src_location, nullptr);
+				continue;
+			}
 			cmd_buf_info->cmd_list->CopyTextureRegion(&dst_location, p_regions[i].dst_offset.x, p_regions[i].dst_offset.y, p_regions[i].dst_offset.z, &src_location, &src_box);
 		}
 	}
@@ -4693,13 +4734,28 @@ void RenderingDeviceDriverD3D12::command_clear_color_texture(CommandBufferID p_c
 					cmd_buf_info->uav_alloc.cpu_handle,
 					D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 
-			cmd_buf_info->cmd_list->ClearUnorderedAccessViewFloat(
-					shader_visible_descriptor_allocation.gpu_handle,
-					cmd_buf_info->uav_alloc.cpu_handle,
-					tex_info->resource,
-					p_color.components,
-					0,
-					nullptr);
+			if (_dxgi_format_is_integer(uav_desc.Format)) {
+				// The float clear "only works on FLOAT, UNORM, and SNORM UAVs" (D3D11.3 functional spec, 5.2.3.2). The
+				// colour's bits are the integer values, as Vulkan reads its VkClearColorValue union.
+				UINT values[4];
+				static_assert(sizeof(values) == sizeof(p_color.components));
+				memcpy(values, p_color.components, sizeof(values));
+				cmd_buf_info->cmd_list->ClearUnorderedAccessViewUint(
+						shader_visible_descriptor_allocation.gpu_handle,
+						cmd_buf_info->uav_alloc.cpu_handle,
+						tex_info->resource,
+						values,
+						0,
+						nullptr);
+			} else {
+				cmd_buf_info->cmd_list->ClearUnorderedAccessViewFloat(
+						shader_visible_descriptor_allocation.gpu_handle,
+						cmd_buf_info->uav_alloc.cpu_handle,
+						tex_info->resource,
+						p_color.components,
+						0,
+						nullptr);
+			}
 		}
 	} else {
 		ERR_FAIL_MSG("Cannot clear texture because its format does not support UAV writes. You'll need to update its contents through another method.");
@@ -4800,6 +4856,11 @@ void RenderingDeviceDriverD3D12::command_copy_buffer_to_texture(CommandBufferID 
 
 		CD3DX12_TEXTURE_COPY_LOCATION copy_dst(tex_info->resource, dst_subresource);
 
+		if (_copy_needs_whole_subresource(tex_info->desc)) {
+			const BufferTextureCopyRegion &region = p_regions[i];
+			ERR_CONTINUE_MSG(!_copy_box_is_whole_subresource(tex_info->desc, region.texture_subresource.mipmap, region.texture_offset.x, region.texture_offset.y, region.texture_offset.z, region.texture_region_size.x, region.texture_region_size.y, region.texture_region_size.z),
+					"D3D12: a depth-stencil or multisampled texture can only be uploaded whole, subresource by subresource.");
+		}
 		cmd_buf_info->cmd_list->CopyTextureRegion(
 				&copy_dst,
 				p_regions[i].texture_offset.x,
@@ -4848,13 +4909,10 @@ void RenderingDeviceDriverD3D12::command_copy_texture_to_buffer(CommandBufferID 
 				p_regions[i].texture_offset.y + STEPIFY(p_regions[i].texture_region_size.y, block_h),
 				p_regions[i].texture_offset.z + p_regions[i].texture_region_size.z);
 
-		bool full_box =
-				src_box.left == 0 &&
-				src_box.top == 0 &&
-				src_box.front == 0 &&
-				src_box.right == tex_info->desc.Width &&
-				src_box.bottom == tex_info->desc.Height &&
-				src_box.back == tex_info->desc.Depth();
+		// Compared with the copied mip level's size, not the base level's: a whole mip > 0 also gets no box.
+		const BufferTextureCopyRegion &region = p_regions[i];
+		const bool full_box = _copy_box_is_whole_subresource(tex_info->desc, region.texture_subresource.mipmap, src_box.left, src_box.top, src_box.front, src_box.right - src_box.left, src_box.bottom - src_box.top, src_box.back - src_box.front);
+		ERR_CONTINUE_MSG(!full_box && _copy_needs_whole_subresource(tex_info->desc), "D3D12: a depth-stencil or multisampled texture can only be read back whole, subresource by subresource.");
 
 		D3D12_PLACED_SUBRESOURCE_FOOTPRINT dst_footprint = {};
 		dst_footprint.Offset = p_regions[i].buffer_offset;
@@ -7425,7 +7483,10 @@ bool RenderingDeviceDriverD3D12::has_feature(Features p_feature) {
 		case SUPPORTS_FRAGMENT_SHADER_WITH_ONLY_SIDE_EFFECTS:
 			return true;
 		case SUPPORTS_BUFFER_DEVICE_ADDRESS:
-			return true;
+			// A GPU pointer is read through the descriptor heap (buffer_get_device_address()): "must be supported on
+			// devices that support both D3D12_RESOURCE_BINDING_TIER_3 and D3D_SHADER_MODEL_6_6" (HLSL SM 6.6 Dynamic
+			// Resources, "Device Capability").
+			return shader_capabilities.heap_indexing;
 		case SUPPORTS_IMAGE_ATOMIC_32_BIT:
 			return true;
 		case SUPPORTS_VULKAN_MEMORY_MODEL:
@@ -7778,6 +7839,7 @@ Error RenderingDeviceDriverD3D12::_check_capabilities() {
 	// Ray tracing shaders are translated for Shader Model 6.6 and read GPU pointers through the descriptor heap, which
 	// needs resource binding tier 3 (see RenderingShaderContainerD3D12::_convert_nir_to_dxil()).
 	const bool heap_indexing = options.ResourceBindingTier >= D3D12_RESOURCE_BINDING_TIER_3 && shader_capabilities.shader_model >= D3D_SHADER_MODEL_6_6;
+	shader_capabilities.heap_indexing = heap_indexing;
 	if (SUCCEEDED(res) && heap_indexing) {
 		raytracing_capabilities.ray_query_supported = options5.RaytracingTier >= D3D12_RAYTRACING_TIER_1_1;
 		raytracing_capabilities.raytracing_pipeline_supported = options5.RaytracingTier >= D3D12_RAYTRACING_TIER_1_0;
