@@ -4839,8 +4839,16 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 			}
 
 			if (front_layer) {
-				// A blended surface is the front layer wherever it is drawn; only an alpha scissor cuts it.
-				if (!surf->shader->uses_alpha_clip) {
+				// A blended surface is the front layer wherever raster draws it: an alpha scissor cuts it, and so does a
+				// custom shader's `discard` (its any-hit runs the fragment code, SceneShaderRaytracing::_preprocess_shader()).
+				// Forced opaque, a quad that discards its empty texels (godot3d's health bars) took the whole rectangle from
+				// the water behind it, which lost its traced reflection there.
+				bool cut = surf->shader->uses_alpha_clip;
+				if (mat_data->rt_sbt_offset > 0) {
+					const SceneShaderRaytracing::CustomShaderEntry *cse = rt_shader_singleton->get_custom_shader_entry(mat_data->rt_sbt_offset);
+					cut = cut || (cse && cse->uses_alpha_clip);
+				}
+				if (!cut) {
 					inst_flags |= RD::ACCELERATION_STRUCTURE_INSTANCE_FORCE_OPAQUE_BIT;
 				}
 			} else if (mat_data->rt_sbt_offset > 0) {
