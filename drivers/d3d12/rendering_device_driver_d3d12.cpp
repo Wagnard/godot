@@ -1708,6 +1708,12 @@ RDD::TextureID RenderingDeviceDriverD3D12::texture_create(const TextureFormat &p
 	tex_info->mipmaps = resource_desc.MipLevels;
 	tex_info->view_descs.srv = srv_desc;
 	tex_info->view_descs.uav = uav_desc;
+	if (relaxed_casting_available) {
+		tex_info->castable_formats.resize(relaxed_casting_format_count);
+		for (uint32_t i = 0; i < relaxed_casting_format_count; i++) {
+			tex_info->castable_formats[i] = relaxed_casting_formats[i];
+		}
+	}
 
 	return TextureID(tex_info);
 }
@@ -2057,23 +2063,26 @@ BitField<RDD::TextureUsageBits> RenderingDeviceDriverD3D12::texture_get_usages_s
 bool RenderingDeviceDriverD3D12::texture_can_make_shared_with_format(TextureID p_texture, DataFormat p_format, bool &r_raw_reinterpretation) {
 	r_raw_reinterpretation = false;
 
-	if (format_capabilities.relaxed_casting_supported) {
-		// Relaxed casting is supported, there should be no need to check for format family compatibility.
+	TextureInfo *tex_info = (TextureInfo *)p_texture.id;
+	if (RD_TO_D3D12_FORMAT[tex_info->format].family == RD_TO_D3D12_FORMAT[p_format].family) {
+		// Format family is the same and the view can just cast the format.
 		return true;
-	} else {
-		TextureInfo *tex_info = (TextureInfo *)p_texture.id;
-		if (tex_info->format == DATA_FORMAT_R16_UINT && p_format == DATA_FORMAT_R4G4B4A4_UNORM_PACK16) {
-			// Specific cases that require buffer reinterpretation.
-			r_raw_reinterpretation = true;
-			return false;
-		} else if (RD_TO_D3D12_FORMAT[tex_info->format].family != RD_TO_D3D12_FORMAT[p_format].family) {
-			// Format family is different but copying resources directly is possible.
-			return false;
-		} else {
-			// Format family is the same and the view can just cast the format.
-			return true;
-		}
 	}
+
+	// Another family only through the castable formats list given at creation (relaxed format casting): "Formats not
+	// specified in the list during creation MAY NOT be used as view target formats for the resource" (DirectX-Specs,
+	// VulkanOn12, "Format List Casting"). A texture created without it (from an extension, or before a shareable
+	// format was added to it) takes the fallback.
+	if (tex_info->castable_formats.has(RD_TO_D3D12_FORMAT[p_format].general_format)) {
+		return true;
+	}
+
+	if (tex_info->format == DATA_FORMAT_R16_UINT && p_format == DATA_FORMAT_R4G4B4A4_UNORM_PACK16) {
+		// Specific cases that require buffer reinterpretation.
+		r_raw_reinterpretation = true;
+	}
+	// Format family is different but copying resources directly is possible.
+	return false;
 }
 
 /*****************/
@@ -7797,15 +7806,13 @@ Error RenderingDeviceDriverD3D12::_check_capabilities() {
 	}
 
 	if (format_capabilities.relaxed_casting_supported) {
-#if 0
-		print_verbose("- Relaxed casting supported");
-#else
-		// Certain configurations (Windows 11 with an updated NVIDIA driver) crash when using relaxed casting.
-		// Therefore, we disable it temporarily until we can assure that it's reliable.
-		// There are fallbacks in place that work in every case, if less efficient.
-		format_capabilities.relaxed_casting_supported = false;
-		print_verbose("- Relaxed casting supported (but disabled for now)");
-#endif
+		// GODOT_D3D12_RELAXED_CASTING=0 takes the fallback copies anyway (what a device without the feature runs).
+		if (OS::get_singleton()->get_environment("GODOT_D3D12_RELAXED_CASTING") == "0") {
+			format_capabilities.relaxed_casting_supported = false;
+			print_line("GODOT_D3D12_RELAXED_CASTING=0: relaxed format casting is supported but not used.");
+		} else {
+			print_verbose("- Relaxed casting supported");
+		}
 	} else {
 		print_verbose("- Relaxed casting not supported");
 	}

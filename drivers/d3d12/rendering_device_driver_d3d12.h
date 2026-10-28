@@ -362,6 +362,10 @@ private:
 
 		TextureInfo *main_texture = nullptr;
 
+		// The castable formats the resource was created with (relaxed format casting), empty otherwise. A view may
+		// only use a format of the resource's family or of this list.
+		LocalVector<DXGI_FORMAT> castable_formats;
+
 #ifdef DEBUG_ENABLED
 		bool created_from_extension = false;
 #endif
