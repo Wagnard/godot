@@ -226,12 +226,22 @@ private:
 		float z_far;
 		float z_near;
 		float texel_size[2];
+		// CUBE_TO_DP_WATCH only.
+		uint32_t watch_offset;
+		uint32_t watch_stamp;
+		uint32_t pad[2];
+	};
+
+	enum {
+		CUBE_TO_DP_DEFAULT,
+		CUBE_TO_DP_WATCH, // Records what the copy reads and writes for ShadowWatch (Wagnard/godot#1).
 	};
 
 	struct CopyToDP {
 		CubeToDpShaderRD shader;
 		RID shader_version;
 		PipelineCacheRD pipeline;
+		PipelineCacheRD watch_pipeline;
 		// Debugging (GODOT_SHADOW_DP_CLEAR=1): clear each dual paraboloid region before the copy writes it.
 		bool clear_region = false;
 	} cube_to_dp;
@@ -400,7 +410,8 @@ public:
 	void set_color(RID p_dest_texture, const Color &p_color, const Rect2i &p_region, bool p_8bit_dst = false);
 	void set_color_raster(RID p_dest_texture, const Color &p_color, const Rect2i &p_region);
 
-	void copy_cubemap_to_dp(RID p_source_rd_texture, RID p_dst_framebuffer, const Rect2 &p_rect, const Vector2 &p_dst_size, float p_z_near, float p_z_far, bool p_dp_flip);
+	// With p_watch_record, the copy also records what it reads and writes there (ShadowWatch, Wagnard/godot#1).
+	void copy_cubemap_to_dp(RID p_source_rd_texture, RID p_dst_framebuffer, const Rect2 &p_rect, const Vector2 &p_dst_size, float p_z_near, float p_z_far, bool p_dp_flip, RID p_watch_record = RID(), uint32_t p_watch_offset = 0, uint32_t p_watch_stamp = 0);
 	void copy_cubemap_to_octmap(RID p_source_rd_texture, RID p_dst_framebuffer, float p_border_size);
 	void octmap_downsample(RID p_source_octmap, RID p_dest_octmap, const Size2i &p_size, float p_border_size);
 	void octmap_downsample_raster(RID p_source_octmap, RID p_dest_framebuffer, const Size2i &p_size, float p_border_size);

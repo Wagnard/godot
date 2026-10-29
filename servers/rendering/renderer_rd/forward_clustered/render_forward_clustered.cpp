@@ -4910,12 +4910,15 @@ void RenderForwardClustered::_render_shadow_cube_copy(const CubeShadowCopy &p_co
 	Rect2 atlas_rect_norm = p_copy.atlas_rect;
 	atlas_rect_norm.position /= float(p_copy.atlas_size);
 	atlas_rect_norm.size /= float(p_copy.atlas_size);
-	copy_effects->copy_cubemap_to_dp(p_copy.cubemap, p_copy.atlas_fb, atlas_rect_norm, p_copy.atlas_rect.size, p_copy.z_near, p_copy.z_far, false);
-	atlas_rect_norm.position += Vector2(p_copy.dual_paraboloid_offset) * atlas_rect_norm.size;
-	copy_effects->copy_cubemap_to_dp(p_copy.cubemap, p_copy.atlas_fb, atlas_rect_norm, p_copy.atlas_rect.size, p_copy.z_near, p_copy.z_far, true);
+	RID watch_record;
+	uint32_t watch_offset[2] = {};
+	uint32_t watch_stamp = 0;
 	if (shadow_watch) {
-		shadow_watch->cube_copied(p_copy.light, p_copy.cubemap, p_copy.z_near, p_copy.z_far);
+		shadow_watch->cube_copy_record(p_copy.light, p_copy.cubemap, p_copy.z_near, p_copy.z_far, watch_record, watch_offset, watch_stamp);
 	}
+	copy_effects->copy_cubemap_to_dp(p_copy.cubemap, p_copy.atlas_fb, atlas_rect_norm, p_copy.atlas_rect.size, p_copy.z_near, p_copy.z_far, false, watch_record, watch_offset[0], watch_stamp);
+	atlas_rect_norm.position += Vector2(p_copy.dual_paraboloid_offset) * atlas_rect_norm.size;
+	copy_effects->copy_cubemap_to_dp(p_copy.cubemap, p_copy.atlas_fb, atlas_rect_norm, p_copy.atlas_rect.size, p_copy.z_near, p_copy.z_far, true, watch_record, watch_offset[1], watch_stamp);
 
 	// Restore transform so it can be properly used.
 	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();

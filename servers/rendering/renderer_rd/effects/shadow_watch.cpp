@@ -135,6 +135,8 @@ ShadowWatch::ShadowWatch() {
 	Vector<uint8_t> zeros;
 	zeros.resize_initialized(SLOT_COUNT * SLOT_UINTS * sizeof(uint32_t));
 	results = RD::get_singleton()->storage_buffer_create(zeros.size(), zeros);
+	zeros.resize_initialized(SLOT_COUNT * COPY_SLOT * sizeof(uint32_t));
+	copy_records = RD::get_singleton()->storage_buffer_create(zeros.size(), zeros);
 
 	singleton = this;
 	heartbeat_usec = OS::get_singleton()->get_ticks_usec();
@@ -154,6 +156,7 @@ ShadowWatch::~ShadowWatch() {
 		}
 	}
 	RD::get_singleton()->free_rid(results);
+	RD::get_singleton()->free_rid(copy_records);
 	shader.version_free(shader_version);
 }
 
@@ -170,14 +173,25 @@ void ShadowWatch::begin_render() {
 		render_in_frame++;
 	}
 	copies.clear();
+	current_serial = ++render_serial;
+	render_slot = next_slot;
+	next_slot = (next_slot + 1) % SLOT_COUNT;
 }
 
-void ShadowWatch::cube_copied(RID p_light, RID p_cubemap, float p_z_near, float p_z_far) {
+void ShadowWatch::cube_copy_record(RID p_light, RID p_cubemap, float p_z_near, float p_z_far, RID &r_record, uint32_t r_offset[2], uint32_t &r_stamp) {
 	CubeCopy copy;
 	copy.light = p_light;
 	copy.cubemap = p_cubemap;
 	copy.z_near = p_z_near;
 	copy.z_far = p_z_far;
+	r_record = RID();
+	if (copies.size() < MAX_COPIES) {
+		copy.record = render_slot * COPY_SLOT + copies.size() * COPY_RECORD;
+		r_record = copy_records;
+		r_offset[0] = copy.record;
+		r_offset[1] = copy.record + COPY_HALF_RECORD;
+		r_stamp = uint32_t(current_serial);
+	}
 	copies.push_back(copy);
 }
 
@@ -192,12 +206,12 @@ void ShadowWatch::watch_lights(const RenderDataRD *p_render_data) {
 	const Transform3D inverse_cam = cam_transform.affine_inverse();
 
 	// The nearest omni lights in cube mode whose shadow is in this atlas.
-	struct Candidate {
+	struct Nearest {
 		RID light;
 		float distance;
-		bool operator<(const Candidate &p_other) const { return distance < p_other.distance; }
+		bool operator<(const Nearest &p_other) const { return distance < p_other.distance; }
 	};
-	LocalVector<Candidate> candidates;
+	LocalVector<Nearest> candidates;
 	uint32_t omni_count = 0;
 	const PagedArray<RID> &lights = *p_render_data->lights;
 	for (uint64_t i = 0; i < lights.size(); i++) {
@@ -219,15 +233,13 @@ void ShadowWatch::watch_lights(const RenderDataRD *p_render_data) {
 		candidates.resize(MAX_LIGHTS);
 	}
 
-	current_serial = ++render_serial;
 	WatchedRender &render = pending.insert(current_serial, WatchedRender())->value;
 	current = &render;
 	render.frame = RSG::rasterizer->get_frame_number();
 	render.render_in_frame = render_in_frame;
 	render.atlas = atlas;
 	render.cam_transform = cam_transform;
-	render.slot = next_slot;
-	next_slot = (next_slot + 1) % SLOT_COUNT;
+	render.slot = render_slot;
 	render.entry_count = MIN(omni_count, MAX_ENTRIES);
 	render.entries_complete = omni_count <= MAX_ENTRIES;
 	if (p_render_data->render_buffers.is_valid()) {
@@ -235,7 +247,7 @@ void ShadowWatch::watch_lights(const RenderDataRD *p_render_data) {
 	}
 
 	const int atlas_size = light_storage->shadow_atlas_get_size(atlas);
-	for (const Candidate &candidate : candidates) {
+	for (const Nearest &candidate : candidates) {
 		WatchedLight wl;
 		wl.light = candidate.light;
 		const Transform3D light_transform = light_storage->light_instance_get_base_transform(wl.light);
@@ -270,12 +282,19 @@ void ShadowWatch::watch_lights(const RenderDataRD *p_render_data) {
 	}
 
 	// A light's copy can be checked against its cubemap only while no later copy of the render reused that cubemap.
+	// What the copy read is compared with what the other copies of the same cubemap read, in this render and in the
+	// view's previous one: a match names the content it got.
 	RID copy_cubemap[MAX_LIGHTS];
 	float copy_z_near[MAX_LIGHTS] = {};
 	float copy_z_far[MAX_LIGHTS] = {};
+	uint32_t record_offset[MAX_LIGHTS];
+	uint32_t candidate_offsets[MAX_LIGHTS][MAX_CANDIDATES] = {};
+	const LocalVector<CubeCopy> *previous = previous_copies.getptr(atlas.get_id());
 	for (uint32_t l = 0; l < render.lights.size(); l++) {
+		WatchedLight &wl = render.lights[l];
+		record_offset[l] = UINT32_MAX;
 		for (int64_t i = int64_t(copies.size()) - 1; i >= 0; i--) {
-			if (copies[i].light != render.lights[l].light) {
+			if (copies[i].light != wl.light) {
 				continue;
 			}
 			bool reused = false;
@@ -283,14 +302,32 @@ void ShadowWatch::watch_lights(const RenderDataRD *p_render_data) {
 				reused = reused || copies[j].cubemap == copies[i].cubemap;
 			}
 			if (!reused) {
-				render.lights[l].copy_check = true;
+				wl.copy_check = true;
 				copy_cubemap[l] = copies[i].cubemap;
 				copy_z_near[l] = copies[i].z_near;
 				copy_z_far[l] = copies[i].z_far;
 			}
+			record_offset[l] = copies[i].record;
+			wl.recorded = copies[i].record != UINT32_MAX;
+			if (wl.recorded) {
+				for (int pass = 0; pass < 2; pass++) {
+					const LocalVector<CubeCopy> *list = pass == 0 ? &copies : previous;
+					for (uint32_t j = 0; list && j < list->size() && wl.candidate_count < MAX_CANDIDATES; j++) {
+						const CubeCopy &other = (*list)[j];
+						if ((pass == 0 && int64_t(j) == i) || other.record == UINT32_MAX || other.cubemap != copies[i].cubemap) {
+							continue;
+						}
+						candidate_offsets[l][wl.candidate_count] = other.record;
+						wl.candidates[wl.candidate_count].world_position = light_storage->light_instance_get_base_transform(other.light).origin;
+						wl.candidates[wl.candidate_count].previous_render = pass == 1;
+						wl.candidate_count++;
+					}
+				}
+			}
 			break;
 		}
 	}
+	previous_copies[atlas.get_id()] = copies;
 
 	RD *rd = RD::get_singleton();
 	UniformSetCacheRD *uniform_set_cache = UniformSetCacheRD::get_singleton();
@@ -311,9 +348,16 @@ void ShadowWatch::watch_lights(const RenderDataRD *p_render_data) {
 		RD::Uniform u_cube(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, Vector<RID>({ linear, wl.copy_check ? copy_cubemap[l] : black_cube }));
 		RD::Uniform u_lights(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, light_storage->get_omni_light_buffer());
 		RD::Uniform u_results(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, results);
-		rd->compute_list_bind_uniform_set(compute_list, uniform_set_cache->get_cache(shader_rid, 0, u_atlas, u_cube, u_lights, u_results), 0);
+		RD::Uniform u_records(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, copy_records);
+		rd->compute_list_bind_uniform_set(compute_list, uniform_set_cache->get_cache(shader_rid, 0, u_atlas, u_cube, u_lights, u_results, u_records), 0);
 
 		LightPushConstant push_constant = {};
+		push_constant.record_offset = record_offset[l];
+		push_constant.stamp = uint32_t(current_serial);
+		push_constant.candidate_count = wl.candidate_count;
+		for (uint32_t k = 0; k < wl.candidate_count; k++) {
+			push_constant.candidates[k] = candidate_offsets[l][k];
+		}
 		for (int h = 0; h < 2; h++) {
 			push_constant.half_rect[h][0] = wl.half_rect[h].position.x;
 			push_constant.half_rect[h][1] = wl.half_rect[h].position.y;
@@ -465,6 +509,42 @@ String ShadowWatch::_history(const LocalVector<LightSample *> &p_history) const 
 	return text;
 }
 
+String ShadowWatch::_copy_verdict(const LightSample &p_sample, const WatchedLight &p_light, int p_half) const {
+	if (!p_sample.recorded) {
+		return "Its copy left no record (more than 16 copies in the view): no verdict.";
+	}
+	if (p_sample.stale[p_half]) {
+		return vformat("The copy of half %d left no record in this frame: it did not run, or ran without writing.", p_half);
+	}
+	const uint32_t points = 1024;
+	String text;
+	if (p_sample.write_diff[p_half] * 50 > points) {
+		text = vformat("The copy of half %d wrote other depth than the atlas now holds at %d of %d points: the half was written over after the copy. ", p_half, p_sample.write_diff[p_half], points);
+	} else {
+		text = vformat("The atlas half %d holds what its copy wrote. ", p_half);
+	}
+	if (p_sample.checked[p_half] == 0) {
+		return text + "Its cubemap was reused by a later copy, so what the copy read cannot be checked.";
+	}
+	if (p_sample.read_diff[p_half] * 50 <= points) {
+		return text + "The copy read the cubemap as it is after the shadows.";
+	}
+	text += vformat("The copy read other cube content than the cubemap holds after the shadows, at %d of %d points: it ran when the cubemap held other content", p_sample.read_diff[p_half], points);
+	uint32_t best = 0;
+	int best_index = -1;
+	for (uint32_t k = 0; k < p_light.candidate_count; k++) {
+		if (p_sample.matches[p_half][k] > best) {
+			best = p_sample.matches[p_half][k];
+			best_index = k;
+		}
+	}
+	if (best_index >= 0 && best * 10 >= points * 9) {
+		const Candidate &c = p_light.candidates[best_index];
+		return text + vformat(": exactly what the copy for the omni light at (%.2f, %.2f, %.2f) read in %s (%d of %d points the same).", c.world_position.x, c.world_position.y, c.world_position.z, c.previous_render ? "the view's previous render" : "this render", best, points);
+	}
+	return text + vformat(", which no other copy of this view read in this or its previous render (best match %d of %d points): the cube before this light's own pass, or another view's.", best, points);
+}
+
 void ShadowWatch::_analyze(const WatchedRender &p_render, uint64_t p_serial, const uint32_t *p_data) {
 	const float *entries = reinterpret_cast<const float *>(p_data + SLOT_ENTRIES);
 	const uint64_t *previous_serial = last_serial.getptr(p_render.atlas.get_id());
@@ -490,43 +570,62 @@ void ShadowWatch::_analyze(const WatchedRender &p_render, uint64_t p_serial, con
 			memcpy(s->face_sum[f], record + FACES_BASE + f * FACE_STRIDE, sizeof(s->face_sum[f]));
 		}
 		memcpy(s->face_casters, wl.face_casters, sizeof(s->face_casters));
+		s->recorded = wl.recorded;
+		for (int h = 0; h < 2; h++) {
+			const uint32_t *half = record + h * HALF_STRIDE;
+			s->read_diff[h] = half[68];
+			s->write_diff[h] = half[69];
+			s->stale[h] = half[70] != 0;
+			for (uint32_t k = 0; k < MAX_CANDIDATES; k++) {
+				s->matches[h][k] = half[72 + k];
+			}
+		}
 
-		// What the main pass reads for this light: found by its view-space position.
-		const float *entry = nullptr;
-		for (uint32_t e = 0; e < p_render.entry_count && entry == nullptr; e++) {
-			const float *candidate = entries + e * ENTRY_FLOATS;
-			const Vector3 position(candidate[ENTRY_POSITION], candidate[ENTRY_POSITION + 1], candidate[ENTRY_POSITION + 2]);
-			const Vector3 expected(wl.position[0], wl.position[1], wl.position[2]);
-			if (position.distance_to(expected) <= 0.001f * MAX(1.0f, expected.length())) {
-				entry = candidate;
+		// What the main pass reads for this light: the entries at its view-space position. Several lights can share
+		// a position (lights parked out of sight), so the light is fine when one of them is its own.
+		const Vector3 expected(wl.position[0], wl.position[1], wl.position[2]);
+		const float *first_entry = nullptr;
+		bool shadow_off = false;
+		bool entry_ok = false;
+		float matrix_error = 0.0f;
+		for (uint32_t e = 0; e < p_render.entry_count && !entry_ok; e++) {
+			const float *entry = entries + e * ENTRY_FLOATS;
+			const Vector3 position(entry[ENTRY_POSITION], entry[ENTRY_POSITION + 1], entry[ENTRY_POSITION + 2]);
+			if (position.distance_to(expected) > 0.001f * MAX(1.0f, expected.length())) {
+				continue;
+			}
+			if (entry[ENTRY_SHADOW_OPACITY] <= 0.001f) {
+				shadow_off = true;
+				continue;
+			}
+			float r = 0.0f;
+			for (int i = 0; i < 4; i++) {
+				r = MAX(r, Math::abs(entry[ENTRY_ATLAS_RECT + i] - wl.atlas_rect[i]));
+			}
+			const float f = MAX(Math::abs(entry[ENTRY_DIRECTION] - wl.flip_offset[0]), Math::abs(entry[ENTRY_DIRECTION + 1] - wl.flip_offset[1]));
+			float m = 0.0f;
+			for (int i = 0; i < 16; i++) {
+				m = MAX(m, Math::abs(entry[ENTRY_SHADOW_MATRIX + i] - wl.shadow_matrix[i]) / MAX(1.0f, Math::abs(wl.shadow_matrix[i])));
+			}
+			entry_ok = r <= 1e-6f && f <= 1e-6f && m <= 1e-3f;
+			if (first_entry == nullptr) {
+				first_entry = entry;
+				matrix_error = m;
 			}
 		}
 		String entry_problem;
-		if (entry == nullptr) {
-			if (p_render.entries_complete) {
-				s->entry = ENTRY_MISSING;
-				entry_problem = "no omni light entry has this light's position";
-			}
-		} else if (entry[ENTRY_SHADOW_OPACITY] <= 0.001f) {
+		if (entry_ok) {
+			s->entry = ENTRY_OK;
+		} else if (first_entry) {
+			s->entry = ENTRY_WRONG;
+			entry_problem = vformat("atlas rect read (%.5f, %.5f, %.5f, %.5f) expected (%.5f, %.5f, %.5f, %.5f), half offset read (%.5f, %.5f) expected (%.5f, %.5f), shadow matrix error %.5f",
+					first_entry[ENTRY_ATLAS_RECT], first_entry[ENTRY_ATLAS_RECT + 1], first_entry[ENTRY_ATLAS_RECT + 2], first_entry[ENTRY_ATLAS_RECT + 3], wl.atlas_rect[0], wl.atlas_rect[1], wl.atlas_rect[2], wl.atlas_rect[3],
+					first_entry[ENTRY_DIRECTION], first_entry[ENTRY_DIRECTION + 1], wl.flip_offset[0], wl.flip_offset[1], matrix_error);
+		} else if (shadow_off) {
 			s->entry = ENTRY_SHADOW_OFF;
-		} else {
-			float rect_error = 0.0f;
-			for (int i = 0; i < 4; i++) {
-				rect_error = MAX(rect_error, Math::abs(entry[ENTRY_ATLAS_RECT + i] - wl.atlas_rect[i]));
-			}
-			const float flip_error = MAX(Math::abs(entry[ENTRY_DIRECTION] - wl.flip_offset[0]), Math::abs(entry[ENTRY_DIRECTION + 1] - wl.flip_offset[1]));
-			float matrix_error = 0.0f;
-			for (int i = 0; i < 16; i++) {
-				matrix_error = MAX(matrix_error, Math::abs(entry[ENTRY_SHADOW_MATRIX + i] - wl.shadow_matrix[i]) / MAX(1.0f, Math::abs(wl.shadow_matrix[i])));
-			}
-			if (rect_error > 1e-6f || flip_error > 1e-6f || matrix_error > 1e-3f) {
-				s->entry = ENTRY_WRONG;
-				entry_problem = vformat("atlas rect read (%.5f, %.5f, %.5f, %.5f) expected (%.5f, %.5f, %.5f, %.5f), half offset read (%.5f, %.5f) expected (%.5f, %.5f), shadow matrix error %.5f",
-						entry[ENTRY_ATLAS_RECT], entry[ENTRY_ATLAS_RECT + 1], entry[ENTRY_ATLAS_RECT + 2], entry[ENTRY_ATLAS_RECT + 3], wl.atlas_rect[0], wl.atlas_rect[1], wl.atlas_rect[2], wl.atlas_rect[3],
-						entry[ENTRY_DIRECTION], entry[ENTRY_DIRECTION + 1], wl.flip_offset[0], wl.flip_offset[1], matrix_error);
-			} else {
-				s->entry = ENTRY_OK;
-			}
+		} else if (p_render.entries_complete) {
+			s->entry = ENTRY_MISSING;
+			entry_problem = "no omni light entry has this light's position";
 		}
 
 		if (p_render.screen) {
@@ -546,8 +645,11 @@ void ShadowWatch::_analyze(const WatchedRender &p_render, uint64_t p_serial, con
 		}
 
 		for (int h = 0; h < 2; h++) {
-			if (s->checked[h] > 0 && s->mismatch[h] * 50 > s->checked[h] && _may_report(REPORT_COPY + uint64_t(h) * 16, wl.light)) {
-				print_line(vformat("ShadowWatch: [COPY] %s: atlas half %d does not match the cubemap it was copied from at %d of %d samples: the copy of the cube into the atlas went wrong.%s", _light_name(wl, p_render), h, s->mismatch[h], s->checked[h], _history(history)));
+			const bool cube_mismatch = s->checked[h] > 0 && s->mismatch[h] * 50 > s->checked[h];
+			const bool record_problem = s->recorded && (s->stale[h] || s->write_diff[h] * 50 > 1024);
+			if ((cube_mismatch || record_problem) && _may_report(REPORT_COPY + uint64_t(h) * 16, wl.light)) {
+				String what = cube_mismatch ? vformat("atlas half %d does not match the cubemap it was copied from at %d of %d samples", h, s->mismatch[h], s->checked[h]) : vformat("atlas half %d is not what its copy wrote", h);
+				print_line(vformat("ShadowWatch: [COPY] %s: %s.\n  => %s%s", _light_name(wl, p_render), what, _copy_verdict(*s, wl, h), _history(history)));
 			}
 			// Against the view's previous render only: in a render this watch skipped, the light may have been redrawn.
 			if (prev && prev->serial == previous_render && !s->redrawn && prev->half_rect == s->half_rect) {
@@ -651,7 +753,7 @@ void ShadowWatch::_analyze(const WatchedRender &p_render, uint64_t p_serial, con
 			if ((l0->checked[0] && l0->mismatch[0] * 50 > l0->checked[0]) || (l0->checked[1] && l0->mismatch[1] * 50 > l0->checked[1]) || (l1->checked[0] && l1->mismatch[0] * 50 > l1->checked[0]) || (l1->checked[1] && l1->mismatch[1] * 50 > l1->checked[1])) {
 				text += "\n  => The shadow map alternates because the copy of the cube into the atlas goes wrong in one frame of two (the atlas half does not match its cubemap).";
 			} else if (face_alt >= 0) {
-				text += vformat("\n  => The shadow map alternates because the cube pass itself draws different depth every other frame (cubemap face %d), %s.", face_alt, casters_alternate ? "with a different caster list every other frame: the culling of the light's casters alternates, or a caster is there one frame of two" : "with the same caster lists: the GPU draws the same casters differently");
+				text += vformat("\n  => The shadow map alternates because the cube pass itself draws different depth every other frame (cubemap face %d), %s.", face_alt, casters_alternate ? "with a different caster list every other frame: the culling of the light's casters alternates, or a caster is there one frame of two" : "with the same caster lists: the GPU draws the same casters differently (or an animated caster switches between two poses)");
 			} else if ((half_alt[0] || half_alt[1]) && (!l0->redrawn || !l1->redrawn)) {
 				text += vformat("\n  => The atlas half %d alternates in frames where the light is not redrawn: something else writes its atlas cell.", half_alt[0] ? 0 : 1);
 			} else if (half_alt[0] || half_alt[1]) {
@@ -663,7 +765,7 @@ void ShadowWatch::_analyze(const WatchedRender &p_render, uint64_t p_serial, con
 				text += "\n  The caster counts per face alternate between frames (tight and full updates of the light's shadow).";
 			}
 		} else {
-			text += vformat("\n  => Its shadow map and its shadow test stay the same there (light data %s): the main pass reads them differently from what is in memory, or the flicker is not this light's shadow.", l0->entry == ENTRY_OK ? "correct" : (l0->entry == ENTRY_SHADOW_OFF ? "has its shadow off" : "NOT correct"));
+			text += vformat("\n  => Its shadow test stays the same at those points (light data %s): what flickers there is not this light's shadow map content (something else flickers, or the main pass reads the shadow differently).", l0->entry == ENTRY_OK ? "correct" : (l0->entry == ENTRY_SHADOW_OFF ? "has its shadow off" : "NOT correct"));
 		}
 		text += _history(history);
 	}

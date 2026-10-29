@@ -8,6 +8,12 @@ layout(push_constant, std430) uniform Params {
 	float z_far;
 	float z_near;
 	vec2 texel_size;
+#ifdef WATCH
+	uint watch_offset;
+	uint watch_stamp;
+	uint pad0;
+	uint pad1;
+#endif
 }
 params;
 
@@ -33,8 +39,23 @@ layout(push_constant, std430) uniform Params {
 	float z_far;
 	float z_near;
 	vec2 texel_size;
+#ifdef WATCH
+	uint watch_offset;
+	uint watch_stamp;
+	uint pad0;
+	uint pad1;
+#endif
 }
 params;
+
+#ifdef WATCH
+// Wagnard/godot#1 (ShadowWatch): on a 32x32 grid of the region, what this copy read from the cubemap and the depth it
+// wrote, as the copy itself sees them. Header: the stamp of the copy.
+layout(set = 0, binding = 1, std430) restrict writeonly buffer WatchRecord {
+	uint data[];
+}
+watch_record;
+#endif
 
 void main() {
 	vec2 uv = uv_interp;
@@ -52,6 +73,9 @@ void main() {
 	}
 
 	float depth = texture(source_cube, normal).r;
+#ifdef WATCH
+	float sampled = depth;
+#endif
 
 	// absolute values for direction cosines, bigger value equals closer to basis axis
 	vec3 unorm = abs(normal);
@@ -78,4 +102,20 @@ void main() {
 	// linear_depth equal to view space depth
 	depth = (params.z_far - linear_depth * depth_fix) / params.z_far;
 	gl_FragDepth = depth;
+
+#ifdef WATCH
+	// The grid of ShadowWatch: local pixel g * (size / 32) + size / 64.
+	ivec2 size = ivec2(round(1.0 / texel_size));
+	ivec2 local_px = ivec2(floor(uv_interp * vec2(size)));
+	ivec2 step = size / 32;
+	if (all(greaterThanEqual(step, ivec2(2))) && all(equal(local_px % step, step / 2))) {
+		ivec2 g = local_px / step;
+		uint index = uint(g.y * 32 + g.x);
+		watch_record.data[params.watch_offset + 2u + index * 2u] = floatBitsToUint(sampled);
+		watch_record.data[params.watch_offset + 3u + index * 2u] = floatBitsToUint(clamp(depth, 0.0, 1.0));
+		if (index == 0u) {
+			watch_record.data[params.watch_offset] = params.watch_stamp;
+		}
+	}
+#endif
 }

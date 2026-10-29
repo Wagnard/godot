@@ -24,6 +24,14 @@ layout(set = 0, binding = 2, std430) restrict readonly buffer OmniLights {
 }
 omni_lights;
 
+// What the copies recorded (cube_to_dp.glsl, WATCH variant).
+layout(set = 0, binding = 4, std430) restrict readonly buffer CopyRecords {
+	uint data[];
+}
+copy_records;
+
+#define MAX_CANDIDATES 8
+
 layout(push_constant, std430) uniform Params {
 	ivec4 half_rect[2]; // In atlas pixels: x, y, width, height.
 	float z_near;
@@ -32,8 +40,13 @@ layout(push_constant, std430) uniform Params {
 	uint out_offset;
 	uint entries_offset;
 	uint entry_floats;
+	uint record_offset; // 0xFFFFFFFF: the light's copy left no record.
+	uint stamp;
+	uint candidate_count;
 	uint pad0;
+	uint candidates[MAX_CANDIDATES]; // Record offsets of other copies.
 	uint pad1;
+	uint pad2;
 }
 params;
 
@@ -41,23 +54,28 @@ params;
 #define FLAG_FACES 2u
 #define FLAG_ENTRIES 4u
 
-// Per light record, in uints: two halves of 68 (64 block sums, count of 0, count of 1, copy mismatches, copy samples),
-// then six faces of 18 (16 block sums, count of 0, count of 1).
-#define HALF_STRIDE 68u
-#define FACES_BASE 136u
+// Per light record, in uints: two halves of 80 (64 block sums, count of 0, count of 1, copy mismatches, copy samples,
+// read differences, write differences, stale record, record present, matches with each candidate), then six faces of
+// 18 (16 block sums, count of 0, count of 1).
+#define HALF_STRIDE 80u
+#define FACES_BASE 160u
 #define FACE_STRIDE 18u
+#define COPY_HALF_RECORD 2052u
 
 shared uint zero_count;
 shared uint one_count;
 shared uint mismatch_count;
 shared uint checked_count;
+shared uint read_count;
+shared uint write_count;
+shared uint match_count[MAX_CANDIDATES];
 
 uint quantize(float d) {
 	return uint(round(clamp(d, 0.0, 1.0) * 65535.0));
 }
 
-// What cube_to_dp.glsl writes for the fragment of uv_interp, kept identical to it.
-float expected_dp_depth(vec2 uv_interp, vec2 texel_size, bool flip) {
+// What cube_to_dp.glsl writes for the fragment of uv_interp, kept identical to it. r_sampled: what it reads.
+float expected_dp_depth(vec2 uv_interp, vec2 texel_size, bool flip, out float r_sampled) {
 	vec2 uv = clamp(uv_interp * (1.0 + 2.0 * texel_size) - texel_size, vec2(0.0), vec2(1.0));
 
 	vec3 normal = vec3(uv * 2.0 - 1.0, 0.0);
@@ -70,6 +88,7 @@ float expected_dp_depth(vec2 uv_interp, vec2 texel_size, bool flip) {
 	}
 
 	float depth = textureLod(source_cube, normal, 0.0).r;
+	r_sampled = depth;
 
 	vec3 unorm = abs(normal);
 	if ((unorm.x >= unorm.y) && (unorm.x >= unorm.z)) {
@@ -125,6 +144,11 @@ void main() {
 		one_count = 0u;
 		mismatch_count = 0u;
 		checked_count = 0u;
+		read_count = 0u;
+		write_count = 0u;
+		for (uint k = 0u; k < MAX_CANDIDATES; k++) {
+			match_count[k] = 0u;
+		}
 	}
 	barrier();
 
@@ -135,6 +159,9 @@ void main() {
 		uint by = t / 8u;
 		uint sum = 0u;
 		bool copy_check = (params.flags & FLAG_COPY_CHECK) != 0u;
+		bool has_record = params.record_offset != 0xFFFFFFFFu;
+		uint record = params.record_offset + task * COPY_HALF_RECORD;
+		bool stale = has_record && copy_records.data[record] != params.stamp;
 		vec2 texel_size = 1.0 / vec2(rect.zw);
 		for (uint j = 0u; j < 4u; j++) {
 			for (uint i = 0u; i < 4u; i++) {
@@ -149,12 +176,33 @@ void main() {
 				} else if (q == 65535u) {
 					atomicAdd(one_count, 1u);
 				}
+				uint point = uint(g.y * 32 + g.x);
+				float recorded_read = 0.0;
+				if (has_record && !stale) {
+					recorded_read = uintBitsToFloat(copy_records.data[record + 2u + point * 2u]);
+					float recorded_write = uintBitsToFloat(copy_records.data[record + 3u + point * 2u]);
+					// The atlas holds what the copy wrote, up to its 16 bit quantization.
+					if (abs(recorded_write - d) > 0.0001) {
+						atomicAdd(write_count, 1u);
+					}
+					for (uint k = 0u; k < params.candidate_count; k++) {
+						float other = uintBitsToFloat(copy_records.data[params.candidates[k] + task * COPY_HALF_RECORD + 2u + point * 2u]);
+						if (other == recorded_read) {
+							atomicAdd(match_count[k], 1u);
+						}
+					}
+				}
 				if (copy_check) {
 					vec2 uv_interp = (vec2(local_px) + 0.5) * texel_size;
-					float e = expected_dp_depth(uv_interp, texel_size, task == 1u);
+					float cube_now;
+					float e = expected_dp_depth(uv_interp, texel_size, task == 1u, cube_now);
 					atomicAdd(checked_count, 1u);
 					if (abs(e - d) > 0.02) {
 						atomicAdd(mismatch_count, 1u);
+					}
+					// Not exact: the copy's interpolated uv may differ from this one by a rounding.
+					if (has_record && !stale && abs(cube_now - recorded_read) > 0.001) {
+						atomicAdd(read_count, 1u);
 					}
 				}
 			}
@@ -167,6 +215,13 @@ void main() {
 			results.data[base + 65u] = one_count;
 			results.data[base + 66u] = mismatch_count;
 			results.data[base + 67u] = checked_count;
+			results.data[base + 68u] = read_count;
+			results.data[base + 69u] = write_count;
+			results.data[base + 70u] = stale ? 1u : 0u;
+			results.data[base + 71u] = has_record ? 1u : 0u;
+			for (uint k = 0u; k < MAX_CANDIDATES; k++) {
+				results.data[base + 72u + k] = match_count[k];
+			}
 		}
 		return;
 	}
