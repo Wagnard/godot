@@ -140,7 +140,7 @@ bool shade_and_bounce(inout PathState ps, HitRecord r, vec3 p_ray_origin, vec3 p
 
 			rayQueryEXT spec_rq;
 			rayQueryInitializeEXT(spec_rq, tlas, RT_RAY_FLAGS | gl_RayFlagsTerminateOnFirstHitEXT,
-					RT_MASK_CAMERA, spec_origin, 0.001, spec_dir, 10000.0);
+					RT_MASK_BOUNCE, spec_origin, 0.001, spec_dir, 10000.0);
 			while (rayQueryProceedEXT(spec_rq)) {
 				if (rayQueryGetIntersectionTypeEXT(spec_rq, false) == gl_RayQueryCandidateIntersectionTriangleEXT) {
 					if (ray_query_alpha_test(
@@ -367,12 +367,15 @@ bool debug_reflection_view(int p_mode, inout PathState ps, HitRecord r, bool p_m
 
 /// Traces the path's next ray and shades its hit. False when the path ends there (a miss, a debug view, or the shading
 /// ended it); else the ray to trace next. r_hit_t: the hit's distance.
-bool trace_path_ray(inout PathState ps, inout vec3 ray_origin, inout vec3 ray_dir, out float r_hit_t) {
+bool trace_path_ray(inout PathState ps, inout vec3 ray_origin, inout vec3 ray_dir, out float r_hit_t, bool p_camera_ray) {
 	payload.packed_bounces_flags = ps.packed_bounces_flags;
 	payload.hit_t = 0.0;
+	// The camera ray leaves out what the raster pass draws over the traced image (RT_MASK_SECONDARY); every other ray sees
+	// it, the first ray of a front layer reflection included (it starts at bounce 0 too).
+	const uint mask = p_camera_ray ? RT_MASK_CAMERA : RT_MASK_BOUNCE;
 #ifdef USE_SER
 	hitObjectEXT hitObject;
-	hitObjectTraceRayEXT(hitObject, tlas, RT_RAY_FLAGS, RT_MASK_CAMERA, 0, 0, 0, ray_origin, 0.001, ray_dir, 10000.0, 0);
+	hitObjectTraceRayEXT(hitObject, tlas, RT_RAY_FLAGS, mask, 0, 0, 0, ray_origin, 0.001, ray_dir, 10000.0, 0);
 
 	// Reorder with a coherence hint that has 8 bits
 	uint hint = 0;
@@ -384,7 +387,7 @@ bool trace_path_ray(inout PathState ps, inout vec3 ray_origin, inout vec3 ray_di
 
 	hitObjectExecuteShaderEXT(hitObject, 0);
 #else
-	traceRayEXT(tlas, RT_RAY_FLAGS, RT_MASK_CAMERA, 0, 0, 0, ray_origin, 0.001, ray_dir, 10000.0, 0);
+	traceRayEXT(tlas, RT_RAY_FLAGS, mask, 0, 0, 0, ray_origin, 0.001, ray_dir, 10000.0, 0);
 #endif
 
 	const HitRecord r = hit_unpack(payload);

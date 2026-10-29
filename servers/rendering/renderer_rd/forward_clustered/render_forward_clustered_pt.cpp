@@ -179,25 +179,46 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 	int *render_info = p_render_data->render_info ? p_render_data->render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_VISIBLE] : (int *)nullptr;
 
 	render_list[RENDER_LIST_ALPHA].sort_by_reverse_depth_and_priority();
-	// DLSS-RR's transparency layer: the effects move to the end of the list, each part in its order, before their instance
-	// data is written; the transparent pass draws the two ranges into two targets.
+	// The list in three ranges, each in its order, before their instance data is written. First the pathtracing_rasterized
+	// surfaces (opaque and cut-out cards the camera rays leave out): their depth pass and color, before every transparent
+	// surface, as opaque geometry is. Then the other transparent surfaces. Last, with DLSS-RR, its transparency layer's
+	// effects, drawn into a target of their own.
+	uint32_t rasterized_count = 0;
 	uint32_t rr_layer_from = UINT32_MAX;
-	if (raytracing && raytracing->dlss_rr_has_buffers(rb.ptr()) && p_render_data->scene_data->view_count == 1 && rb->get_msaa_3d() == RSE::VIEWPORT_MSAA_DISABLED && _rr_transparency_layer_enabled()) {
+	{
+		const bool use_layer = raytracing && raytracing->dlss_rr_has_buffers(rb.ptr()) && p_render_data->scene_data->view_count == 1 && rb->get_msaa_3d() == RSE::VIEWPORT_MSAA_DISABLED && _rr_transparency_layer_enabled();
 		LocalVector<GeometryInstanceSurfaceDataCache *> &elements = render_list[RENDER_LIST_ALPHA].elements;
+		thread_local LocalVector<GeometryInstanceSurfaceDataCache *> rasterized;
+		thread_local LocalVector<GeometryInstanceSurfaceDataCache *> lit;
 		thread_local LocalVector<GeometryInstanceSurfaceDataCache *> layer;
+		rasterized.clear();
+		lit.clear();
 		layer.clear();
-		uint32_t kept = 0;
-		for (uint32_t i = 0; i < elements.size(); i++) {
-			if (_rr_transparency_layer_surface(elements[i])) {
-				layer.push_back(elements[i]);
+		for (GeometryInstanceSurfaceDataCache *surf : elements) {
+			if (surf->rt_pass_flags & GeometryInstanceSurfaceDataCache::FLAG_PT_RASTERIZED) {
+				rasterized.push_back(surf);
+			} else if (use_layer && _rr_transparency_layer_surface(surf)) {
+				layer.push_back(surf);
 			} else {
-				elements[kept++] = elements[i];
+				lit.push_back(surf);
 			}
 		}
-		for (uint32_t i = 0; i < layer.size(); i++) {
-			elements[kept + i] = layer[i];
+		if (!rasterized.is_empty() || !layer.is_empty()) {
+			uint32_t at = 0;
+			for (GeometryInstanceSurfaceDataCache *surf : rasterized) {
+				elements[at++] = surf;
+			}
+			for (GeometryInstanceSurfaceDataCache *surf : lit) {
+				elements[at++] = surf;
+			}
+			for (GeometryInstanceSurfaceDataCache *surf : layer) {
+				elements[at++] = surf;
+			}
 		}
-		rr_layer_from = kept;
+		rasterized_count = rasterized.size();
+		if (use_layer) {
+			rr_layer_from = rasterized.size() + lit.size();
+		}
 	}
 	_fill_instance_data(RENDER_LIST_ALPHA, render_info);
 
@@ -577,6 +598,15 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 				raytracing->get_buffers_read_by_address(rt_shadow_buffers);
 				render_list_params.buffer_dependencies = &rt_shadow_buffers;
 			}
+			if (rasterized_count > 0) {
+				// The pathtracing_rasterized cards' depth first, cut out as raster's depth pass does: the camera rays left
+				// them out, so the depth buffer has what is behind them. Their color then passes the depth test where it
+				// is theirs, and the surfaces drawn after them (the DLSS-RR transparency layer: a portal's glow) stay behind.
+				// The depth pass' own render pass set, as raster's depth pre-pass builds it (its shaders bind other formats).
+				RID depth_uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_ALPHA, nullptr, RID(), samplers, transparent_pass_uniform_buffer_index);
+				RenderListParameters depth_params(render_list[RENDER_LIST_ALPHA].elements.ptr(), render_list[RENDER_LIST_ALPHA].element_info.ptr(), rasterized_count, reverse_cull, PASS_MODE_DEPTH, 0, rb_data.is_null(), p_render_data->directional_light_soft_shadows, depth_uniform_set, false, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, 0, base_specialization);
+				_render_list_with_draw_list(&depth_params, rb_data->get_depth_fb(), RD::DRAW_DEFAULT_ALL, Vector<Color>(), 0.0f, 0u, p_render_data->render_region);
+			}
 			_render_list_with_draw_list(&render_list_params, alpha_framebuffer, RD::DRAW_DEFAULT_ALL, Vector<Color>(), 0.0f, 0u, p_render_data->render_region);
 
 			if (rr_layer_from != UINT32_MAX) {
@@ -673,8 +703,11 @@ bool RenderForwardClusteredPT::_rr_transparency_layer_surface(const GeometryInst
 	// sparkles, moving without motion vectors) as if they were noise. Add writes no alpha into the layer (its pipelines
 	// there, PipelineKey::rr_transparency_layer). Sub and mul darken what is under
 	// them, which the premultiplied layer cannot hold.
+	// Not a pathtracing_rasterized surface (a sprite): RR moves the layer by the motion vectors under it, which the layer
+	// does not write, so a card standing in front of a farther background smeared as the camera moved. Drawn into the
+	// color, the card is noise free there too.
 	const SceneShaderForwardClustered::ShaderData *shader = p_surf->shader;
-	if (!shader || !shader->unshaded || shader->uses_screen_texture || shader->uses_depth_texture || shader->uses_normal_texture) {
+	if (!shader || !shader->unshaded || (p_surf->rt_pass_flags & GeometryInstanceSurfaceDataCache::FLAG_PT_RASTERIZED) || shader->uses_screen_texture || shader->uses_depth_texture || shader->uses_normal_texture) {
 		return false;
 	}
 	return shader->blend_mode == RendererRD::MaterialStorage::ShaderData::BLEND_MODE_MIX || shader->blend_mode == RendererRD::MaterialStorage::ShaderData::BLEND_MODE_PREMULTIPLIED_ALPHA ||

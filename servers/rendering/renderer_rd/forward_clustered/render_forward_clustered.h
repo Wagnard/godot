@@ -768,6 +768,9 @@ protected:
 			FLAG_PASS_OPAQUE = 2,
 			FLAG_PASS_ALPHA = 4,
 			FLAG_PASS_SHADOW = 8,
+			// rt_pass_flags only: drawn by the path tracer's raster pass, hidden from its camera rays (render_mode or
+			// instance flag pathtracing_rasterized).
+			FLAG_PT_RASTERIZED = 16,
 			FLAG_USES_SHARED_SHADOW_MATERIAL = 128,
 			FLAG_USES_SUBSURFACE_SCATTERING = 2048,
 			FLAG_USES_SCREEN_TEXTURE = 4096,

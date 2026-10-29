@@ -6255,6 +6255,12 @@ void RenderForwardClustered::_geometry_instance_add_surface_with_material(Geomet
 		rt_pass_flags |= GeometryInstanceSurfaceDataCache::FLAG_PASS_DEPTH;
 		rt_pass_flags |= GeometryInstanceSurfaceDataCache::FLAG_PASS_SHADOW;
 	}
+	if ((p_material->shader_data->pathtracing_rasterized || ginstance->data->pathtracing_rasterized) && (rt_pass_flags & GeometryInstanceSurfaceDataCache::FLAG_PASS_OPAQUE)) {
+		// Drawn by the path tracer's raster pass (its alpha list, after a depth pass of its own) over the traced image;
+		// traced only for the other rays (RenderRaytracing::build_tlas(), not as a front layer surface). Opaque and cut-out
+		// surfaces only: a transparent one (a sprite's buff halo overlay) is drawn there already.
+		rt_pass_flags |= GeometryInstanceSurfaceDataCache::FLAG_PASS_ALPHA | GeometryInstanceSurfaceDataCache::FLAG_PT_RASTERIZED;
+	}
 
 	if (p_material->shader_data->uses_particle_trails) {
 		flags |= GeometryInstanceSurfaceDataCache::FLAG_USES_PARTICLE_TRAILS;
@@ -6922,8 +6928,9 @@ void RenderForwardClustered::_rt_precache_surface_material(const GeometryInstanc
 	if ((base_type != RSE::INSTANCE_MESH && base_type != RSE::INSTANCE_MULTIMESH) || ginstance->rt_procedural) {
 		return;
 	}
-	if (p_surface->rt_pass_flags & GeometryInstanceSurfaceDataCache::FLAG_PASS_ALPHA) {
+	if ((p_surface->rt_pass_flags & GeometryInstanceSurfaceDataCache::FLAG_PASS_ALPHA) && !(p_surface->rt_pass_flags & GeometryInstanceSurfaceDataCache::FLAG_PT_RASTERIZED)) {
 		// Rasterized by the transparent pass; a mesh's is traced for the front layer's reflections, unless unshaded.
+		// A pathtracing_rasterized surface is traced as an opaque one (for the rays but the camera's).
 		if (base_type == RSE::INSTANCE_MULTIMESH || !p_surface->shader || p_surface->shader->unshaded) {
 			return;
 		}

@@ -297,6 +297,10 @@ ShaderTypes::ShaderTypes() {
 		// transparent surface only (as Unreal's per-material "Allow Front Layer Translucency"). A thin effect in front of
 		// water would otherwise take the water's traced reflection from it.
 		shader_modes[RSE::SHADER_SPATIAL].modes.push_back({ PNAME("front_layer_reflection_disabled") });
+		// Path tracing: drawn by the raster pass over the traced image instead of by the camera rays, which leave it out
+		// (shadows, reflections and bounces still trace it). For flat cards such as sprites: a thin surface lit by a
+		// one-sample path was noise the denoiser blurred away.
+		shader_modes[RSE::SHADER_SPATIAL].modes.push_back({ PNAME("pathtracing_rasterized") });
 		shader_modes[RSE::SHADER_SPATIAL].stencil_modes.push_back({ PNAME("read") });
 		shader_modes[RSE::SHADER_SPATIAL].stencil_modes.push_back({ PNAME("write") });
 		shader_modes[RSE::SHADER_SPATIAL].stencil_modes.push_back({ PNAME("write_depth_fail") });

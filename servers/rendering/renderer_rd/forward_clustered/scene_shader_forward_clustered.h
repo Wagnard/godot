@@ -266,6 +266,9 @@ public:
 		bool unshaded = false;
 		// render_mode front_layer_reflection_disabled: the path tracer's front layer leaves this transparent surface out.
 		bool front_layer_reflection_disabled = false;
+		// render_mode pathtracing_rasterized: path traced, the raster transparent pass draws this surface over the traced
+		// image (lit there, so with no path tracing noise); the camera rays leave it out, the other rays keep it.
+		bool pathtracing_rasterized = false;
 		bool uses_vertex = false;
 		bool uses_position = false;
 		bool uses_sss = false;

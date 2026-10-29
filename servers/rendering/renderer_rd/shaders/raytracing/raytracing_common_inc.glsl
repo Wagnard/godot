@@ -27,6 +27,10 @@ layout(constant_id = 0) const uint RT_FLAGS = 0u;
 // Procedural geometry only, next to SHADOW and CAMERA: what a ray query loop traces apart (RT_PARAM_PROCEDURAL_MASKS).
 #define RT_MASK_PROCEDURAL_SHADOW 0x08
 #define RT_MASK_PROCEDURAL_CAMERA 0x10
+// Seen by every ray but the camera's (render_mode pathtracing_rasterized: drawn by the raster transparent pass instead).
+#define RT_MASK_SECONDARY 0x20
+// What a ray from a surface sees: the camera's instances and the ones only bounces see.
+#define RT_MASK_BOUNCE (RT_MASK_CAMERA | RT_MASK_SECONDARY)
 
 layout(set = 0, binding = 2, std140) uniform SceneDataBlock {
 	SceneData data;

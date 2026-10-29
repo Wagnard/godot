@@ -191,12 +191,12 @@ bool rt_environment_visible(vec3 p_origin, vec3 p_direction) {
 	const uint flags = RT_RAY_FLAGS | gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT;
 #if defined(USE_SER)
 	hitObjectEXT hit_object;
-	hitObjectTraceRayEXT(hit_object, tlas, flags, RT_MASK_CAMERA, 0, 0, 0, p_origin, 0.001, p_direction, 10000.0, 0);
+	hitObjectTraceRayEXT(hit_object, tlas, flags, RT_MASK_BOUNCE, 0, 0, 0, p_origin, 0.001, p_direction, 10000.0, 0);
 	return !hitObjectIsHitEXT(hit_object);
 #else
 	// As lights_trace_shadow_ray_pipeline(): the miss shader ends a shadow ray.
 	payload.packed_bounces_flags = set_shadow_ray(0u);
-	traceRayEXT(tlas, flags, RT_MASK_CAMERA, 0, 0, 0, p_origin, 0.001, p_direction, 10000.0, 0);
+	traceRayEXT(tlas, flags, RT_MASK_BOUNCE, 0, 0, 0, p_origin, 0.001, p_direction, 10000.0, 0);
 	return is_path_terminated(payload.packed_bounces_flags);
 #endif
 }

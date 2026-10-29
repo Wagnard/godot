@@ -416,6 +416,8 @@ public:
 
 		bool ignore_occlusion_culling;
 		bool ignore_all_culling;
+		// RSE::INSTANCE_FLAG_PATHTRACING_RASTERIZED, given to each geometry instance created for this one.
+		bool pathtracing_rasterized = false;
 		// Kept by the path tracer's culling the last time it was out of view (_rt_culling_keeps()'s hysteresis). Only the
 		// cull thread handling this instance writes it.
 		bool rt_culling_kept = true;
