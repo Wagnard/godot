@@ -31,6 +31,7 @@
 #include "render_forward_clustered_pt.h"
 
 #include "core/os/os.h"
+#include "core/templates/hash_set.h"
 #include "servers/rendering/renderer_rd/environment/fog.h"
 #include "servers/rendering/renderer_rd/forward_clustered/scene_shader_raytracing.h"
 #include "servers/rendering/renderer_rd/framebuffer_cache_rd.h"
@@ -174,7 +175,14 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 
 	// TLAS is built from rt_instances and the path tracer writes velocity itself,
 	// so this collapses to populating the ALPHA (transparent) list only.
+	// The rasterized instances are lit by their probes (coefficients traced over the previous frames), not the Environment.
+	if (raytracing && !pt_probes) {
+		pt_probes = memnew(RendererRD::PTProbes);
+	}
+	pt_probes_fill = pt_probes != nullptr;
+	pt_probe_sh_scale = _pt_probe_sh_scale(p_render_data, rb->get_luminance_multiplier());
 	_fill_render_list(RENDER_LIST_OPAQUE, p_render_data, PASS_MODE_COLOR, false, false, false, false, true);
+	pt_probes_fill = false;
 
 	int *render_info = p_render_data->render_info ? p_render_data->render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_VISIBLE] : (int *)nullptr;
 
@@ -221,6 +229,36 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 		}
 	}
 	_fill_instance_data(RENDER_LIST_ALPHA, render_info);
+
+	// A probe at the center of each rasterized instance, the nearest first: traced after the camera rays (a dispatch of its
+	// own), reduced, and read back to light the instance in the next frames.
+	uint32_t probe_dispatch_count = 0;
+	if (pt_probes) {
+		thread_local LocalVector<RendererRD::PTProbes::Request> probe_requests;
+		thread_local HashSet<GeometryInstanceForwardClustered *> probe_instances;
+		probe_requests.clear();
+		probe_instances.clear();
+		for (uint32_t i = 0; i < rasterized_count; i++) {
+			GeometryInstanceForwardClustered *inst = render_list[RENDER_LIST_ALPHA].elements[i]->owner;
+			if (!probe_instances.has(inst)) {
+				probe_instances.insert(inst);
+				probe_requests.push_back({ inst, &inst->pt_probe_slot, inst->transformed_aabb.get_center() });
+			}
+		}
+		struct NearestFirst {
+			Vector3 camera;
+			bool operator()(const RendererRD::PTProbes::Request &p_a, const RendererRD::PTProbes::Request &p_b) const {
+				return camera.distance_squared_to(p_a.position) < camera.distance_squared_to(p_b.position);
+			}
+		};
+		SortArray<RendererRD::PTProbes::Request, NearestFirst> nearest_first;
+		nearest_first.compare.camera = p_render_data->scene_data->cam_transform.origin;
+		nearest_first.sort(probe_requests.ptr(), probe_requests.size());
+		probe_dispatch_count = pt_probes->update(probe_requests, RSG::rasterizer->get_frame_number());
+		if (raytracing) {
+			raytracing->probe_buffer = pt_probes->get_rays_buffer();
+		}
+	}
 
 	// RT pipeline flags (packed with sample count / max bounces). Computed once
 	// here and reused at trace-dispatch time below so the uniform set and the
@@ -452,7 +490,14 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 		// Raytracing dispatches at internal (pre-upscale) size
 		Size2i rt_size = rb->get_internal_size();
 		RD::get_singleton()->raytracing_list_trace_rays(raytracing_list, 0, raytracing->get_shader()->get_hit_sbt(rt_flags), rt_size.width, rt_size.height, 1);
+		// The rasterized instances' probes: one ray per x, one probe per y; the depth of 2 tells the raygen.
+		if (probe_dispatch_count > 0) {
+			RD::get_singleton()->raytracing_list_trace_rays(raytracing_list, 0, raytracing->get_shader()->get_hit_sbt(rt_flags), RendererRD::PTProbes::RAYS, probe_dispatch_count, 2);
+		}
 		RD::get_singleton()->raytracing_list_end();
+		if (probe_dispatch_count > 0) {
+			pt_probes->reduce(probe_dispatch_count);
+		}
 
 		RD::get_singleton()->draw_command_end_label();
 
@@ -967,4 +1012,23 @@ RenderForwardClusteredPT::~RenderForwardClusteredPT() {
 	if (finite_layer) {
 		memdelete(finite_layer);
 	}
+	if (pt_probes) {
+		memdelete(pt_probes);
+		pt_probes = nullptr;
+	}
+}
+
+float RenderForwardClusteredPT::_pt_probe_sh_scale(const RenderDataRD *p_render_data, float p_luminance_multiplier) {
+	// RenderSceneDataRD::update_ubo()'s IBL_exposure_normalization, which the raster pass multiplies a capture by: the
+	// probes are already in the units of the traced image.
+	if (p_render_data->camera_attributes.is_null() || !is_environment(p_render_data->environment)) {
+		return 1.0;
+	}
+	const RID sky_rid = environment_get_sky(p_render_data->environment);
+	if (sky_rid.is_null()) {
+		return 1.0;
+	}
+	const float current_exposure = RSG::camera_attributes->camera_attributes_get_exposure_normalization_factor(p_render_data->camera_attributes) * environment_get_bg_intensity(p_render_data->environment) / p_luminance_multiplier;
+	const float ibl_exposure_normalization = current_exposure / MAX(0.001, get_sky()->sky_get_baked_exposure(sky_rid));
+	return ibl_exposure_normalization > 0.0 ? 1.0 / ibl_exposure_normalization : 1.0;
 }

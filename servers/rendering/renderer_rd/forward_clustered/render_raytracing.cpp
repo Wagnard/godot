@@ -6228,6 +6228,9 @@ RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderD
 	// Binding 42: Light grid (build_light_grid()).
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 42, p_state->light_grid_buffer.is_valid() ? p_state->light_grid_buffer : RendererRD::MeshStorage::get_singleton()->get_default_rd_storage_buffer()));
 
+	// Binding 31: The rasterized instances' probes (RendererRD::PTProbes), written by the raygen's probe dispatch.
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 31, probe_buffer.is_valid() ? probe_buffer : RendererRD::MeshStorage::get_singleton()->get_default_rd_storage_buffer()));
+
 	// Binding 14: Global shader uniforms SSBO.
 	{
 		RD::Uniform u;

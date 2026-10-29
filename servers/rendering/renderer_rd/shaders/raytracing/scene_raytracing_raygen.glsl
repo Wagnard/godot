@@ -92,7 +92,60 @@ vec3 radiance_octmap_sample(vec2 p_oct_uv, float p_roughness) {
 #include "raytracing_shade_inc.glsl"
 // clang-format on
 
+// The probes of the instances the raster pass draws (RendererRD::PTProbes, mirrored as its MAX_PROBES and RAYS): per probe
+// its position and generation (w: -1 when unused this frame), then per ray its radiance and direction, reduced into SH by
+// pt_probe_reduce.glsl.
+#define RT_PROBE_MAX 128u
+#define RT_PROBE_RAYS 64u
+layout(set = 0, binding = 31, std430) restrict buffer RTProbes {
+	vec4 probe_data[];
+};
+
+// A dispatch of depth 2 (the camera's has depth 1): x the ray, y the probe; its second layer only marks it.
+void trace_probe_ray() {
+	const uint ray = gl_LaunchIDEXT.x;
+	const uint probe = gl_LaunchIDEXT.y;
+	const vec4 position = probe_data[probe];
+	if (gl_LaunchIDEXT.z != 0u || ray >= RT_PROBE_RAYS || probe >= RT_PROBE_MAX || position.w < 0.0) {
+		return;
+	}
+
+	PathState ps;
+	ps.radiance = vec3(0.0);
+	ps.throughput = vec3(1.0);
+	// As the ray a traced surface sends after its diffuse bounce, so the probe gets the indirect light such a surface there
+	// would: no per pixel writes (they are the primary ray's), and a miss takes the Environment's ambient light.
+	ps.packed_bounces_flags = pack_bounces(1u, 1u);
+	ps.rng_state = init_rng(uvec2(ray, probe), uint(get_rt_param(RT_PARAM_FRAME_INDEX)), 0x5052u);
+
+	// Uniform over the sphere, stratified in height.
+	const float z = 1.0 - 2.0 * ((float(ray) + rand(ps.rng_state)) / float(RT_PROBE_RAYS));
+	const float phi = 2.0 * PI * rand(ps.rng_state);
+	const float radius = sqrt(max(1.0 - z * z, 0.0));
+	const vec3 direction = vec3(radius * cos(phi), radius * sin(phi), z);
+
+	vec3 ray_origin = position.xyz;
+	vec3 ray_dir = direction;
+	const uint max_bounces = RT_GET_MAX_BOUNCES();
+	[[dont_unroll]] for (uint bounce = 1u; bounce <= max_bounces; bounce++) {
+		float hit_t;
+		// The first ray leaves the rasterized instances out, as the camera's: the probe's own sprite among them.
+		if (!trace_path_ray(ps, ray_origin, ray_dir, hit_t, bounce == 1u)) {
+			break;
+		}
+	}
+
+	const uint at = RT_PROBE_MAX + (probe * RT_PROBE_RAYS + ray) * 2u;
+	probe_data[at] = vec4(ps.radiance, 0.0);
+	probe_data[at + 1u] = vec4(direction, 0.0);
+}
+
 void main() {
+	if (gl_LaunchSizeEXT.z == 2u) {
+		trace_probe_ray();
+		return;
+	}
+
 	uvec2 pixel = gl_LaunchIDEXT.xy;
 	const vec2 pixel_center = vec2(pixel) + vec2(0.5);
 	const vec2 in_uv = pixel_center / vec2(gl_LaunchSizeEXT.xy);

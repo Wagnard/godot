@@ -1727,7 +1727,16 @@ void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, con
 		}
 
 		for (GeometryInstanceForwardClustered *inst : chunk.lightmap_captures) {
-			const Color *src_capture = inst->lightmap_sh->sh;
+			Color pt_probe_sh[9];
+			const Color *src_capture;
+			if (pt_probes_fill && pt_probes->get_sh(inst->pt_probe_slot, inst, pt_probe_sh)) {
+				for (Color &c : pt_probe_sh) {
+					c *= pt_probe_sh_scale;
+				}
+				src_capture = pt_probe_sh;
+			} else {
+				src_capture = inst->lightmap_sh->sh;
+			}
 			LightmapCaptureData &lcd = scene_state.lightmap_captures[lightmap_captures_used];
 			for (int j = 0; j < 9; j++) {
 				lcd.sh[j * 4 + 0] = src_capture[j].r;
@@ -1886,7 +1895,15 @@ void RenderForwardClustered::_fill_render_list_chunk(FillRenderListChunk &p_chun
 			}
 
 			// Setup GI.
-			if (inst->lightmap_instance.is_valid()) {
+			// The path tracer's raster pass lights its rasterized instances by their traced probe (PTProbes), as a capture.
+			if (pt_probes_fill && pt_probes->has_sh(inst->pt_probe_slot, inst)) {
+				if (p_chunk.lightmap_captures.size() < params.max_lightmap_captures) {
+					flags |= INSTANCE_DATA_FLAG_USE_LIGHTMAP_CAPTURE;
+					p_chunk.lightmap_captures.push_back(inst);
+					uses_lightmap = true;
+				}
+
+			} else if (inst->lightmap_instance.is_valid()) {
 				// find index of the lightmap_instance of the instance being rendered
 				int32_t lightmap_cull_index = -1;
 				for (uint32_t j = 0; j < scene_state.lightmaps_used; j++) {
@@ -7212,6 +7229,9 @@ void RenderForwardClustered::geometry_instance_free(RenderGeometryInstance *p_ge
 	_instance_slot_free(ginstance);
 	if (ginstance->lightmap_sh != nullptr) {
 		geometry_instance_lightmap_sh.free(ginstance->lightmap_sh);
+	}
+	if (pt_probes && ginstance->pt_probe_slot >= 0) {
+		pt_probes->release(ginstance->pt_probe_slot, ginstance);
 	}
 	ginstance->_free_procedural_state();
 	GeometryInstanceSurfaceDataCache *surf = ginstance->surface_caches;

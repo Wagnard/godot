@@ -38,6 +38,7 @@
 #include "servers/rendering/renderer_rd/effects/fsr2.h"
 #include "servers/rendering/renderer_rd/effects/fsr_frame_generation.h"
 #include "servers/rendering/renderer_rd/effects/motion_vectors_store.h"
+#include "servers/rendering/renderer_rd/effects/pt_probes.h"
 #include "servers/rendering/renderer_rd/effects/shadow_watch.h"
 #include "servers/rendering/renderer_rd/effects/ss_effects.h"
 #include "servers/rendering/renderer_rd/effects/taa.h"
@@ -858,6 +859,8 @@ protected:
 		Rect2 lightmap_uv_scale;
 		uint32_t lightmap_slice_index;
 		GeometryInstanceLightmapSH *lightmap_sh = nullptr;
+		// Its RendererRD::PTProbes slot while the path tracer's raster pass draws it, else -1.
+		int32_t pt_probe_slot = -1;
 
 		//used during rendering
 
@@ -1398,6 +1401,13 @@ protected:
 	void _debug_draw_cluster(Ref<RenderSceneBuffersRD> p_render_buffers);
 
 protected:
+	// The probes of the path tracer's rasterized instances (RenderForwardClusteredPT): while pt_probes_fill is set, an
+	// instance with a probe is lit by its SH as by a lightmap capture, scaled by pt_probe_sh_scale (the inverse of the
+	// IBL exposure normalization the capture is multiplied by: the probes are in the traced image's units).
+	RendererRD::PTProbes *pt_probes = nullptr;
+	bool pt_probes_fill = false;
+	float pt_probe_sh_scale = 1.0;
+
 	/* setup */
 
 	virtual RID _render_buffers_get_normal_texture(Ref<RenderSceneBuffersRD> p_render_buffers) override;
