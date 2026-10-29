@@ -1665,7 +1665,9 @@ void RendererSceneCull::_update_instance(Instance *p_instance) const {
 	if (p_instance->base_type == RSE::INSTANCE_LIGHT) {
 		InstanceLightData *light = static_cast<InstanceLightData *>(p_instance->base_data);
 
-		RSG::light_storage->light_instance_set_transform(light->instance, *instance_xform);
+		// Scale does not count on lights, as in _light_instance_update_shadow(), which renders the shadow maps without it:
+		// with a scaled transform the lookup matrices disagreed with the maps. Light3D nodes never pass a scale (disable_scale).
+		RSG::light_storage->light_instance_set_transform(light->instance, instance_xform->orthonormalized());
 		RSG::light_storage->light_instance_set_aabb(light->instance, instance_xform->xform(p_instance->aabb));
 		light->make_shadow_dirty();
 
