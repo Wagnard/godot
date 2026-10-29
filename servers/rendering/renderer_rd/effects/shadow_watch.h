@@ -111,7 +111,8 @@ private:
 	};
 
 	struct CubeCopy {
-		RID light;
+		RID light; // Only compared: the previous render's lights may have been freed since.
+		Vector3 world_position;
 		RID cubemap;
 		float z_near = 0.0;
 		float z_far = 0.0;

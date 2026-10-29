@@ -181,6 +181,7 @@ void ShadowWatch::begin_render() {
 void ShadowWatch::cube_copy_record(RID p_light, RID p_cubemap, float p_z_near, float p_z_far, RID &r_record, uint32_t r_offset[2], uint32_t &r_stamp) {
 	CubeCopy copy;
 	copy.light = p_light;
+	copy.world_position = LightStorage::get_singleton()->light_instance_get_base_transform(p_light).origin;
 	copy.cubemap = p_cubemap;
 	copy.z_near = p_z_near;
 	copy.z_far = p_z_far;
@@ -318,7 +319,7 @@ void ShadowWatch::watch_lights(const RenderDataRD *p_render_data) {
 							continue;
 						}
 						candidate_offsets[l][wl.candidate_count] = other.record;
-						wl.candidates[wl.candidate_count].world_position = light_storage->light_instance_get_base_transform(other.light).origin;
+						wl.candidates[wl.candidate_count].world_position = other.world_position;
 						wl.candidates[wl.candidate_count].previous_render = pass == 1;
 						wl.candidate_count++;
 					}
