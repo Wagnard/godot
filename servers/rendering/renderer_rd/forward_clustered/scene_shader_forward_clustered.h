@@ -43,11 +43,6 @@ private:
 	static Mutex singleton_mutex;
 
 public:
-	// The path tracer's DLSS-RR transparency layer (RenderForwardClusteredPT): its pipelines blend an additive surface
-	// without writing alpha, which stays the coverage of what the layer hides. Its own framebuffer format, so its own
-	// pipelines.
-	static inline std::atomic<int64_t> rr_transparency_layer_framebuffer_format = { -1 };
-
 	enum ShaderGroup {
 		SHADER_GROUP_BASE, // Always compiled at the beginning.
 		SHADER_GROUP_ADVANCED,
@@ -209,9 +204,12 @@ public:
 			ShaderSpecialization shader_specialization = {};
 			uint32_t wireframe = false;
 			uint32_t ubershader = false;
+			// Drawn into the path tracer's DLSS-RR transparency layer: additive blending writes no alpha there.
+			uint32_t rr_transparency_layer = false;
 
 			uint32_t hash() const {
 				uint32_t h = hash_murmur3_one_64(vertex_format_id);
+				h = hash_murmur3_one_32(rr_transparency_layer, h);
 				h = hash_murmur3_one_32(framebuffer_format_id, h);
 				h = hash_murmur3_one_32(cull_mode, h);
 				h = hash_murmur3_one_32(primitive_type, h);

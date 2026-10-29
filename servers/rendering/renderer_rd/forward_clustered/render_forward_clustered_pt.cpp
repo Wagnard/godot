@@ -593,14 +593,11 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 				} else {
 					layer_framebuffer = FramebufferCacheRD::get_singleton()->get_cache_multiview(1, rr_transparency_layer, RID(), RID(), rb->get_depth_texture());
 				}
-				// Its usage bits give it a framebuffer format of its own; were it the color's, the color pass' additive
-				// pipelines would lose their alpha too, so the layer then keeps them as they are.
-				const RD::FramebufferFormatID layer_format = RD::get_singleton()->framebuffer_get_format(layer_framebuffer);
-				const bool own_format = layer_format != RD::get_singleton()->framebuffer_get_format(alpha_framebuffer);
-				SceneShaderForwardClustered::rr_transparency_layer_framebuffer_format.store(own_format ? int64_t(layer_format) : -1);
 				RenderListParameters layer_params(render_list[RENDER_LIST_ALPHA].elements.ptr() + lit_count, render_list[RENDER_LIST_ALPHA].element_info.ptr() + lit_count, alpha_count - lit_count, reverse_cull, PASS_MODE_COLOR, transparent_color_pass_flags, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, lit_count, base_specialization);
 				layer_params.rt_shadow_texture_uniform_set = rt_shadow_texture_set;
 				layer_params.buffer_dependencies = render_list_params.buffer_dependencies;
+				// Pipelines of their own, where additive blending writes no alpha (PipelineKey::rr_transparency_layer).
+				layer_params.rr_transparency_layer = true;
 				const Vector<Color> transparent_black = { Color(0, 0, 0, 0) };
 				_render_list_with_draw_list(&layer_params, layer_framebuffer, RD::DRAW_CLEAR_COLOR_0, transparent_black, 0.0f, 0u, p_render_data->render_region);
 			}
@@ -674,7 +671,7 @@ bool RenderForwardClusteredPT::_rr_transparency_layer_enabled() {
 bool RenderForwardClusteredPT::_rr_transparency_layer_surface(const GeometryInstanceSurfaceDataCache *p_surf) {
 	// Unshaded: nothing in it is traced, so nothing to denoise; RR smeared such effects (godot3d's buff halo and its
 	// sparkles, moving without motion vectors) as if they were noise. Add writes no alpha into the layer (its pipelines
-	// there, SceneShaderForwardClustered::rr_transparency_layer_framebuffer_format). Sub and mul darken what is under
+	// there, PipelineKey::rr_transparency_layer). Sub and mul darken what is under
 	// them, which the premultiplied layer cannot hold.
 	const SceneShaderForwardClustered::ShaderData *shader = p_surf->shader;
 	if (!shader || !shader->unshaded || shader->uses_screen_texture || shader->uses_depth_texture || shader->uses_normal_texture) {

@@ -462,8 +462,10 @@ void SceneShaderForwardClustered::ShaderData::_create_pipeline(PipelineKey p_pip
 
 	// Color pass -> attachment 0: Color/Diffuse, attachment 1: Separate Specular, attachment 2: Motion Vectors
 	RD::PipelineColorBlendState::Attachment blend_attachment = blend_mode_to_blend_attachment(BlendMode(blend_mode));
-	if (blend_mode == BLEND_MODE_ADD && int64_t(p_pipeline_key.framebuffer_format_id) == SceneShaderForwardClustered::rr_transparency_layer_framebuffer_format.load()) {
-		// Added light covers nothing: the layer's alpha (what DLSS-RR fades out under it) keeps what the other surfaces wrote.
+	if (blend_mode == BLEND_MODE_ADD && p_pipeline_key.rr_transparency_layer) {
+		// The path tracer's DLSS-RR transparency layer: added light covers nothing. The layer's alpha (what DLSS-RR fades
+		// out under it) keeps what the other surfaces wrote; written, an additive quad's ALPHA (1 by default, or a
+		// constant: godot3d's light orb flare) hid the whole quad behind black.
 		blend_attachment.write_a = false;
 	}
 	RD::PipelineColorBlendState blend_state_color_blend;

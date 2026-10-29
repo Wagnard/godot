@@ -245,6 +245,7 @@ protected:
 		uint32_t view_count = 1;
 		RID render_pass_uniform_set;
 		bool force_wireframe = false;
+		bool rr_transparency_layer = false; // Into the path tracer's DLSS-RR transparency layer (PipelineKey::rr_transparency_layer).
 		Vector2 uv_offset;
 		float lod_distance_multiplier = 0.0;
 		float screen_mesh_lod_threshold = 0.0;
