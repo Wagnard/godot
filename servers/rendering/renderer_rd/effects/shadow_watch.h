@@ -41,7 +41,7 @@ namespace RendererRD {
 // and without waiting for the GPU: the atlas halves and the cubemap faces the light's shadow went through, whether the
 // halves match the cubemap they were copied from, the omni light data the main pass reads, and the image and the
 // light's shadow test at a grid of screen points. From these, it names the stage that changes every other frame when
-// the image flickers. It costs a few small dispatches and a 26 KB read per view. GODOT_SHADOW_WATCH=0 turns it off.
+// the image flickers. It costs a few small dispatches and a 26 KB read per view. Off unless GODOT_SHADOW_WATCH=1.
 class ShadowWatch {
 public:
 	static constexpr uint32_t MAX_LIGHTS = 4;

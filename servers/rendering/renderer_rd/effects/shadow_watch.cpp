@@ -119,7 +119,7 @@ bool lum_same(float p_a, float p_b) {
 } // namespace
 
 bool ShadowWatch::is_enabled() {
-	return OS::get_singleton()->get_environment("GODOT_SHADOW_WATCH") != "0";
+	return OS::get_singleton()->get_environment("GODOT_SHADOW_WATCH") == "1";
 }
 
 ShadowWatch::ShadowWatch() {
@@ -138,7 +138,7 @@ ShadowWatch::ShadowWatch() {
 
 	singleton = this;
 	heartbeat_usec = OS::get_singleton()->get_ticks_usec();
-	print_line("ShadowWatch: watching the omni lights in cube shadow mode (Wagnard/godot#1); GODOT_SHADOW_WATCH=0 turns it off.");
+	print_line("ShadowWatch: watching the omni lights in cube shadow mode (Wagnard/godot#1), as GODOT_SHADOW_WATCH=1 asks.");
 }
 
 ShadowWatch::~ShadowWatch() {
