@@ -75,6 +75,8 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	wireframe = false;
 
 	unshaded = false;
+	front_layer_reflection_disabled = false;
+	pathtracing_rasterized = false;
 	uses_vertex = false;
 	uses_position = false;
 	uses_sss = false;
@@ -119,6 +121,8 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	actions.render_mode_values["cull_back"] = Pair<int *, int>(&cull_modei, RSE::CULL_MODE_BACK);
 
 	actions.render_mode_flags["unshaded"] = &unshaded;
+	actions.render_mode_flags["front_layer_reflection_disabled"] = &front_layer_reflection_disabled;
+	actions.render_mode_flags["pathtracing_rasterized"] = &pathtracing_rasterized;
 	actions.render_mode_flags["wireframe"] = &wireframe;
 	actions.render_mode_flags["particle_trails"] = &uses_particle_trails;
 	actions.render_mode_flags["world_vertex_coords"] = &uses_world_coordinates;
@@ -460,6 +464,12 @@ void SceneShaderForwardClustered::ShaderData::_create_pipeline(PipelineKey p_pip
 
 	// Color pass -> attachment 0: Color/Diffuse, attachment 1: Separate Specular, attachment 2: Motion Vectors
 	RD::PipelineColorBlendState::Attachment blend_attachment = blend_mode_to_blend_attachment(BlendMode(blend_mode));
+	if (blend_mode == BLEND_MODE_ADD && p_pipeline_key.rr_transparency_layer) {
+		// The path tracer's DLSS-RR transparency layer: added light covers nothing. The layer's alpha (what DLSS-RR fades
+		// out under it) keeps what the other surfaces wrote; written, an additive quad's ALPHA (1 by default, or a
+		// constant: godot3d's light orb flare) hid the whole quad behind black.
+		blend_attachment.write_a = false;
+	}
 	RD::PipelineColorBlendState blend_state_color_blend;
 	blend_state_color_blend.attachments = { blend_attachment, RD::PipelineColorBlendState::Attachment(), RD::PipelineColorBlendState::Attachment() };
 	RD::PipelineColorBlendState blend_state_color_opaque = RD::PipelineColorBlendState::create_disabled(3);

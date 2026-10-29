@@ -246,6 +246,7 @@ protected:
 		uint32_t view_count = 1;
 		RID render_pass_uniform_set;
 		bool force_wireframe = false;
+		bool rr_transparency_layer = false; // Into the path tracer's DLSS-RR transparency layer (PipelineKey::rr_transparency_layer).
 		Vector2 uv_offset;
 		float lod_distance_multiplier = 0.0;
 		float screen_mesh_lod_threshold = 0.0;
@@ -768,6 +769,9 @@ protected:
 			FLAG_PASS_OPAQUE = 2,
 			FLAG_PASS_ALPHA = 4,
 			FLAG_PASS_SHADOW = 8,
+			// rt_pass_flags only: drawn by the path tracer's raster pass, hidden from its camera rays (render_mode or
+			// instance flag pathtracing_rasterized).
+			FLAG_PT_RASTERIZED = 16,
 			FLAG_USES_SHARED_SHADOW_MATERIAL = 128,
 			FLAG_USES_SUBSURFACE_SCATTERING = 2048,
 			FLAG_USES_SCREEN_TEXTURE = 4096,
@@ -1430,6 +1434,8 @@ protected:
 		RID normal_roughness;
 		RID specular_hit_dist;
 		RID color_before_transparency;
+		// The unshaded transparent effects, drawn apart for RR to upscale without denoising (DLSS-RR Integration Guide, 3.4.10).
+		RID transparency_layer;
 		// In place of the depth buffer: a transparent surface's where its reflection dominates (RenderRaytracing::dlss_rr_get_depth()).
 		RID depth;
 	};

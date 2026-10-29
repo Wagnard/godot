@@ -266,6 +266,9 @@ enum : uint8_t {
 	// its intersection shader, so the ray query loops trace them apart with traceRay (RT_PARAM_PROCEDURAL_MASKS).
 	RT_INSTANCE_MASK_PROCEDURAL_SHADOW = 8u,
 	RT_INSTANCE_MASK_PROCEDURAL_CAMERA = 0x10u,
+	// In place of CAMERA for a surface the raster pass draws over the traced image (render_mode pathtracing_rasterized):
+	// every ray but the camera's sees it (RT_MASK_BOUNCE).
+	RT_INSTANCE_MASK_SECONDARY = 0x20u,
 	RT_INSTANCE_MASK_DOUBLE_SIDED_SHADOW = 0x80u, // Build-time only: the shadow rays need both faces, see build_tlas().
 };
 
@@ -1009,6 +1012,8 @@ class RenderRaytracing {
 	RTMaterialData *_compiling_material_fallback(const RTMaterialData *p_mat_data, bool p_cut_out);
 	// A surface of the raster transparent pass that the front layer rays leave out.
 	static bool _front_layer_skipped(const void *p_surf);
+	// A surface of the raster transparent pass that the TLAS holds for the front layer rays only.
+	static bool _front_layer_surface(const void *p_surf);
 	// Whether a MultiMesh surface goes into a merged BLAS (_build_merged_mm_blas()), or one TLAS instance per instance.
 	bool _mm_fits_merged_blas(void *p_mesh_surface, uint32_t p_mm_count, const RTLodView *p_lod_view) const;
 	bool _build_merged_mm_blas(

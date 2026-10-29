@@ -79,6 +79,66 @@ using Microsoft::WRL::ComPtr;
 
 static const D3D12_RANGE VOID_RANGE = {};
 
+// "If you use CopyTextureRegion with a depth-stencil buffer or a multisampled resource, you must copy the entire
+// subresource rectangle ... pass 0 to the DstX, DstY, and DstZ parameters and NULL to the pSrcBox parameter"
+// (ID3D12GraphicsCommandList::CopyTextureRegion, Remarks).
+static bool _copy_needs_whole_subresource(const CD3DX12_RESOURCE_DESC &p_desc) {
+	return (p_desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) || p_desc.SampleDesc.Count > 1;
+}
+
+static bool _copy_box_is_whole_subresource(const CD3DX12_RESOURCE_DESC &p_desc, uint32_t p_mipmap, uint32_t p_x, uint32_t p_y, uint32_t p_z, uint32_t p_width, uint32_t p_height, uint32_t p_depth) {
+	const uint64_t width = MAX(p_desc.Width >> p_mipmap, 1ull);
+	const uint32_t height = MAX(p_desc.Height >> p_mipmap, 1u);
+	const uint32_t depth = p_desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D ? MAX((uint32_t)p_desc.DepthOrArraySize >> p_mipmap, 1u) : 1u;
+	return p_x == 0 && p_y == 0 && p_z == 0 && p_width == width && p_height == height && p_depth == depth;
+}
+
+// The reinterpreting copies CopyTextureRegion makes between type groups, by family: "Format Conversion using Direct3D
+// 10.1" (Block Compression (Direct3D 10)), a table of 32, 64 and 128-bit uncompressed formats and their compressed
+// counterparts. Same family is a plain copy.
+static bool _copy_reinterprets_formats(DXGI_FORMAT p_family, DXGI_FORMAT p_other_family) {
+	switch (p_family) {
+		case DXGI_FORMAT_R32_TYPELESS:
+			return p_other_family == DXGI_FORMAT_R9G9B9E5_SHAREDEXP;
+		case DXGI_FORMAT_R16G16B16A16_TYPELESS:
+		case DXGI_FORMAT_R32G32_TYPELESS:
+			return p_other_family == DXGI_FORMAT_BC1_TYPELESS || p_other_family == DXGI_FORMAT_BC4_TYPELESS;
+		case DXGI_FORMAT_R32G32B32A32_TYPELESS:
+			return p_other_family == DXGI_FORMAT_BC2_TYPELESS || p_other_family == DXGI_FORMAT_BC3_TYPELESS || p_other_family == DXGI_FORMAT_BC5_TYPELESS;
+		default:
+			return false;
+	}
+}
+
+static bool _dxgi_format_is_integer(DXGI_FORMAT p_format) {
+	switch (p_format) {
+		case DXGI_FORMAT_R32G32B32A32_UINT:
+		case DXGI_FORMAT_R32G32B32A32_SINT:
+		case DXGI_FORMAT_R32G32B32_UINT:
+		case DXGI_FORMAT_R32G32B32_SINT:
+		case DXGI_FORMAT_R16G16B16A16_UINT:
+		case DXGI_FORMAT_R16G16B16A16_SINT:
+		case DXGI_FORMAT_R32G32_UINT:
+		case DXGI_FORMAT_R32G32_SINT:
+		case DXGI_FORMAT_R10G10B10A2_UINT:
+		case DXGI_FORMAT_R8G8B8A8_UINT:
+		case DXGI_FORMAT_R8G8B8A8_SINT:
+		case DXGI_FORMAT_R16G16_UINT:
+		case DXGI_FORMAT_R16G16_SINT:
+		case DXGI_FORMAT_R32_UINT:
+		case DXGI_FORMAT_R32_SINT:
+		case DXGI_FORMAT_R8G8_UINT:
+		case DXGI_FORMAT_R8G8_SINT:
+		case DXGI_FORMAT_R16_UINT:
+		case DXGI_FORMAT_R16_SINT:
+		case DXGI_FORMAT_R8_UINT:
+		case DXGI_FORMAT_R8_SINT:
+			return true;
+		default:
+			return false;
+	}
+}
+
 static const uint32_t MAX_DYNAMIC_BUFFERS = 8u; // Minimum guaranteed by Vulkan.
 
 /*****************/
@@ -142,7 +202,7 @@ const RenderingDeviceDriverD3D12::D3D12Format RenderingDeviceDriverD3D12::RD_TO_
 	/* DATA_FORMAT_B8G8R8A8_SSCALED */ { DXGI_FORMAT_R8G8B8A8_TYPELESS, DXGI_FORMAT_R8G8B8A8_SINT },
 	/* DATA_FORMAT_B8G8R8A8_UINT */ { DXGI_FORMAT_R8G8B8A8_TYPELESS, DXGI_FORMAT_R8G8B8A8_UINT },
 	/* DATA_FORMAT_B8G8R8A8_SINT */ { DXGI_FORMAT_R8G8B8A8_TYPELESS, DXGI_FORMAT_R8G8B8A8_SINT },
-	/* DATA_FORMAT_B8G8R8A8_SRGB */ { DXGI_FORMAT_B8G8R8A8_TYPELESS, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB },
+	/* DATA_FORMAT_B8G8R8A8_SRGB */ { DXGI_FORMAT_B8G8R8A8_TYPELESS, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB },
 	/* DATA_FORMAT_A8B8G8R8_UNORM_PACK32 */ { DXGI_FORMAT_R8G8B8A8_TYPELESS, DXGI_FORMAT_R8G8B8A8_UNORM },
 	/* DATA_FORMAT_A8B8G8R8_SNORM_PACK32 */ { DXGI_FORMAT_R8G8B8A8_TYPELESS, DXGI_FORMAT_R8G8B8A8_SNORM },
 	/* DATA_FORMAT_A8B8G8R8_USCALED_PACK32 */ { DXGI_FORMAT_R8G8B8A8_TYPELESS, DXGI_FORMAT_R8G8B8A8_UINT },
@@ -1186,14 +1246,24 @@ uint64_t RenderingDeviceDriverD3D12::buffer_get_allocation_size(BufferID p_buffe
 uint8_t *RenderingDeviceDriverD3D12::buffer_map(BufferID p_buffer) {
 	const BufferInfo *buf_info = (const BufferInfo *)p_buffer.id;
 	void *data_ptr = nullptr;
-	HRESULT res = buf_info->resource->Map(0, &VOID_RANGE, &data_ptr);
+	// Map's pReadRange / Unmap's pWrittenRange: the CPU reads a READBACK buffer and writes the others (UPLOAD staging).
+	// nullptr is the whole buffer; VOID_RANGE told the runtime that nothing was read.
+	HRESULT res = buf_info->resource->Map(0, _buffer_is_readback(buf_info) ? nullptr : &VOID_RANGE, &data_ptr);
 	ERR_FAIL_COND_V_MSG(!SUCCEEDED(res), nullptr, "Map failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
 	return (uint8_t *)data_ptr;
 }
 
 void RenderingDeviceDriverD3D12::buffer_unmap(BufferID p_buffer) {
 	const BufferInfo *buf_info = (const BufferInfo *)p_buffer.id;
-	buf_info->resource->Unmap(0, &VOID_RANGE);
+	buf_info->resource->Unmap(0, _buffer_is_readback(buf_info) ? &VOID_RANGE : nullptr);
+}
+
+bool RenderingDeviceDriverD3D12::_buffer_is_readback(const BufferInfo *p_buf_info) {
+	D3D12_HEAP_PROPERTIES heap_properties = {};
+	if (FAILED(p_buf_info->resource->GetHeapProperties(&heap_properties, nullptr))) {
+		return false;
+	}
+	return heap_properties.Type == D3D12_HEAP_TYPE_READBACK || (heap_properties.Type == D3D12_HEAP_TYPE_CUSTOM && heap_properties.CPUPageProperty == D3D12_CPU_PAGE_PROPERTY_WRITE_BACK);
 }
 
 uint8_t *RenderingDeviceDriverD3D12::buffer_persistent_map_advance(BufferID p_buffer, uint64_t p_frames_drawn) {
@@ -1229,6 +1299,7 @@ uint64_t RenderingDeviceDriverD3D12::buffer_get_device_address(BufferID p_buffer
 	// Shaders cannot dereference a D3D12 GPU virtual address. A GPU pointer is the index of a raw UAV of the buffer in the
 	// shader-visible heap, shifted by 32 bits, plus an offset in the low bits, as Mesa's DXIL lowering of
 	// SPV_KHR_physical_storage_buffer reads it (createHandleFromHeap, SM 6.6).
+	ERR_FAIL_COND_V_MSG(!shader_capabilities.heap_indexing, 0, "D3D12: buffer device addresses need resource binding tier 3 and Shader Model 6.6.");
 	BufferInfo *buf_info = (BufferInfo *)p_buffer.id;
 	if (!buf_info->has_device_address_descriptor) {
 		ERR_FAIL_COND_V_MSG(!(buf_info->resource->GetDesc().Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS), 0, "D3D12: the device address of a buffer in CPU or upload memory cannot be read by shaders.");
@@ -1413,61 +1484,17 @@ void RenderingDeviceDriverD3D12::_discard_texture_subresources(const TextureInfo
 }
 
 bool RenderingDeviceDriverD3D12::_unordered_access_supported_by_format(DataFormat p_format) {
-	switch (p_format) {
-		case DATA_FORMAT_R4G4_UNORM_PACK8:
-		case DATA_FORMAT_R4G4B4A4_UNORM_PACK16:
-		case DATA_FORMAT_B4G4R4A4_UNORM_PACK16:
-		case DATA_FORMAT_R5G6B5_UNORM_PACK16:
-		case DATA_FORMAT_B5G6R5_UNORM_PACK16:
-		case DATA_FORMAT_R5G5B5A1_UNORM_PACK16:
-		case DATA_FORMAT_B5G5R5A1_UNORM_PACK16:
-		case DATA_FORMAT_A1R5G5B5_UNORM_PACK16:
-		case DATA_FORMAT_A8B8G8R8_UNORM_PACK32:
-		case DATA_FORMAT_A8B8G8R8_SNORM_PACK32:
-		case DATA_FORMAT_A8B8G8R8_USCALED_PACK32:
-		case DATA_FORMAT_A8B8G8R8_SSCALED_PACK32:
-		case DATA_FORMAT_A8B8G8R8_UINT_PACK32:
-		case DATA_FORMAT_A8B8G8R8_SINT_PACK32:
-		case DATA_FORMAT_A8B8G8R8_SRGB_PACK32:
-		case DATA_FORMAT_A2R10G10B10_UNORM_PACK32:
-		case DATA_FORMAT_A2R10G10B10_SNORM_PACK32:
-		case DATA_FORMAT_A2R10G10B10_USCALED_PACK32:
-		case DATA_FORMAT_A2R10G10B10_SSCALED_PACK32:
-		case DATA_FORMAT_A2R10G10B10_UINT_PACK32:
-		case DATA_FORMAT_A2R10G10B10_SINT_PACK32:
-		case DATA_FORMAT_A2B10G10R10_UNORM_PACK32:
-		case DATA_FORMAT_A2B10G10R10_SNORM_PACK32:
-		case DATA_FORMAT_A2B10G10R10_USCALED_PACK32:
-		case DATA_FORMAT_A2B10G10R10_SSCALED_PACK32:
-		case DATA_FORMAT_A2B10G10R10_UINT_PACK32:
-		case DATA_FORMAT_A2B10G10R10_SINT_PACK32:
-		case DATA_FORMAT_B10G11R11_UFLOAT_PACK32:
-		case DATA_FORMAT_E5B9G9R9_UFLOAT_PACK32:
-		case DATA_FORMAT_X8_D24_UNORM_PACK32:
-		case DATA_FORMAT_R10X6_UNORM_PACK16:
-		case DATA_FORMAT_R10X6G10X6_UNORM_2PACK16:
-		case DATA_FORMAT_R10X6G10X6B10X6A10X6_UNORM_4PACK16:
-		case DATA_FORMAT_G10X6B10X6G10X6R10X6_422_UNORM_4PACK16:
-		case DATA_FORMAT_B10X6G10X6R10X6G10X6_422_UNORM_4PACK16:
-		case DATA_FORMAT_G10X6_B10X6_R10X6_3PLANE_420_UNORM_3PACK16:
-		case DATA_FORMAT_G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16:
-		case DATA_FORMAT_G10X6_B10X6_R10X6_3PLANE_422_UNORM_3PACK16:
-		case DATA_FORMAT_G10X6_B10X6R10X6_2PLANE_422_UNORM_3PACK16:
-		case DATA_FORMAT_G10X6_B10X6_R10X6_3PLANE_444_UNORM_3PACK16:
-		case DATA_FORMAT_R12X4_UNORM_PACK16:
-		case DATA_FORMAT_R12X4G12X4_UNORM_2PACK16:
-		case DATA_FORMAT_R12X4G12X4B12X4A12X4_UNORM_4PACK16:
-		case DATA_FORMAT_G12X4B12X4G12X4R12X4_422_UNORM_4PACK16:
-		case DATA_FORMAT_B12X4G12X4R12X4G12X4_422_UNORM_4PACK16:
-		case DATA_FORMAT_G12X4_B12X4_R12X4_3PLANE_420_UNORM_3PACK16:
-		case DATA_FORMAT_G12X4_B12X4R12X4_2PLANE_420_UNORM_3PACK16:
-		case DATA_FORMAT_G12X4_B12X4_R12X4_3PLANE_422_UNORM_3PACK16:
-		case DATA_FORMAT_G12X4_B12X4R12X4_2PLANE_422_UNORM_3PACK16:
-		case DATA_FORMAT_G12X4_B12X4_R12X4_3PLANE_444_UNORM_3PACK16:
-			return false;
-		default:
-			return true;
+	// Asked to the device: with ALLOW_UNORDERED_ACCESS "the texture format must support unordered access capabilities"
+	// (D3D12_RESOURCE_FLAGS). A list of exclusions let compressed formats (BCn) through.
+	D3D12_FEATURE_DATA_FORMAT_SUPPORT format_support = {};
+	format_support.Format = RD_TO_D3D12_FORMAT[p_format].general_format;
+	if (format_support.Format == DXGI_FORMAT_UNKNOWN) {
+		return false;
 	}
+	if (FAILED(device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &format_support, sizeof(format_support)))) {
+		return false;
+	}
+	return (format_support.Support1 & D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW);
 }
 
 RDD::TextureID RenderingDeviceDriverD3D12::texture_create(const TextureFormat &p_format, const TextureView &p_view) {
@@ -1535,9 +1562,13 @@ RDD::TextureID RenderingDeviceDriverD3D12::texture_create(const TextureFormat &p
 	// Usage.
 	if ((p_format.usage_bits & TEXTURE_USAGE_COLOR_ATTACHMENT_BIT)) {
 		resource_desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
-	} else {
-		if ((p_format.usage_bits & TEXTURE_USAGE_CAN_COPY_TO_BIT) && _unordered_access_supported_by_format(p_format.format)) {
-			resource_desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS; // For clearing via UAV.
+	} else if (!(p_format.usage_bits & TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) {
+		// For clearing via UAV. Never on a depth-stencil texture: ALLOW_DEPTH_STENCIL "can't be used with
+		// D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS" (D3D12_RESOURCE_FLAGS); depth is cleared through its DSV.
+		// Nor on a multisampled one: a SampleDesc.Count above 1 is unsupported with ALLOW_UNORDERED_ACCESS
+		// (D3D12_RESOURCE_DESC, SampleDesc); it would have made the texture single-sampled.
+		if ((p_format.usage_bits & TEXTURE_USAGE_CAN_COPY_TO_BIT) && p_format.samples == TEXTURE_SAMPLES_1 && _unordered_access_supported_by_format(p_format.format)) {
+			resource_desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
 		}
 	}
 	if ((p_format.usage_bits & TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) {
@@ -1589,8 +1620,11 @@ RDD::TextureID RenderingDeviceDriverD3D12::texture_create(const TextureFormat &p
 	{
 		HRESULT res = E_FAIL;
 		if (barrier_capabilities.enhanced_barriers_supported || (cross_family_sharing && relaxed_casting_available)) {
-			// Create with undefined layout if enhanced barriers are supported. Leave as common otherwise for interop with legacy barriers.
-			D3D12_BARRIER_LAYOUT initial_layout = barrier_capabilities.enhanced_barriers_supported ? D3D12_BARRIER_LAYOUT_UNDEFINED : D3D12_BARRIER_LAYOUT_COMMON;
+			// COMMON, also with enhanced barriers: the transfer workers write initial data on a COPY queue, where "subresources
+			// used in Copy queues MUST be in the state D3D12_RESOURCE_STATE_COMMON" and "Copy queues do not support layout
+			// transition Barriers" (D3D12EnhancedBarriers, "Copy Queues"). The first use on the main queue still discards
+			// from UNDEFINED, which is valid whatever the current layout.
+			D3D12_BARRIER_LAYOUT initial_layout = D3D12_BARRIER_LAYOUT_COMMON;
 			res = allocator->CreateResource3(
 					&allocation_desc,
 					&resource_desc,
@@ -1625,7 +1659,9 @@ RDD::TextureID RenderingDeviceDriverD3D12::texture_create(const TextureFormat &p
 	D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
 	{
 		srv_desc.Format = RD_TO_D3D12_FORMAT[p_view.format].general_format;
-		srv_desc.ViewDimension = p_format.samples == TEXTURE_SAMPLES_1 ? RD_TEXTURE_TYPE_TO_D3D12_VIEW_DIMENSION_FOR_SRV[p_format.texture_type] : RD_TEXTURE_TYPE_TO_D3D12_VIEW_DIMENSION_FOR_SRV_MS[p_format.texture_type];
+		// The resource's sample count, not the requested one: it is lowered above (no MSAA with UAV access, or the format's
+		// maximum), and a multisampled view of a single-sampled resource is invalid.
+		srv_desc.ViewDimension = resource_desc.SampleDesc.Count == 1 ? RD_TEXTURE_TYPE_TO_D3D12_VIEW_DIMENSION_FOR_SRV[p_format.texture_type] : RD_TEXTURE_TYPE_TO_D3D12_VIEW_DIMENSION_FOR_SRV_MS[p_format.texture_type];
 		srv_desc.Shader4ComponentMapping = _compute_component_mapping(p_view);
 
 		switch (srv_desc.ViewDimension) {
@@ -1666,7 +1702,7 @@ RDD::TextureID RenderingDeviceDriverD3D12::texture_create(const TextureFormat &p
 	D3D12_UNORDERED_ACCESS_VIEW_DESC main_uav_desc = {};
 	{
 		main_uav_desc.Format = RD_TO_D3D12_FORMAT[p_format.format].general_format;
-		main_uav_desc.ViewDimension = p_format.samples == TEXTURE_SAMPLES_1 ? RD_TEXTURE_TYPE_TO_D3D12_VIEW_DIMENSION_FOR_UAV[p_format.texture_type] : D3D12_UAV_DIMENSION_UNKNOWN;
+		main_uav_desc.ViewDimension = resource_desc.SampleDesc.Count == 1 ? RD_TEXTURE_TYPE_TO_D3D12_VIEW_DIMENSION_FOR_UAV[p_format.texture_type] : D3D12_UAV_DIMENSION_UNKNOWN;
 
 		switch (main_uav_desc.ViewDimension) {
 			case D3D12_UAV_DIMENSION_TEXTURE1DARRAY: {
@@ -1708,6 +1744,12 @@ RDD::TextureID RenderingDeviceDriverD3D12::texture_create(const TextureFormat &p
 	tex_info->mipmaps = resource_desc.MipLevels;
 	tex_info->view_descs.srv = srv_desc;
 	tex_info->view_descs.uav = uav_desc;
+	if (relaxed_casting_available) {
+		tex_info->castable_formats.resize(relaxed_casting_format_count);
+		for (uint32_t i = 0; i < relaxed_casting_format_count; i++) {
+			tex_info->castable_formats[i] = relaxed_casting_formats[i];
+		}
+	}
 
 	return TextureID(tex_info);
 }
@@ -2057,23 +2099,36 @@ BitField<RDD::TextureUsageBits> RenderingDeviceDriverD3D12::texture_get_usages_s
 bool RenderingDeviceDriverD3D12::texture_can_make_shared_with_format(TextureID p_texture, DataFormat p_format, bool &r_raw_reinterpretation) {
 	r_raw_reinterpretation = false;
 
-	if (format_capabilities.relaxed_casting_supported) {
-		// Relaxed casting is supported, there should be no need to check for format family compatibility.
+	TextureInfo *tex_info = (TextureInfo *)p_texture.id;
+	if (RD_TO_D3D12_FORMAT[tex_info->format].family == RD_TO_D3D12_FORMAT[p_format].family) {
+		// Format family is the same and the view can just cast the format.
 		return true;
-	} else {
-		TextureInfo *tex_info = (TextureInfo *)p_texture.id;
-		if (tex_info->format == DATA_FORMAT_R16_UINT && p_format == DATA_FORMAT_R4G4B4A4_UNORM_PACK16) {
-			// Specific cases that require buffer reinterpretation.
-			r_raw_reinterpretation = true;
-			return false;
-		} else if (RD_TO_D3D12_FORMAT[tex_info->format].family != RD_TO_D3D12_FORMAT[p_format].family) {
-			// Format family is different but copying resources directly is possible.
-			return false;
-		} else {
-			// Format family is the same and the view can just cast the format.
-			return true;
-		}
 	}
+
+	// Another family only through the castable formats list given at creation (relaxed format casting): "Formats not
+	// specified in the list during creation MAY NOT be used as view target formats for the resource" (DirectX-Specs,
+	// VulkanOn12, "Format List Casting"). A texture created without it (from an extension, or before a shareable
+	// format was added to it) takes the fallback.
+	if (tex_info->castable_formats.has(RD_TO_D3D12_FORMAT[p_format].general_format)) {
+		return true;
+	}
+
+	// The fallback copies the texture into an alias of the view's format. Across type groups CopyTextureRegion only
+	// reinterprets the pairs of "Format Conversion using Direct3D 10.1" (Block Compression (Direct3D 10)); any other pair
+	// of the same texel size goes through a buffer (r_raw_reinterpretation), whose footprints are untyped bytes. For
+	// SDFGI: R32_UINT -> E5B9G9R9 is in the table, R16_UINT -> R4G4B4A4 is not.
+	const DXGI_FORMAT family = RD_TO_D3D12_FORMAT[tex_info->format].family;
+	const DXGI_FORMAT view_family = RD_TO_D3D12_FORMAT[p_format].family;
+	if (!_copy_reinterprets_formats(family, view_family) && !_copy_reinterprets_formats(view_family, family)) {
+		uint32_t block_w = 0, block_h = 0, view_block_w = 0, view_block_h = 0;
+		get_compressed_image_format_block_dimensions(tex_info->format, block_w, block_h);
+		get_compressed_image_format_block_dimensions(p_format, view_block_w, view_block_h);
+		const bool uncompressed = block_w == 1 && block_h == 1 && view_block_w == 1 && view_block_h == 1;
+		ERR_FAIL_COND_V_MSG(!uncompressed || get_image_format_pixel_size(tex_info->format) != get_image_format_pixel_size(p_format), false,
+				vformat("D3D12: no way to view a %s texture as %s (different texel sizes, or a compressed format outside the copy conversion table).", FORMAT_NAMES[tex_info->format], FORMAT_NAMES[p_format]));
+		r_raw_reinterpretation = true;
+	}
+	return false;
 }
 
 /*****************/
@@ -2722,6 +2777,9 @@ void RenderingDeviceDriverD3D12::command_pipeline_barrier(CommandBufferID p_cmd_
 		_push_split_global_barrier(global_barriers, global_barrier);
 	}
 
+	const CommandBufferInfo *cmd_buf_info = (const CommandBufferInfo *)(p_cmd_buffer.id);
+	const bool copy_list = cmd_buf_info->list_type == D3D12_COMMAND_LIST_TYPE_COPY;
+
 	D3D12_BUFFER_BARRIER buffer_barrier_d3d12 = {};
 	buffer_barrier_d3d12.Offset = 0;
 	buffer_barrier_d3d12.Size = UINT64_MAX; // The specification says this must be the size of the buffer barrier.
@@ -2777,6 +2835,13 @@ void RenderingDeviceDriverD3D12::command_pipeline_barrier(CommandBufferID p_cmd_
 			texture_barrier_d3d12.Subresources.NumPlanes = format_get_plane_count(texture_info->format);
 		}
 		texture_barrier_d3d12.Flags = (texture_barrier_rd.prev_layout == RDD::TEXTURE_LAYOUT_UNDEFINED) ? D3D12_TEXTURE_BARRIER_FLAG_DISCARD : D3D12_TEXTURE_BARRIER_FLAG_NONE;
+		if (copy_list) {
+			// "Copy queues do not support layout transition Barriers": a texture stays in COMMON there (it is created
+			// in it), so the barrier only orders the accesses.
+			texture_barrier_d3d12.LayoutBefore = D3D12_BARRIER_LAYOUT_COMMON;
+			texture_barrier_d3d12.LayoutAfter = D3D12_BARRIER_LAYOUT_COMMON;
+			texture_barrier_d3d12.Flags = D3D12_TEXTURE_BARRIER_FLAG_NONE;
+		}
 		texture_barriers.push_back(texture_barrier_d3d12);
 	}
 
@@ -2807,7 +2872,6 @@ void RenderingDeviceDriverD3D12::command_pipeline_barrier(CommandBufferID p_cmd_
 	}
 
 	if (barrier_groups_count) {
-		const CommandBufferInfo *cmd_buf_info = (const CommandBufferInfo *)(p_cmd_buffer.id);
 		cmd_buf_info->cmd_list_7->Barrier(barrier_groups_count, barrier_groups);
 	}
 }
@@ -3579,7 +3643,7 @@ D3D12_UNORDERED_ACCESS_VIEW_DESC RenderingDeviceDriverD3D12::_make_ranged_uav_fo
 		} break;
 		case D3D12_UAV_DIMENSION_TEXTURE1DARRAY: {
 			uav_desc.Texture1DArray.MipSlice = mip;
-			uav_desc.Texture1DArray.FirstArraySlice = mip;
+			uav_desc.Texture1DArray.FirstArraySlice = (p_add_bases ? p_texture_info->base_layer : 0) + p_layer_offset;
 			uav_desc.Texture1DArray.ArraySize = p_layers;
 		} break;
 		case D3D12_UAV_DIMENSION_TEXTURE2D: {
@@ -3711,7 +3775,13 @@ RDD::FramebufferID RenderingDeviceDriverD3D12::_framebuffer_create(RenderPassID 
 			fb_info->size = Size2i(tex_info->desc.Width, tex_info->desc.Height);
 		}
 
-		if ((tex_info->desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)) {
+		if (i == vrs_index) {
+			// First: the shading rate image is also a render target (VRS::update_vrs_texture() draws it), and taken for
+			// a colour attachment it was never bound. Also in attachments: the render pass code indexes them with the
+			// pass's attachment indices.
+			fb_info->vrs_attachment = p_attachments[i];
+			fb_info->attachments.push_back(p_attachments[i]);
+		} else if ((tex_info->desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)) {
 			D3D12_RENDER_TARGET_VIEW_DESC rtv_desc = _make_rtv_for_texture(tex_info, 0, 0, UINT32_MAX);
 			device->CreateRenderTargetView(tex_info->resource, &rtv_desc, get_cpu_handle(fb_info->rtv_alloc.cpu_handle, color_idx, rtv_descriptor_heap_pool.increment_size));
 
@@ -3725,14 +3795,12 @@ RDD::FramebufferID RenderingDeviceDriverD3D12::_framebuffer_create(RenderPassID 
 			fb_info->attachments_handle_inds[i] = depth_stencil_idx;
 			fb_info->attachments.push_back(p_attachments[i]);
 			depth_stencil_idx++;
-		} else if (i == vrs_index) {
-			fb_info->vrs_attachment = p_attachments[i];
 		} else {
 			DEV_ASSERT(false);
 		}
 	}
 
-	DEV_ASSERT(fb_info->attachments.size() == color_idx + depth_stencil_idx);
+	DEV_ASSERT(fb_info->attachments.size() == color_idx + depth_stencil_idx + (vrs_index != UINT32_MAX ? 1 : 0));
 	DEV_ASSERT((fb_info->vrs_attachment.id != 0) == (vrs_index != UINT32_MAX));
 
 	return FramebufferID(fb_info);
@@ -4571,6 +4639,14 @@ void RenderingDeviceDriverD3D12::command_copy_texture(CommandBufferID p_cmd_buff
 			src_box.right = p_regions[i].src_offset.x + p_regions[i].size.x;
 			src_box.bottom = p_regions[i].src_offset.y + p_regions[i].size.y;
 			src_box.back = p_regions[i].src_offset.z + p_regions[i].size.z;
+			if (_copy_needs_whole_subresource(src_tex_info->desc) || _copy_needs_whole_subresource(dst_tex_info->desc)) {
+				const TextureCopyRegion &region = p_regions[i];
+				ERR_CONTINUE_MSG(!_copy_box_is_whole_subresource(src_tex_info->desc, region.src_subresources.mipmap, region.src_offset.x, region.src_offset.y, region.src_offset.z, region.size.x, region.size.y, region.size.z) ||
+								!_copy_box_is_whole_subresource(dst_tex_info->desc, region.dst_subresources.mipmap, region.dst_offset.x, region.dst_offset.y, region.dst_offset.z, region.size.x, region.size.y, region.size.z),
+						"D3D12: a depth-stencil or multisampled texture can only be copied whole, subresource by subresource.");
+				cmd_buf_info->cmd_list->CopyTextureRegion(&dst_location, 0, 0, 0, &src_location, nullptr);
+				continue;
+			}
 			cmd_buf_info->cmd_list->CopyTextureRegion(&dst_location, p_regions[i].dst_offset.x, p_regions[i].dst_offset.y, p_regions[i].dst_offset.z, &src_location, &src_box);
 		}
 	}
@@ -4658,13 +4734,28 @@ void RenderingDeviceDriverD3D12::command_clear_color_texture(CommandBufferID p_c
 					cmd_buf_info->uav_alloc.cpu_handle,
 					D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 
-			cmd_buf_info->cmd_list->ClearUnorderedAccessViewFloat(
-					shader_visible_descriptor_allocation.gpu_handle,
-					cmd_buf_info->uav_alloc.cpu_handle,
-					tex_info->resource,
-					p_color.components,
-					0,
-					nullptr);
+			if (_dxgi_format_is_integer(uav_desc.Format)) {
+				// The float clear "only works on FLOAT, UNORM, and SNORM UAVs" (D3D11.3 functional spec, 5.2.3.2). The
+				// colour's bits are the integer values, as Vulkan reads its VkClearColorValue union.
+				UINT values[4];
+				static_assert(sizeof(values) == sizeof(p_color.components));
+				memcpy(values, p_color.components, sizeof(values));
+				cmd_buf_info->cmd_list->ClearUnorderedAccessViewUint(
+						shader_visible_descriptor_allocation.gpu_handle,
+						cmd_buf_info->uav_alloc.cpu_handle,
+						tex_info->resource,
+						values,
+						0,
+						nullptr);
+			} else {
+				cmd_buf_info->cmd_list->ClearUnorderedAccessViewFloat(
+						shader_visible_descriptor_allocation.gpu_handle,
+						cmd_buf_info->uav_alloc.cpu_handle,
+						tex_info->resource,
+						p_color.components,
+						0,
+						nullptr);
+			}
 		}
 	} else {
 		ERR_FAIL_MSG("Cannot clear texture because its format does not support UAV writes. You'll need to update its contents through another method.");
@@ -4765,6 +4856,11 @@ void RenderingDeviceDriverD3D12::command_copy_buffer_to_texture(CommandBufferID 
 
 		CD3DX12_TEXTURE_COPY_LOCATION copy_dst(tex_info->resource, dst_subresource);
 
+		if (_copy_needs_whole_subresource(tex_info->desc)) {
+			const BufferTextureCopyRegion &region = p_regions[i];
+			ERR_CONTINUE_MSG(!_copy_box_is_whole_subresource(tex_info->desc, region.texture_subresource.mipmap, region.texture_offset.x, region.texture_offset.y, region.texture_offset.z, region.texture_region_size.x, region.texture_region_size.y, region.texture_region_size.z),
+					"D3D12: a depth-stencil or multisampled texture can only be uploaded whole, subresource by subresource.");
+		}
 		cmd_buf_info->cmd_list->CopyTextureRegion(
 				&copy_dst,
 				p_regions[i].texture_offset.x,
@@ -4813,13 +4909,10 @@ void RenderingDeviceDriverD3D12::command_copy_texture_to_buffer(CommandBufferID 
 				p_regions[i].texture_offset.y + STEPIFY(p_regions[i].texture_region_size.y, block_h),
 				p_regions[i].texture_offset.z + p_regions[i].texture_region_size.z);
 
-		bool full_box =
-				src_box.left == 0 &&
-				src_box.top == 0 &&
-				src_box.front == 0 &&
-				src_box.right == tex_info->desc.Width &&
-				src_box.bottom == tex_info->desc.Height &&
-				src_box.back == tex_info->desc.Depth();
+		// Compared with the copied mip level's size, not the base level's: a whole mip > 0 also gets no box.
+		const BufferTextureCopyRegion &region = p_regions[i];
+		const bool full_box = _copy_box_is_whole_subresource(tex_info->desc, region.texture_subresource.mipmap, src_box.left, src_box.top, src_box.front, src_box.right - src_box.left, src_box.bottom - src_box.top, src_box.back - src_box.front);
+		ERR_CONTINUE_MSG(!full_box && _copy_needs_whole_subresource(tex_info->desc), "D3D12: a depth-stencil or multisampled texture can only be read back whole, subresource by subresource.");
 
 		D3D12_PLACED_SUBRESOURCE_FOOTPRINT dst_footprint = {};
 		dst_footprint.Offset = p_regions[i].buffer_offset;
@@ -4962,6 +5055,9 @@ void RenderingDeviceDriverD3D12::command_begin_render_pass(CommandBufferID p_cmd
 		// Screen framebuffers must perform this transition even if enhanced barriers are supported.
 		for (uint32_t i = 0; i < fb_info->attachments.size(); i++) {
 			TextureInfo *tex_info = (TextureInfo *)fb_info->attachments[i].id;
+			if (fb_info->attachments[i] == fb_info->vrs_attachment) {
+				continue; // Transitioned below.
+			}
 			if ((tex_info->desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)) {
 				_transition_subresources(tex_info, D3D12_RESOURCE_STATE_RENDER_TARGET);
 			} else if ((tex_info->desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)) {
@@ -5010,6 +5106,8 @@ void RenderingDeviceDriverD3D12::command_begin_render_pass(CommandBufferID p_cmd
 			D3D12_SHADING_RATE_COMBINER_OVERRIDE,
 		};
 		cmd_buf_info->cmd_list_5->RSSetShadingRate(D3D12_SHADING_RATE_1X1, COMBINERS);
+		// The OVERRIDE combiner takes the rate from the image: without it bound every pixel stays 1x1.
+		cmd_buf_info->cmd_list_5->RSSetShadingRateImage(((const TextureInfo *)fb_info->vrs_attachment.id)->resource);
 	}
 
 	cmd_buf_info->render_pass_state.current_subpass = UINT32_MAX;
@@ -5255,7 +5353,7 @@ void RenderingDeviceDriverD3D12::command_end_render_pass(CommandBufferID p_cmd_b
 
 	if (!barrier_capabilities.enhanced_barriers_supported) {
 		for (uint32_t i = 0; i < pass_info->attachments.size(); i++) {
-			if (pass_info->attachments[i].store_op == ATTACHMENT_STORE_OP_DONT_CARE) {
+			if (pass_info->attachments[i].store_op == ATTACHMENT_STORE_OP_DONT_CARE && fb_info->attachments[i] != fb_info->vrs_attachment) {
 				TextureInfo *tex_info = (TextureInfo *)fb_info->attachments[i].id;
 				if ((tex_info->desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)) {
 					_transition_subresources(tex_info, D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -5281,7 +5379,9 @@ void RenderingDeviceDriverD3D12::command_end_render_pass(CommandBufferID p_cmd_b
 	_render_pass_enhanced_barriers_flush(p_cmd_buffer);
 
 	for (uint32_t i = 0; i < pass_info->attachments.size(); i++) {
-		if (pass_info->attachments[i].store_op == ATTACHMENT_STORE_OP_DONT_CARE) {
+		// The shading rate image is only read by the pass (RD gives it DONT_CARE as its store op): discarding it would lose
+		// the rates kept from frame to frame.
+		if (pass_info->attachments[i].store_op == ATTACHMENT_STORE_OP_DONT_CARE && fb_info->attachments[i] != fb_info->vrs_attachment) {
 			const TextureInfo *tex_info = (const TextureInfo *)fb_info->attachments[i].id;
 			_discard_texture_subresources(tex_info, cmd_buf_info);
 		}
@@ -5335,6 +5435,8 @@ void RenderingDeviceDriverD3D12::command_resume_render_pass(CommandBufferID p_cm
 			D3D12_SHADING_RATE_COMBINER_OVERRIDE,
 		};
 		cmd_buf_info->cmd_list_5->RSSetShadingRate(D3D12_SHADING_RATE_1X1, COMBINERS);
+		// The OVERRIDE combiner takes the rate from the image: without it bound every pixel stays 1x1.
+		cmd_buf_info->cmd_list_5->RSSetShadingRateImage(((const TextureInfo *)fb_info->vrs_attachment.id)->resource);
 	}
 
 	cmd_buf_info->render_pass_state.current_subpass = 0;
@@ -6010,7 +6112,8 @@ RDD::PipelineID RenderingDeviceDriverD3D12::render_pipeline_create(
 			const PipelineColorBlendState::Attachment &bs = p_blend_state.attachments[i];
 			D3D12_RENDER_TARGET_BLEND_DESC &bd = (&pipeline_desc.BlendState)->RenderTarget[i];
 
-			bd.BlendEnable = bs.enable_blend;
+			// A logic op replaces blending (Vulkan ignores blendEnable then), and D3D12 requires BlendEnable to be FALSE with it.
+			bd.BlendEnable = bs.enable_blend && !p_blend_state.enable_logic_op;
 			bd.LogicOpEnable = p_blend_state.enable_logic_op;
 			bd.LogicOp = RD_TO_D3D12_LOGIC_OP[p_blend_state.logic_op];
 
@@ -6022,6 +6125,9 @@ RDD::PipelineID RenderingDeviceDriverD3D12::render_pipeline_create(
 			bd.DestBlendAlpha = RD_TO_D3D12_BLEND_FACTOR[bs.dst_alpha_blend_factor];
 			bd.BlendOpAlpha = RD_TO_D3D12_BLEND_OP[bs.alpha_blend_op];
 
+			// The stream's BlendState starts as CD3DX12_BLEND_DESC(D3D12_DEFAULT), every channel writable: the mask is built
+			// from nothing, or a channel left out (write_a = false) would still be written.
+			bd.RenderTargetWriteMask = 0;
 			if (bs.write_r) {
 				bd.RenderTargetWriteMask |= D3D12_COLOR_WRITE_ENABLE_RED;
 			}
@@ -6036,7 +6142,14 @@ RDD::PipelineID RenderingDeviceDriverD3D12::render_pipeline_create(
 			}
 
 			if (i > 0 && all_attachments_same_blend) {
-				all_attachments_same_blend = &(&pipeline_desc.BlendState)->RenderTarget[i] == &(&pipeline_desc.BlendState)->RenderTarget[0];
+				// Compared field by field: this compared the two addresses, so any pipeline with several attachments used
+				// independent blending, and refused a logic op.
+				const D3D12_RENDER_TARGET_BLEND_DESC &bd0 = (&pipeline_desc.BlendState)->RenderTarget[0];
+				all_attachments_same_blend = bd.BlendEnable == bd0.BlendEnable && bd.LogicOpEnable == bd0.LogicOpEnable &&
+						bd.SrcBlend == bd0.SrcBlend && bd.DestBlend == bd0.DestBlend && bd.BlendOp == bd0.BlendOp &&
+						bd.SrcBlendAlpha == bd0.SrcBlendAlpha && bd.DestBlendAlpha == bd0.DestBlendAlpha &&
+						bd.BlendOpAlpha == bd0.BlendOpAlpha && bd.LogicOp == bd0.LogicOp &&
+						bd.RenderTargetWriteMask == bd0.RenderTargetWriteMask;
 			}
 		}
 
@@ -7062,8 +7175,15 @@ void RenderingDeviceDriverD3D12::timestamp_query_pool_get_results(QueryPoolID p_
 
 	ID3D12Resource *results_buffer = tqp_info->results_buffer_allocation->GetResource();
 
+	// The CPU reads the results: the read range covers them (Map, pReadRange), and nothing was written back.
+	const D3D12_RANGE read_range = { 0, sizeof(uint64_t) * p_query_count };
 	void *results_buffer_data = nullptr;
-	results_buffer->Map(0, &VOID_RANGE, &results_buffer_data);
+	HRESULT res = results_buffer->Map(0, &read_range, &results_buffer_data);
+	if (!SUCCEEDED(res) || results_buffer_data == nullptr) {
+		// A removed device fails here first when timestamps are on: no results rather than a read through null.
+		memset(r_results, 0, sizeof(uint64_t) * p_query_count);
+		ERR_FAIL_MSG("Map of the timestamp results failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
+	}
 	memcpy(r_results, results_buffer_data, sizeof(uint64_t) * p_query_count);
 	results_buffer->Unmap(0, &VOID_RANGE);
 }
@@ -7374,7 +7494,10 @@ bool RenderingDeviceDriverD3D12::has_feature(Features p_feature) {
 		case SUPPORTS_FRAGMENT_SHADER_WITH_ONLY_SIDE_EFFECTS:
 			return true;
 		case SUPPORTS_BUFFER_DEVICE_ADDRESS:
-			return true;
+			// A GPU pointer is read through the descriptor heap (buffer_get_device_address()): "must be supported on
+			// devices that support both D3D12_RESOURCE_BINDING_TIER_3 and D3D_SHADER_MODEL_6_6" (HLSL SM 6.6 Dynamic
+			// Resources, "Device Capability").
+			return shader_capabilities.heap_indexing;
 		case SUPPORTS_IMAGE_ATOMIC_32_BIT:
 			return true;
 		case SUPPORTS_VULKAN_MEMORY_MODEL:
@@ -7727,6 +7850,7 @@ Error RenderingDeviceDriverD3D12::_check_capabilities() {
 	// Ray tracing shaders are translated for Shader Model 6.6 and read GPU pointers through the descriptor heap, which
 	// needs resource binding tier 3 (see RenderingShaderContainerD3D12::_convert_nir_to_dxil()).
 	const bool heap_indexing = options.ResourceBindingTier >= D3D12_RESOURCE_BINDING_TIER_3 && shader_capabilities.shader_model >= D3D_SHADER_MODEL_6_6;
+	shader_capabilities.heap_indexing = heap_indexing;
 	if (SUCCEEDED(res) && heap_indexing) {
 		raytracing_capabilities.ray_query_supported = options5.RaytracingTier >= D3D12_RAYTRACING_TIER_1_1;
 		raytracing_capabilities.raytracing_pipeline_supported = options5.RaytracingTier >= D3D12_RAYTRACING_TIER_1_0;
@@ -7750,8 +7874,11 @@ Error RenderingDeviceDriverD3D12::_check_capabilities() {
 			if (options6.VariableShadingRateTier >= D3D12_VARIABLE_SHADING_RATE_TIER_2) {
 				fsr_capabilities.primitive_supported = true;
 				fsr_capabilities.attachment_supported = true;
+				// One tile size, square: "Tiles are square", "One dimension is retrieved, since the horizontal and
+				// vertical dimensions are always the same" (VariableRateShading, "Querying the tile size"). A max of 8
+				// made RD pick 8 on a GPU with 16x16 tiles.
 				fsr_capabilities.min_texel_size = Size2i(options6.ShadingRateImageTileSize, options6.ShadingRateImageTileSize);
-				fsr_capabilities.max_texel_size = Size2i(8, 8);
+				fsr_capabilities.max_texel_size = fsr_capabilities.min_texel_size;
 			}
 		}
 	}
@@ -7797,15 +7924,13 @@ Error RenderingDeviceDriverD3D12::_check_capabilities() {
 	}
 
 	if (format_capabilities.relaxed_casting_supported) {
-#if 0
-		print_verbose("- Relaxed casting supported");
-#else
-		// Certain configurations (Windows 11 with an updated NVIDIA driver) crash when using relaxed casting.
-		// Therefore, we disable it temporarily until we can assure that it's reliable.
-		// There are fallbacks in place that work in every case, if less efficient.
-		format_capabilities.relaxed_casting_supported = false;
-		print_verbose("- Relaxed casting supported (but disabled for now)");
-#endif
+		// GODOT_D3D12_RELAXED_CASTING=0 takes the fallback copies anyway (what a device without the feature runs).
+		if (OS::get_singleton()->get_environment("GODOT_D3D12_RELAXED_CASTING") == "0") {
+			format_capabilities.relaxed_casting_supported = false;
+			print_line("GODOT_D3D12_RELAXED_CASTING=0: relaxed format casting is supported but not used.");
+		} else {
+			print_verbose("- Relaxed casting supported");
+		}
 	} else {
 		print_verbose("- Relaxed casting not supported");
 	}

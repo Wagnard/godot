@@ -1434,11 +1434,21 @@ static void _rt_dispatch_linear(RenderingDevice *p_rd, RD::ComputeListID p_compu
 // reflection. One drawn without the depth test is not where its triangles are: raster draws it over everything, from its
 // fragment code (a decal or a volume projected from the depth buffer, in a box drawn cull_front). Traced, its box hid the
 // surfaces behind it, which lost their reflection, and lent its own to the water where its walls cross it (godot3d's
-// Rot Blossom: a dark outline on the water).
+// Rot Blossom: a dark outline on the water). And one whose shader declares render_mode front_layer_reflection_disabled:
+// the front layer keeps one surface per pixel, and a thin effect in front of water (godot3d's comet tails) took the water's
+// traced reflection from it, which fell back to the brighter radiance one (a white streak).
+bool RenderRaytracing::_front_layer_surface(const void *p_surf) {
+	// The raster transparent pass draws it, and the TLAS has it for the front layer rays only; a pathtracing_rasterized
+	// surface is drawn there too but traced for every other ray as an opaque one (RT_INSTANCE_MASK_SECONDARY).
+	const RenderForwardClustered::GeometryInstanceSurfaceDataCache *surf =
+			static_cast<const RenderForwardClustered::GeometryInstanceSurfaceDataCache *>(p_surf);
+	return (surf->rt_pass_flags & RenderForwardClustered::GeometryInstanceSurfaceDataCache::FLAG_PASS_ALPHA) && !(surf->rt_pass_flags & RenderForwardClustered::GeometryInstanceSurfaceDataCache::FLAG_PT_RASTERIZED);
+}
+
 bool RenderRaytracing::_front_layer_skipped(const void *p_surf) {
 	const RenderForwardClustered::GeometryInstanceSurfaceDataCache *surf =
 			static_cast<const RenderForwardClustered::GeometryInstanceSurfaceDataCache *>(p_surf);
-	return !surf->shader || surf->shader->unshaded ||
+	return !surf->shader || surf->shader->unshaded || surf->shader->front_layer_reflection_disabled ||
 			surf->shader->rt_depth_test() != SceneShaderForwardClustered::ShaderData::DEPTH_TEST_ENABLED;
 }
 
@@ -1518,7 +1528,7 @@ void RenderRaytracing::_displace_surfaces(const RenderDataRD *p_render_data) {
 
 		for (const RenderForwardClustered::GeometryInstanceSurfaceDataCache *surf = inst->surface_caches; surf; surf = surf->next) {
 			// Transparent surfaces too, as build_tlas() traces them for their reflections; not those it leaves out.
-			const bool front_layer = surf->rt_pass_flags & RenderForwardClustered::GeometryInstanceSurfaceDataCache::FLAG_PASS_ALPHA;
+			const bool front_layer = _front_layer_surface(surf);
 			if ((front_layer && _front_layer_skipped(surf)) || surf->primitive != RSE::PRIMITIVE_TRIANGLES) {
 				continue;
 			}
@@ -4644,7 +4654,7 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 		bool instance_static = inst->transform_status == RenderForwardClustered::GeometryInstanceForwardClustered::TransformStatus::NONE;
 		while (surf) {
 			// Surfaces of the raster transparent pass are only seen by the front layer rays, for their reflections.
-			const bool front_layer = surf->rt_pass_flags & RenderForwardClustered::GeometryInstanceSurfaceDataCache::FLAG_PASS_ALPHA;
+			const bool front_layer = _front_layer_surface(surf);
 			if (front_layer && _front_layer_skipped(surf)) {
 				surf = surf->next;
 				continue;
@@ -4839,8 +4849,16 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 			}
 
 			if (front_layer) {
-				// A blended surface is the front layer wherever it is drawn; only an alpha scissor cuts it.
-				if (!surf->shader->uses_alpha_clip) {
+				// A blended surface is the front layer wherever raster draws it: an alpha scissor cuts it, and so does a
+				// custom shader's `discard` (its any-hit runs the fragment code, SceneShaderRaytracing::_preprocess_shader()).
+				// Forced opaque, a quad that discards its empty texels (godot3d's health bars) took the whole rectangle from
+				// the water behind it, which lost its traced reflection there.
+				bool cut = surf->shader->uses_alpha_clip;
+				if (mat_data->rt_sbt_offset > 0) {
+					const SceneShaderRaytracing::CustomShaderEntry *cse = rt_shader_singleton->get_custom_shader_entry(mat_data->rt_sbt_offset);
+					cut = cut || (cse && cse->uses_alpha_clip);
+				}
+				if (!cut) {
 					inst_flags |= RD::ACCELERATION_STRUCTURE_INSTANCE_FORCE_OPAQUE_BIT;
 				}
 			} else if (mat_data->rt_sbt_offset > 0) {
@@ -4881,6 +4899,13 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 			if (front_layer) {
 				instance_masks.push_back(RT_INSTANCE_MASK_FRONT_LAYER);
 				front_layer_instance_count++;
+			} else if (surf->rt_pass_flags & RenderForwardClustered::GeometryInstanceSurfaceDataCache::FLAG_PT_RASTERIZED) {
+				// The raster pass draws it over the traced image: hidden from the camera rays, seen by the others.
+				uint8_t mask = instance_mask(inst);
+				if (mask & RT_INSTANCE_MASK_CAMERA) {
+					mask = (mask & ~RT_INSTANCE_MASK_CAMERA) | RT_INSTANCE_MASK_SECONDARY;
+				}
+				instance_masks.push_back(mask);
 			} else {
 				instance_masks.push_back(instance_mask(inst));
 			}

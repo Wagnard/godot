@@ -724,7 +724,8 @@ RID RenderForwardMobile::_setup_render_pass_uniform_set(RenderListType p_render_
 		RD::Uniform u;
 		u.binding = 25;
 		u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
-		const RID projector = light_storage->get_directional_projector_texture();
+		// Only the passes of a render (p_render_data) light anything: see RenderForwardClustered::_setup_render_pass_uniform_set().
+		const RID projector = p_render_data != nullptr ? light_storage->get_directional_projector_texture() : RID();
 		u.append_id(projector.is_valid() ? projector : texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_WHITE));
 		uniforms.push_back(u);
 	}

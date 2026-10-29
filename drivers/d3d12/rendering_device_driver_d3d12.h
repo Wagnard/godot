@@ -92,6 +92,8 @@ class RenderingDeviceDriverD3D12 : public RenderingDeviceDriver {
 	struct ShaderCapabilities {
 		D3D_SHADER_MODEL shader_model = (D3D_SHADER_MODEL)0;
 		bool native_16bit_ops = false;
+		// ResourceDescriptorHeap indexing (SM 6.6 + resource binding tier 3): buffer device addresses and ray tracing.
+		bool heap_indexing = false;
 	};
 
 	struct FormatCapabilities {
@@ -323,6 +325,8 @@ private:
 		bool is_dynamic() const { return flags.is_dynamic; }
 	};
 
+	static bool _buffer_is_readback(const BufferInfo *p_buf_info);
+
 	struct BufferDynamicInfo : BufferInfo {
 		uint32_t frame_idx = UINT32_MAX;
 		uint8_t *persistent_ptr = nullptr;
@@ -361,6 +365,10 @@ private:
 		} view_descs = {};
 
 		TextureInfo *main_texture = nullptr;
+
+		// The castable formats the resource was created with (relaxed format casting), empty otherwise. A view may
+		// only use a format of the resource's family or of this list.
+		LocalVector<DXGI_FORMAT> castable_formats;
 
 #ifdef DEBUG_ENABLED
 		bool created_from_extension = false;

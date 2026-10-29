@@ -748,6 +748,7 @@ void RendererSceneCull::instance_set_base(RID p_instance, RID p_base) {
 				geom->geometry_instance->set_instance_shader_uniforms_offset(instance->instance_uniforms.location());
 				geom->geometry_instance->set_cast_double_sided_shadows(instance->cast_shadows == RSE::SHADOW_CASTING_SETTING_DOUBLE_SIDED);
 				geom->geometry_instance->set_rt_cast_shadows_setting(instance->cast_shadows);
+				geom->geometry_instance->set_pathtracing_rasterized(instance->pathtracing_rasterized);
 				if (instance->lightmap_sh.size() == 9) {
 					geom->geometry_instance->set_lightmap_capture(instance->lightmap_sh.ptr());
 				}
@@ -1332,6 +1333,14 @@ void RendererSceneCull::instance_geometry_set_flag(RID p_instance, RSE::Instance
 			}
 
 		} break;
+		case RSE::INSTANCE_FLAG_PATHTRACING_RASTERIZED: {
+			instance->pathtracing_rasterized = p_enabled;
+			if ((1 << instance->base_type) & RSE::INSTANCE_GEOMETRY_MASK && instance->base_data) {
+				InstanceGeometryData *geom = static_cast<InstanceGeometryData *>(instance->base_data);
+				ERR_FAIL_NULL(geom->geometry_instance);
+				geom->geometry_instance->set_pathtracing_rasterized(p_enabled);
+			}
+		} break;
 		case RSE::INSTANCE_FLAG_IGNORE_OCCLUSION_CULLING: {
 			instance->ignore_occlusion_culling = p_enabled;
 
@@ -1656,7 +1665,9 @@ void RendererSceneCull::_update_instance(Instance *p_instance) const {
 	if (p_instance->base_type == RSE::INSTANCE_LIGHT) {
 		InstanceLightData *light = static_cast<InstanceLightData *>(p_instance->base_data);
 
-		RSG::light_storage->light_instance_set_transform(light->instance, *instance_xform);
+		// Scale does not count on lights, as in _light_instance_update_shadow(), which renders the shadow maps without it:
+		// with a scaled transform the lookup matrices disagreed with the maps. Light3D nodes never pass a scale (disable_scale).
+		RSG::light_storage->light_instance_set_transform(light->instance, instance_xform->orthonormalized());
 		RSG::light_storage->light_instance_set_aabb(light->instance, instance_xform->xform(p_instance->aabb));
 		light->make_shadow_dirty();
 

@@ -86,6 +86,7 @@ StringBuilder &operator<<(StringBuilder &r_sb, const char *p_cstring) {
 #define CS_STATIC_METHOD_GETINSTANCE "GetPtr"
 #define CS_METHOD_CALL "Call"
 #define CS_PROPERTY_SINGLETON "Singleton"
+#define CS_LOCAL_KEEP_ALIVE_RET "__callRet"
 #define CS_SINGLETON_INSTANCE_SUFFIX "Instance"
 #define CS_METHOD_INVOKE_GODOT_CLASS_METHOD "InvokeGodotClassMethod"
 #define CS_METHOD_HAS_GODOT_CLASS_METHOD "HasGodotClassMethod"
@@ -2905,10 +2906,18 @@ Error BindingsGenerator::_generate_cs_method(const BindingsGenerator::TypeInterf
 
 	String icall_params = method_bind_field;
 
+	// The managed objects whose native pointer the call takes. Once the pointer is read, nothing else keeps such an object
+	// reachable, and the GC may finalize it during the native call (an optimized build ends a local's lifetime at its last
+	// use): the finalizer of a RefCounted wrapper that holds the last reference frees the native object under the call
+	// (a PackedScene freed during its own instantiate()). Each one is kept alive until the call returns (CA2115).
+	Vector<String> keep_alive;
+
 	if (!p_imethod.is_static) {
 		String self_reference = "this";
 		if (p_itype.is_singleton) {
 			self_reference = CS_PROPERTY_SINGLETON;
+		} else if (p_itype.is_object_type) {
+			keep_alive.push_back(self_reference);
 		}
 
 		if (p_itype.cs_in.size()) {
@@ -3023,6 +3032,10 @@ Error BindingsGenerator::_generate_cs_method(const BindingsGenerator::TypeInterf
 				icall_params += sformat(arg_type->cs_in_expr, arg_or_defval_local, arg_type->c_type);
 			}
 
+			if (arg_type->is_object_type) {
+				keep_alive.push_back(arg_or_defval_local);
+			}
+
 			// Apparently the name attribute must not include the @
 			String param_tag_name = iarg.name.begins_with("@") ? iarg.name.substr(1) : iarg.name;
 			// Escape < and > in the attribute default value
@@ -3036,6 +3049,10 @@ Error BindingsGenerator::_generate_cs_method(const BindingsGenerator::TypeInterf
 			}
 
 			icall_params += arg_type->cs_in_expr.is_empty() ? iarg.name : sformat(arg_type->cs_in_expr, iarg.name, arg_type->c_type);
+
+			if (arg_type->is_object_type && !use_span_for_arg) {
+				keep_alive.push_back(iarg.name);
+			}
 		}
 
 		cs_in_expr_is_unsafe |= arg_type->cs_in_expr_is_unsafe;
@@ -3162,14 +3179,31 @@ Error BindingsGenerator::_generate_cs_method(const BindingsGenerator::TypeInterf
 			p_output.append(cs_in_statements.as_string());
 		}
 
-		if (return_type->cname == name_cache.type_void) {
-			p_output << INDENT2 << im_call << "(" << icall_params << ");\n";
-		} else if (return_type->cs_out.is_empty()) {
-			p_output << INDENT2 "return " << im_call << "(" << icall_params << ");\n";
+		if (keep_alive.is_empty()) {
+			if (return_type->cname == name_cache.type_void) {
+				p_output << INDENT2 << im_call << "(" << icall_params << ");\n";
+			} else if (return_type->cs_out.is_empty()) {
+				p_output << INDENT2 "return " << im_call << "(" << icall_params << ");\n";
+			} else {
+				p_output.append(sformat(return_type->cs_out, im_call, icall_params,
+						return_cs_type, return_type->c_type_out, String(), INDENT2));
+				p_output.append("\n");
+			}
 		} else {
-			p_output.append(sformat(return_type->cs_out, im_call, icall_params,
-					return_cs_type, return_type->c_type_out, String(), INDENT2));
-			p_output.append("\n");
+			// The result is converted after the objects are released: every cs_out is `return <conversion of %0(%1)>`,
+			// given an empty %0 it converts the local holding the raw result.
+			const bool returns = return_type->cname != name_cache.type_void;
+			p_output << INDENT2 << (returns ? "var " CS_LOCAL_KEEP_ALIVE_RET " = " : "") << im_call << "(" << icall_params << ");\n";
+			for (const String &object : keep_alive) {
+				p_output << INDENT2 "GC.KeepAlive(" << object << ");\n";
+			}
+			if (returns && return_type->cs_out.is_empty()) {
+				p_output << INDENT2 "return " CS_LOCAL_KEEP_ALIVE_RET ";\n";
+			} else if (returns) {
+				p_output.append(sformat(return_type->cs_out, String(), CS_LOCAL_KEEP_ALIVE_RET,
+						return_cs_type, return_type->c_type_out, String(), INDENT2));
+				p_output.append("\n");
+			}
 		}
 
 		p_output.append(CLOSE_BLOCK_L1);

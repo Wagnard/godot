@@ -283,6 +283,7 @@ namespace Godot.NativeInterop
                     NativeFuncs.godotsharp_callable_new_with_delegate(
                         GCHandle.ToIntPtr(gcHandle), (IntPtr)p_managed_callable.Trampoline,
                         objectPtr, out godot_callable callable);
+                    GC.KeepAlive(p_managed_callable.Target);
 
                     return callable;
                 }

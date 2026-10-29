@@ -158,6 +158,8 @@ namespace Godot
         public override string ToString()
         {
             NativeFuncs.godotsharp_object_to_string(GetPtr(this), out godot_string str);
+            // Not finalized during the native call (see the KeepAlive calls of the generated bindings).
+            GC.KeepAlive(this);
             using (str)
                 return Marshaling.ConvertStringToManaged(str);
         }

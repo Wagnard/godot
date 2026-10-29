@@ -132,7 +132,7 @@ void main() {
 
 		[[dont_unroll]] for (uint bounce = 0u; bounce <= max_bounces; bounce++) {
 			float hit_t;
-			const bool goes_on = trace_path_ray(ps, ray_origin, ray_dir, hit_t);
+			const bool goes_on = trace_path_ray(ps, ray_origin, ray_dir, hit_t, bounce == 0u);
 			if (sample_idx == 0u && bounce == 0u && goes_on) {
 				opaque_t = hit_t;
 			}
@@ -199,7 +199,7 @@ void main() {
 				}
 				// Reflections off a window diverge as much as camera bounces: regrouped by what they hit (with SER), as above.
 				float hit_t;
-				if (!trace_path_ray(rs, ray_origin, ray_dir, hit_t)) {
+				if (!trace_path_ray(rs, ray_origin, ray_dir, hit_t, false)) {
 					break;
 				}
 				if (bounce == 0u) {

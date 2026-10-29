@@ -31,6 +31,7 @@
 #include "sprite_3d.h"
 
 #include "core/config/engine.h"
+#include "core/config/project_settings.h"
 #include "core/math/triangle_mesh.h"
 #include "core/object/callable_mp.h"
 #include "core/object/class_db.h"
@@ -785,6 +786,11 @@ SpriteBase3D::SpriteBase3D() {
 	RS::get_singleton()->mesh_surface_make_offsets_from_format(sd.format, sd.vertex_count, sd.index_count, mesh_surface_offsets, vertex_stride, normal_tangent_stride, attrib_stride, skin_stride);
 	RS::get_singleton()->mesh_add_surface(mesh, sd);
 	set_base(mesh);
+
+	// Path traced, a flat card is drawn by the raster pass over the traced image: lit by a one-sample path, a thin sprite
+	// was noise the denoiser blurred away. Its shadows and reflections stay traced. Whatever its material, as a
+	// material_override replaces the one built here.
+	RS::get_singleton()->instance_geometry_set_flag(get_instance(), RSE::INSTANCE_FLAG_PATHTRACING_RASTERIZED, GLOBAL_GET_CACHED(bool, "rendering/pathtracing/rasterize_sprites"));
 }
 
 SpriteBase3D::~SpriteBase3D() {

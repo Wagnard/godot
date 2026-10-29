@@ -132,6 +132,15 @@ void RenderGeometryInstanceBase::set_rt_cast_shadows_setting(RSE::ShadowCastingS
 	data->cast_shadows = p_setting;
 }
 
+void RenderGeometryInstanceBase::set_pathtracing_rasterized(bool p_enable) {
+	if (data->pathtracing_rasterized == p_enable) {
+		return;
+	}
+	data->pathtracing_rasterized = p_enable;
+
+	_mark_dirty(); // The surface caches classify the passes again.
+}
+
 void RenderGeometryInstanceBase::set_cast_double_sided_shadows(bool p_enable) {
 	data->cast_double_sided_shadows = p_enable;
 

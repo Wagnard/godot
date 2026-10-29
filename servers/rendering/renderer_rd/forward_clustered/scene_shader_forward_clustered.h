@@ -204,9 +204,12 @@ public:
 			ShaderSpecialization shader_specialization = {};
 			uint32_t wireframe = false;
 			uint32_t ubershader = false;
+			// Drawn into the path tracer's DLSS-RR transparency layer: additive blending writes no alpha there.
+			uint32_t rr_transparency_layer = false;
 
 			uint32_t hash() const {
 				uint32_t h = hash_murmur3_one_64(vertex_format_id);
+				h = hash_murmur3_one_32(rr_transparency_layer, h);
 				h = hash_murmur3_one_32(framebuffer_format_id, h);
 				h = hash_murmur3_one_32(cull_mode, h);
 				h = hash_murmur3_one_32(primitive_type, h);
@@ -261,6 +264,11 @@ public:
 		bool wireframe = false;
 
 		bool unshaded = false;
+		// render_mode front_layer_reflection_disabled: the path tracer's front layer leaves this transparent surface out.
+		bool front_layer_reflection_disabled = false;
+		// render_mode pathtracing_rasterized: path traced, the raster transparent pass draws this surface over the traced
+		// image (lit there, so with no path tracing noise); the camera rays leave it out, the other rays keep it.
+		bool pathtracing_rasterized = false;
 		bool uses_vertex = false;
 		bool uses_position = false;
 		bool uses_sss = false;

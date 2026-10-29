@@ -6150,7 +6150,10 @@
 		<constant name="INSTANCE_FLAG_IGNORE_OCCLUSION_CULLING" value="3" enum="InstanceFlags">
 			Always draw, even if the instance would be culled by occlusion culling. Does not affect view frustum culling.
 		</constant>
-		<constant name="INSTANCE_FLAG_MAX" value="4" enum="InstanceFlags">
+		<constant name="INSTANCE_FLAG_PATHTRACING_RASTERIZED" value="4" enum="InstanceFlags">
+			When path tracing, the instance is drawn by the raster pass over the traced image instead of by the camera rays, which leave it out. Its shadows, reflections and indirect light are still traced. Meant for flat cards such as sprites: a thin surface lit by a one-sample path is noise that the denoiser blurs away. [Sprite3D] and [AnimatedSprite3D] set it from [member ProjectSettings.rendering/pathtracing/rasterize_sprites].
+		</constant>
+		<constant name="INSTANCE_FLAG_MAX" value="5" enum="InstanceFlags">
 			Represents the size of the [enum InstanceFlags] enum.
 		</constant>
 		<constant name="SHADOW_CASTING_SETTING_OFF" value="0" enum="ShadowCastingSetting">

@@ -17,6 +17,9 @@ namespace Godot
                 (godot_string_name)(signal?.NativeValue ?? default));
             NativeFuncs.godotsharp_internal_signal_awaiter_connect(GodotObject.GetPtr(source), in signalSrc,
                 GodotObject.GetPtr(target), GCHandle.ToIntPtr(awaiterGcHandle));
+            // Not finalized during the native call (see the KeepAlive calls of the generated bindings).
+            GC.KeepAlive(source);
+            GC.KeepAlive(target);
         }
 
         public bool IsCompleted => _completed;

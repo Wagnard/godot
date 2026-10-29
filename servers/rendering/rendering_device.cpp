@@ -5495,7 +5495,7 @@ RID RenderingDevice::compute_pipeline_create(RID p_shader, const Vector<Pipeline
 
 	ComputePipeline pipeline;
 	pipeline.driver_id = driver->compute_pipeline_create(shader->driver_id, p_specialization_constants);
-	ERR_FAIL_COND_V(!pipeline.driver_id, RID());
+	ERR_FAIL_COND_V_MSG(!pipeline.driver_id, RID(), "Compute pipeline creation failed for shader '" + String(shader->name) + "'.");
 
 	if (pipeline_cache_enabled) {
 		update_pipeline_cache();

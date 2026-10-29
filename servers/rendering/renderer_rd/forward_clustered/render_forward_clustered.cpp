@@ -541,6 +541,7 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 
 		pipeline_key.framebuffer_format_id = framebuffer_format;
 		pipeline_key.wireframe = p_params->force_wireframe;
+		pipeline_key.rr_transparency_layer = p_params->rr_transparency_layer;
 		pipeline_key.ubershader = 0;
 
 		bool emulate_point_size = shader->uses_point_size && scene_shader.emulate_point_size;
@@ -2751,6 +2752,7 @@ void RenderForwardClustered::_render_3d_upscaling(const RenderDataRD *p_render_d
 				params.dlss_rr_normal_roughness = p_dlss_rr.normal_roughness;
 				params.dlss_rr_specular_hit_dist = p_dlss_rr.specular_hit_dist;
 				params.dlss_rr_color_before_transparency = p_dlss_rr.color_before_transparency;
+				params.dlss_rr_transparency_layer = p_dlss_rr.transparency_layer;
 				if (p_dlss_rr.depth.is_valid()) {
 					// The same depth with a transparent surface's where its reflection dominates (DLSS-RR Integration Guide,
 					// 3.4.1). The motion vector decode reads it too, so static pixels move as that surface does.
@@ -5792,7 +5794,10 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 		RD::Uniform u;
 		u.binding = 42;
 		u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
-		const RID projector = light_storage->get_directional_projector_texture();
+		// Only the passes of a render (p_render_data) light anything. The others (depth prepass, shadows, SDFGI, material
+		// bakes) are built before this render's update_light_buffers(), so they would get the projector of whichever
+		// render ran last (a SubViewport's), and its texture would become a dependency of every shadow pass.
+		const RID projector = p_render_data != nullptr ? light_storage->get_directional_projector_texture() : RID();
 		u.append_id(projector.is_valid() ? projector : texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_WHITE));
 		uniforms.push_back(u);
 	}
@@ -6264,6 +6269,12 @@ void RenderForwardClustered::_geometry_instance_add_surface_with_material(Geomet
 		rt_pass_flags |= GeometryInstanceSurfaceDataCache::FLAG_PASS_OPAQUE;
 		rt_pass_flags |= GeometryInstanceSurfaceDataCache::FLAG_PASS_DEPTH;
 		rt_pass_flags |= GeometryInstanceSurfaceDataCache::FLAG_PASS_SHADOW;
+	}
+	if ((p_material->shader_data->pathtracing_rasterized || ginstance->data->pathtracing_rasterized) && (rt_pass_flags & GeometryInstanceSurfaceDataCache::FLAG_PASS_OPAQUE)) {
+		// Drawn by the path tracer's raster pass (its alpha list, after a depth pass of its own) over the traced image;
+		// traced only for the other rays (RenderRaytracing::build_tlas(), not as a front layer surface). Opaque and cut-out
+		// surfaces only: a transparent one (a sprite's buff halo overlay) is drawn there already.
+		rt_pass_flags |= GeometryInstanceSurfaceDataCache::FLAG_PASS_ALPHA | GeometryInstanceSurfaceDataCache::FLAG_PT_RASTERIZED;
 	}
 
 	if (p_material->shader_data->uses_particle_trails) {
@@ -6932,8 +6943,9 @@ void RenderForwardClustered::_rt_precache_surface_material(const GeometryInstanc
 	if ((base_type != RSE::INSTANCE_MESH && base_type != RSE::INSTANCE_MULTIMESH) || ginstance->rt_procedural) {
 		return;
 	}
-	if (p_surface->rt_pass_flags & GeometryInstanceSurfaceDataCache::FLAG_PASS_ALPHA) {
+	if ((p_surface->rt_pass_flags & GeometryInstanceSurfaceDataCache::FLAG_PASS_ALPHA) && !(p_surface->rt_pass_flags & GeometryInstanceSurfaceDataCache::FLAG_PT_RASTERIZED)) {
 		// Rasterized by the transparent pass; a mesh's is traced for the front layer's reflections, unless unshaded.
+		// A pathtracing_rasterized surface is traced as an opaque one (for the rays but the camera's).
 		if (base_type == RSE::INSTANCE_MULTIMESH || !p_surface->shader || p_surface->shader->unshaded) {
 			return;
 		}

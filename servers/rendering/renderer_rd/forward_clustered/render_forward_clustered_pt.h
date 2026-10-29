@@ -31,6 +31,7 @@
 #pragma once
 
 #include "servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.h"
+#include "servers/rendering/renderer_rd/effects/finite_layer.h"
 #include "servers/rendering/renderer_rd/forward_clustered/render_raytracing.h"
 
 namespace RendererSceneRenderImplementation {
@@ -55,6 +56,14 @@ class RenderForwardClusteredPT : public RenderForwardClustered {
 	SafeNumeric<uint32_t> rt_pending_hit_groups;
 	// The transparent pass traces its lights' shadows through the TLAS (USE_RT_SHADOWS) on this device.
 	static bool _transparent_pass_traces_shadows();
+	// DLSS-RR's transparency layer (Integration Guide 3.4.10): the transparent surfaces drawn apart, upscaled by RR without
+	// being denoised. Unshaded ones only (nothing traced in them), blended so that the target holds premultiplied color and
+	// coverage (mix, premultiplied alpha), reading nothing from the screen.
+	static bool _rr_transparency_layer_enabled();
+	// The layer's copy for RR, NaN and Inf cleared, and the warning naming the effects drawn where they were.
+	RendererRD::FiniteLayer *finite_layer = nullptr;
+	void _warn_non_finite_layer(const RenderDataRD *p_render_data, const RendererRD::FiniteLayer::Report &p_report, uint32_t p_from, uint32_t p_to);
+	static bool _rr_transparency_layer_surface(const GeometryInstanceSurfaceDataCache *p_surf);
 
 protected:
 	virtual void _render_scene(RenderDataRD *p_render_data, const Color &p_default_bg_color) override;
