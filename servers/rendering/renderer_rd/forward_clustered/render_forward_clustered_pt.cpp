@@ -693,9 +693,11 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 // Raytracing methods
 
 bool RenderForwardClusteredPT::_rr_transparency_layer_enabled() {
-	// GODOT_RR_TRANSPARENCY_LAYER=0: the effects stay in RR's noisy input, as before (comparisons).
-	static const bool off = OS::get_singleton()->get_environment("GODOT_RR_TRANSPARENCY_LAYER") == "0";
-	return !off;
+	// Off unless GODOT_RR_TRANSPARENCY_LAYER=1: in godot3d, fights with skeleton archers and mages left black areas with
+	// a white glow edge that spread as the camera moved, gone with the layer off. Its cause is not found yet; the
+	// effects stay in RR's noisy input meanwhile.
+	static const bool on = OS::get_singleton()->get_environment("GODOT_RR_TRANSPARENCY_LAYER") == "1";
+	return on;
 }
 
 bool RenderForwardClusteredPT::_rr_transparency_layer_surface(const GeometryInstanceSurfaceDataCache *p_surf) {
