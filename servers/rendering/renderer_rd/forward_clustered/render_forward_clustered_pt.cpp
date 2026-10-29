@@ -661,6 +661,45 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 				rasterized_params.rt_shadow_texture_uniform_set = rt_shadow_texture_set;
 				rasterized_params.buffer_dependencies = render_list_params.buffer_dependencies;
 				_render_list_with_draw_list(&rasterized_params, rb_data->get_color_pass_fb(rasterized_color_pass_flags), RD::DRAW_DEFAULT_ALL, Vector<Color>(), 0.0f, 0u, p_render_data->render_region);
+
+				// DLSS-RR's guides where the cards are: the path tracer wrote those of what is behind them, and RR took a card
+				// for that background's lighting. Their material pass (as SDFGI's: albedo, view normal, roughness, metallic,
+				// view depth) keeps the nearest card in a depth buffer of its own: it cuts out nothing, and must not write the
+				// scene's. PTRasterizedGuides then writes what the raygen would, where that card's depth is the scene's (the
+				// depth pass above cut the cards out).
+				// GODOT_RR_RASTERIZED_GUIDES=0: the path tracer's guides stay where the cards are, as before (comparisons).
+				static const bool rasterized_guides_off = OS::get_singleton()->get_environment("GODOT_RR_RASTERIZED_GUIDES") == "0";
+				if (raytracing && raytracing->dlss_rr_has_buffers(rb.ptr()) && !rasterized_guides_off) {
+					RENDER_TIMESTAMP("Rasterized Cards RR Guides");
+					const RD::DataFormat material_formats[6] = { RD::DATA_FORMAT_R8G8B8A8_UNORM, RD::DATA_FORMAT_R8G8B8A8_UNORM, RD::DATA_FORMAT_R8G8B8A8_UNORM, RD::DATA_FORMAT_R16G16B16A16_SFLOAT, RD::DATA_FORMAT_R32_SFLOAT, RD::DATA_FORMAT_D32_SFLOAT };
+					const StringName material_names[6] = { SNAME("rasterized_albedo"), SNAME("rasterized_normal"), SNAME("rasterized_orm"), SNAME("rasterized_emission"), SNAME("rasterized_view_depth"), SNAME("rasterized_depth") };
+					RID material_textures[6];
+					for (int i = 0; i < 6; i++) {
+						if (!rb->has_texture(RB_SCOPE_DLSS_RR, material_names[i])) {
+							const uint32_t attachment_bit = i == 5 ? RD::TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT : RD::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT;
+							rb->create_texture(RB_SCOPE_DLSS_RR, material_names[i], material_formats[i], attachment_bit | RD::TEXTURE_USAGE_SAMPLING_BIT, RD::TEXTURE_SAMPLES_1);
+						}
+						material_textures[i] = rb->get_texture(RB_SCOPE_DLSS_RR, material_names[i]);
+					}
+					const RID material_framebuffer = FramebufferCacheRD::get_singleton()->get_cache_multiview(1, material_textures[0], material_textures[1], material_textures[2], material_textures[3], material_textures[4], material_textures[5]);
+					RenderListParameters material_params(render_list[RENDER_LIST_ALPHA].elements.ptr(), render_list[RENDER_LIST_ALPHA].element_info.ptr(), rasterized_count, reverse_cull, PASS_MODE_DEPTH_MATERIAL, 0, rb_data.is_null(), p_render_data->directional_light_soft_shadows, depth_uniform_set, false, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, 0, base_specialization);
+					const Vector<Color> material_clear = { Color(0, 0, 0, 0), Color(0, 0, 0, 0), Color(0, 0, 0, 0), Color(0, 0, 0, 0), Color(0, 0, 0, 0) };
+					_render_list_with_draw_list(&material_params, material_framebuffer, RD::DRAW_CLEAR_ALL, material_clear, 0.0f, 0u, p_render_data->render_region);
+
+					if (!rasterized_guides) {
+						rasterized_guides = memnew(RendererRD::PTRasterizedGuides);
+					}
+					RendererRD::PTRasterizedGuides::Guides guides;
+					guides.diffuse_albedo = raytracing->dlss_rr_get_diffuse_albedo(rb.ptr());
+					guides.specular_albedo = raytracing->dlss_rr_get_specular_albedo(rb.ptr());
+					guides.normal_roughness = raytracing->dlss_rr_get_normal_roughness(rb.ptr());
+					guides.specular_hit_dist = raytracing->dlss_rr_get_specular_hit_dist(rb.ptr());
+					guides.depth = raytracing->dlss_rr_get_depth(rb.ptr());
+					// The projection the depth buffer was rendered with: reversed Z in [0, 1] (RenderSceneDataRD::update_ubo()).
+					Projection depth_correction;
+					depth_correction.set_depth_correction(p_render_data->scene_data->flip_y);
+					rasterized_guides->process(material_textures[0], material_textures[1], material_textures[2], material_textures[4], rb->get_depth_texture(), guides, rb->get_internal_size(), depth_correction * p_render_data->scene_data->cam_projection, p_render_data->scene_data->cam_transform);
+				}
 			}
 			if (lit_count > rasterized_count) {
 				_render_list_with_draw_list(&render_list_params, alpha_framebuffer, RD::DRAW_DEFAULT_ALL, Vector<Color>(), 0.0f, 0u, p_render_data->render_region);
@@ -1023,6 +1062,9 @@ RenderForwardClusteredPT::~RenderForwardClusteredPT() {
 	}
 	if (finite_layer) {
 		memdelete(finite_layer);
+	}
+	if (rasterized_guides) {
+		memdelete(rasterized_guides);
 	}
 	if (pt_probes) {
 		memdelete(pt_probes);
