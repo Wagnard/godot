@@ -831,8 +831,9 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 		dynamic_buffers.push_back(ShaderRD::DynamicBuffer::encode(RenderForwardClustered::RENDER_PASS_UNIFORM_SET, 38));
 		shader.initialize(shader_versions, p_defines, Vector<RD::PipelineImmutableSampler>(), dynamic_buffers);
 
-		// The transparent pass of the path tracer has no separate specular, motion vectors or multiview.
-		const uint32_t rt_shadows_unused = SHADER_COLOR_PASS_FLAG_SEPARATE_SPECULAR | SHADER_COLOR_PASS_FLAG_MOTION_VECTORS | SHADER_COLOR_PASS_FLAG_MULTIVIEW;
+		// The transparent pass of the path tracer has no separate specular or multiview. Its motion vectors are the rasterized
+		// cards' (pathtracing_rasterized), drawn first.
+		const uint32_t rt_shadows_unused = SHADER_COLOR_PASS_FLAG_SEPARATE_SPECULAR | SHADER_COLOR_PASS_FLAG_MULTIVIEW;
 		for (int i = 0; i < SHADER_COLOR_PASS_FLAG_COUNT; i++) {
 			if ((i & SHADER_COLOR_PASS_FLAG_RT_SHADOWS) && (i & rt_shadows_unused)) {
 				shader.set_variant_enabled(ShaderVersion::SHADER_VERSION_COLOR_PASS * 2 + i, false);
