@@ -57,19 +57,21 @@ public:
 	static constexpr uint32_t MAX_CANDIDATES = 8;
 
 private:
-	// Copy records, in uints: per copied half, the stamp of the copy, a pad, then for each point of the 32x32 grid the
-	// depth read from the cubemap and the depth written (cube_to_dp.glsl).
+	// Copy records, in uints: per copied half, a header of 8 (the stamp of the copy, its z_far, z_near, texel size x and
+	// y, the gl_FragCoord of its first point), then for each point of the 32x32 grid the depth read from the cubemap and
+	// the depth written (cube_to_dp.glsl).
 	static constexpr uint32_t MAX_COPIES = 16; // Per view.
-	static constexpr uint32_t COPY_HALF_RECORD = 2052;
+	static constexpr uint32_t COPY_HALF_RECORD = 2056;
 	static constexpr uint32_t COPY_RECORD = 2 * COPY_HALF_RECORD;
 	static constexpr uint32_t COPY_SLOT = MAX_COPIES * COPY_RECORD;
 
 	// Results buffer slot, in uints.
 	static constexpr uint32_t LIGHT_RECORD = 320;
 	// Per half: 64 block sums, count of 0, count of 1, copy mismatches, copy samples, read differences, write
-	// differences, stale record, record present, then the matches with each candidate copy.
-	static constexpr uint32_t HALF_STRIDE = 80;
-	static constexpr uint32_t FACES_BASE = 160;
+	// differences, stale record, record present, the matches with each candidate copy, then the copy's header words 1
+	// to 6 (at 80).
+	static constexpr uint32_t HALF_STRIDE = 88;
+	static constexpr uint32_t FACES_BASE = 176;
 	static constexpr uint32_t FACE_STRIDE = 18;
 	static constexpr uint32_t SLOT_ENTRIES = MAX_LIGHTS * LIGHT_RECORD;
 	static constexpr uint32_t SLOT_LUM = SLOT_ENTRIES + MAX_ENTRIES * ENTRY_FLOATS;
@@ -124,6 +126,13 @@ private:
 		bool previous_render = false;
 	};
 
+	// The constants a copy of the render was given, to name whose a copy ran with.
+	struct CopyParams {
+		Vector3 world_position;
+		float z_near = 0.0;
+		float z_far = 0.0;
+	};
+
 	struct WatchedLight {
 		RID light;
 		Vector3 world_position;
@@ -131,6 +140,8 @@ private:
 		bool redrawn = false;
 		bool copy_check = false;
 		bool recorded = false;
+		float copy_z_near = 0.0; // Given to its last copy of the render.
+		float copy_z_far = 0.0;
 		Candidate candidates[MAX_CANDIDATES];
 		uint32_t candidate_count = 0;
 		uint32_t face_casters[6] = {};
@@ -152,6 +163,7 @@ private:
 		bool entries_complete = false; // All the omni lights of the render are among the entries read.
 		bool screen = false;
 		LocalVector<WatchedLight> lights;
+		LocalVector<CopyParams> copy_params;
 	};
 
 	enum EntryState {
@@ -178,6 +190,7 @@ private:
 		uint32_t read_diff[2] = {};
 		uint32_t write_diff[2] = {};
 		uint32_t matches[2][MAX_CANDIDATES] = {};
+		uint32_t header[2][6] = {}; // What each copy ran with: z_far, z_near, texel size x and y, first point x and y.
 		uint32_t face_casters[6] = {};
 		bool screen = false;
 		uint8_t vis[GRID_POINTS] = {};
@@ -223,7 +236,9 @@ private:
 	bool _may_report(uint64_t p_kind, RID p_light);
 	String _light_name(const WatchedLight &p_light, const WatchedRender &p_render) const;
 	String _history(const LocalVector<LightSample *> &p_history) const;
-	String _copy_verdict(const LightSample &p_sample, const WatchedLight &p_light, int p_half) const;
+	String _copy_verdict(const LightSample &p_sample, const WatchedLight &p_light, const WatchedRender &p_render, int p_half) const;
+	static void _expected_copy_header(const WatchedLight &p_light, int p_half, float r_header[6]);
+	static bool _copy_params_as_given(const LightSample &p_sample, const WatchedLight &p_light, int p_half);
 	void _read_back();
 
 public:

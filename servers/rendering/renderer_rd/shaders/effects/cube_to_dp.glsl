@@ -50,7 +50,8 @@ params;
 
 #ifdef WATCH
 // Wagnard/godot#1 (ShadowWatch): on a 32x32 grid of the region, what this copy read from the cubemap and the depth it
-// wrote, as the copy itself sees them. Header: the stamp of the copy.
+// wrote, as the copy itself sees them. Header (8 uints): the stamp, the push constants it ran with, its first point's
+// gl_FragCoord.
 layout(set = 0, binding = 1, std430) restrict writeonly buffer WatchRecord {
 	uint data[];
 }
@@ -111,10 +112,17 @@ void main() {
 	if (all(greaterThanEqual(step, ivec2(2))) && all(equal(local_px % step, step / 2))) {
 		ivec2 g = local_px / step;
 		uint index = uint(g.y * 32 + g.x);
-		watch_record.data[params.watch_offset + 2u + index * 2u] = floatBitsToUint(sampled);
-		watch_record.data[params.watch_offset + 3u + index * 2u] = floatBitsToUint(clamp(depth, 0.0, 1.0));
+		watch_record.data[params.watch_offset + 8u + index * 2u] = floatBitsToUint(sampled);
+		watch_record.data[params.watch_offset + 9u + index * 2u] = floatBitsToUint(clamp(depth, 0.0, 1.0));
 		if (index == 0u) {
+			// Header: the stamp, then the constants this copy actually ran with and where its first point landed.
 			watch_record.data[params.watch_offset] = params.watch_stamp;
+			watch_record.data[params.watch_offset + 1u] = floatBitsToUint(params.z_far);
+			watch_record.data[params.watch_offset + 2u] = floatBitsToUint(params.z_near);
+			watch_record.data[params.watch_offset + 3u] = floatBitsToUint(params.texel_size.x);
+			watch_record.data[params.watch_offset + 4u] = floatBitsToUint(params.texel_size.y);
+			watch_record.data[params.watch_offset + 5u] = floatBitsToUint(gl_FragCoord.x);
+			watch_record.data[params.watch_offset + 6u] = floatBitsToUint(gl_FragCoord.y);
 		}
 	}
 #endif

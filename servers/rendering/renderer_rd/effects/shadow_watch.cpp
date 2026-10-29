@@ -310,6 +310,8 @@ void ShadowWatch::watch_lights(const RenderDataRD *p_render_data) {
 			}
 			record_offset[l] = copies[i].record;
 			wl.recorded = copies[i].record != UINT32_MAX;
+			wl.copy_z_near = copies[i].z_near;
+			wl.copy_z_far = copies[i].z_far;
 			if (wl.recorded) {
 				for (int pass = 0; pass < 2; pass++) {
 					const LocalVector<CubeCopy> *list = pass == 0 ? &copies : previous;
@@ -329,6 +331,9 @@ void ShadowWatch::watch_lights(const RenderDataRD *p_render_data) {
 		}
 	}
 	previous_copies[atlas.get_id()] = copies;
+	for (const CubeCopy &copy : copies) {
+		render.copy_params.push_back({ copy.world_position, copy.z_near, copy.z_far });
+	}
 
 	RD *rd = RD::get_singleton();
 	UniformSetCacheRD *uniform_set_cache = UniformSetCacheRD::get_singleton();
@@ -510,7 +515,31 @@ String ShadowWatch::_history(const LocalVector<LightSample *> &p_history) const 
 	return text;
 }
 
-String ShadowWatch::_copy_verdict(const LightSample &p_sample, const WatchedLight &p_light, int p_half) const {
+void ShadowWatch::_expected_copy_header(const WatchedLight &p_light, int p_half, float r_header[6]) {
+	// As CopyEffects::copy_cubemap_to_dp() sets the push constants, and where the first grid point lands.
+	const Rect2i &rect = p_light.half_rect[p_half];
+	r_header[0] = p_light.copy_z_far;
+	r_header[1] = p_light.copy_z_near;
+	r_header[2] = (1.0f / float(rect.size.width)) * (p_half == 1 ? -1.0f : 1.0f);
+	r_header[3] = 1.0f / float(rect.size.height);
+	r_header[4] = float(rect.position.x + rect.size.width / 64) + 0.5f;
+	r_header[5] = float(rect.position.y + rect.size.height / 64) + 0.5f;
+}
+
+bool ShadowWatch::_copy_params_as_given(const LightSample &p_sample, const WatchedLight &p_light, int p_half) {
+	float expected[6];
+	_expected_copy_header(p_light, p_half, expected);
+	for (int w = 0; w < 6; w++) {
+		float got;
+		memcpy(&got, &p_sample.header[p_half][w], sizeof(float));
+		if (got != expected[w]) {
+			return false;
+		}
+	}
+	return true;
+}
+
+String ShadowWatch::_copy_verdict(const LightSample &p_sample, const WatchedLight &p_light, const WatchedRender &p_render, int p_half) const {
 	if (!p_sample.recorded) {
 		return "Its copy left no record (more than 16 copies in the view): no verdict.";
 	}
@@ -519,10 +548,28 @@ String ShadowWatch::_copy_verdict(const LightSample &p_sample, const WatchedLigh
 	}
 	const uint32_t points = 1024;
 	String text;
+	float expected[6];
+	_expected_copy_header(p_light, p_half, expected);
+	float got[6];
+	memcpy(got, p_sample.header[p_half], sizeof(got));
+	if (!_copy_params_as_given(p_sample, p_light, p_half)) {
+		text = vformat("The copy of half %d RAN WITH OTHER CONSTANTS than it was given: z_far %.4f (given %.4f), z_near %.4f (given %.4f), texel size (%.6f, %.6f) (given (%.6f, %.6f)), first point at (%.1f, %.1f) (expected (%.1f, %.1f)).",
+				p_half, got[0], expected[0], got[1], expected[1], got[2], got[3], expected[2], expected[3], got[4], got[5], expected[4], expected[5]);
+		String owners;
+		for (const CopyParams &params : p_render.copy_params) {
+			if (params.z_far == got[0] && params.z_near == got[1] && !params.world_position.is_equal_approx(p_light.world_position)) {
+				owners += vformat(" (%.2f, %.2f, %.2f)", params.world_position.x, params.world_position.y, params.world_position.z);
+			}
+		}
+		text += owners.is_empty() ? " No other copy of this view was given that z_far and z_near. " : " That z_far and z_near were given to the copies of the omni lights at" + owners + ". ";
+	}
+	if (got[0] == expected[0] && got[1] == expected[1] && got[2] == expected[2] && got[3] == expected[3] && (got[4] != expected[4] || got[5] != expected[5])) {
+		text += "Its constants are right but it drew elsewhere than its region. ";
+	}
 	if (p_sample.write_diff[p_half] * 50 > points) {
-		text = vformat("The copy of half %d wrote other depth than the atlas now holds at %d of %d points: the half was written over after the copy. ", p_half, p_sample.write_diff[p_half], points);
+		text += vformat("The copy of half %d wrote other depth than the atlas now holds at %d of %d points: the half was written over after the copy. ", p_half, p_sample.write_diff[p_half], points);
 	} else {
-		text = vformat("The atlas half %d holds what its copy wrote. ", p_half);
+		text += vformat("The atlas half %d holds what its copy wrote. ", p_half);
 	}
 	if (p_sample.checked[p_half] == 0) {
 		return text + "Its cubemap was reused by a later copy, so what the copy read cannot be checked.";
@@ -579,6 +626,9 @@ void ShadowWatch::_analyze(const WatchedRender &p_render, uint64_t p_serial, con
 			s->stale[h] = half[70] != 0;
 			for (uint32_t k = 0; k < MAX_CANDIDATES; k++) {
 				s->matches[h][k] = half[72 + k];
+			}
+			for (uint32_t w = 0; w < 6; w++) {
+				s->header[h][w] = half[80 + w];
 			}
 		}
 
@@ -648,9 +698,10 @@ void ShadowWatch::_analyze(const WatchedRender &p_render, uint64_t p_serial, con
 		for (int h = 0; h < 2; h++) {
 			const bool cube_mismatch = s->checked[h] > 0 && s->mismatch[h] * 50 > s->checked[h];
 			const bool record_problem = s->recorded && (s->stale[h] || s->write_diff[h] * 50 > 1024);
-			if ((cube_mismatch || record_problem) && _may_report(REPORT_COPY + uint64_t(h) * 16, wl.light)) {
-				String what = cube_mismatch ? vformat("atlas half %d does not match the cubemap it was copied from at %d of %d samples", h, s->mismatch[h], s->checked[h]) : vformat("atlas half %d is not what its copy wrote", h);
-				print_line(vformat("ShadowWatch: [COPY] %s: %s.\n  => %s%s", _light_name(wl, p_render), what, _copy_verdict(*s, wl, h), _history(history)));
+			const bool params_problem = s->recorded && !s->stale[h] && !_copy_params_as_given(*s, wl, h);
+			if ((cube_mismatch || record_problem || params_problem) && _may_report(REPORT_COPY + uint64_t(h) * 16, wl.light)) {
+				String what = cube_mismatch ? vformat("atlas half %d does not match the cubemap it was copied from at %d of %d samples", h, s->mismatch[h], s->checked[h]) : (record_problem ? vformat("atlas half %d is not what its copy wrote", h) : vformat("the copy of atlas half %d ran with other constants than it was given", h));
+				print_line(vformat("ShadowWatch: [COPY] %s: %s.\n  => %s%s", _light_name(wl, p_render), what, _copy_verdict(*s, wl, p_render, h), _history(history)));
 			}
 			// Against the view's previous render only: in a render this watch skipped, the light may have been redrawn.
 			if (prev && prev->serial == previous_render && !s->redrawn && prev->half_rect == s->half_rect) {

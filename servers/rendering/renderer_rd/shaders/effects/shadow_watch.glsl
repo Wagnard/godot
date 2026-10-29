@@ -54,13 +54,15 @@ params;
 #define FLAG_FACES 2u
 #define FLAG_ENTRIES 4u
 
-// Per light record, in uints: two halves of 80 (64 block sums, count of 0, count of 1, copy mismatches, copy samples,
-// read differences, write differences, stale record, record present, matches with each candidate), then six faces of
-// 18 (16 block sums, count of 0, count of 1).
-#define HALF_STRIDE 80u
-#define FACES_BASE 160u
+// Per light record, in uints: two halves of 88 (64 block sums, count of 0, count of 1, copy mismatches, copy samples,
+// read differences, write differences, stale record, record present, matches with each candidate, then the copy's
+// header words 1 to 6: the constants it ran with and its first point's position), then six faces of 18 (16 block
+// sums, count of 0, count of 1).
+#define HALF_STRIDE 88u
+#define FACES_BASE 176u
 #define FACE_STRIDE 18u
-#define COPY_HALF_RECORD 2052u
+#define COPY_HALF_RECORD 2056u
+#define COPY_DATA 8u
 
 shared uint zero_count;
 shared uint one_count;
@@ -179,14 +181,14 @@ void main() {
 				uint point = uint(g.y * 32 + g.x);
 				float recorded_read = 0.0;
 				if (has_record && !stale) {
-					recorded_read = uintBitsToFloat(copy_records.data[record + 2u + point * 2u]);
-					float recorded_write = uintBitsToFloat(copy_records.data[record + 3u + point * 2u]);
+					recorded_read = uintBitsToFloat(copy_records.data[record + COPY_DATA + point * 2u]);
+					float recorded_write = uintBitsToFloat(copy_records.data[record + COPY_DATA + 1u + point * 2u]);
 					// The atlas holds what the copy wrote, up to its 16 bit quantization.
 					if (abs(recorded_write - d) > 0.0001) {
 						atomicAdd(write_count, 1u);
 					}
 					for (uint k = 0u; k < params.candidate_count; k++) {
-						float other = uintBitsToFloat(copy_records.data[params.candidates[k] + task * COPY_HALF_RECORD + 2u + point * 2u]);
+						float other = uintBitsToFloat(copy_records.data[params.candidates[k] + task * COPY_HALF_RECORD + COPY_DATA + point * 2u]);
 						if (other == recorded_read) {
 							atomicAdd(match_count[k], 1u);
 						}
@@ -221,6 +223,9 @@ void main() {
 			results.data[base + 71u] = has_record ? 1u : 0u;
 			for (uint k = 0u; k < MAX_CANDIDATES; k++) {
 				results.data[base + 72u + k] = match_count[k];
+			}
+			for (uint w = 1u; w < 7u; w++) {
+				results.data[base + 79u + w] = has_record ? copy_records.data[record + w] : 0u;
 			}
 		}
 		return;
