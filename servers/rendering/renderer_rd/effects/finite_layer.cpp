@@ -31,6 +31,7 @@
 #include "finite_layer.h"
 
 #include "core/object/callable_mp.h"
+#include "core/os/os.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
 #include "servers/rendering/rendering_server_default.h"
@@ -42,11 +43,16 @@ FiniteLayer::Report FiniteLayer::pending_report;
 bool FiniteLayer::has_pending_report = false;
 
 FiniteLayer::FiniteLayer() {
+	// The warning is a diagnostic: off, the copy keeps clearing the invalid texels but counts nothing and reads nothing back.
+	report = OS::get_singleton()->get_environment("GODOT_RR_LAYER_NAN_WARNING") == "1";
+
 	Vector<String> shader_modes;
 	shader_modes.push_back("");
+	shader_modes.push_back("\n#define REPORT_NON_FINITE\n");
 	shader.initialize(shader_modes);
+	shader.set_variant_enabled(report ? 0 : 1, false);
 	shader_version = shader.version_create();
-	pipeline = RD::get_singleton()->compute_pipeline_create(shader.version_get_shader(shader_version, 0));
+	pipeline = RD::get_singleton()->compute_pipeline_create(shader.version_get_shader(shader_version, report ? 1 : 0));
 }
 
 FiniteLayer::~FiniteLayer() {
@@ -91,7 +97,7 @@ void FiniteLayer::process(RID p_source, RID p_dest, const Size2i &p_size) {
 	MaterialStorage *material_storage = MaterialStorage::get_singleton();
 	ERR_FAIL_NULL(material_storage);
 
-	if (stats_buffer.is_null()) {
+	if (report && stats_buffer.is_null()) {
 		stats_buffer = rd->storage_buffer_create(5 * sizeof(uint32_t));
 		_reset_stats();
 		window_frame = 0;
@@ -104,15 +110,25 @@ void FiniteLayer::process(RID p_source, RID p_dest, const Size2i &p_size) {
 	const RID nearest_sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
 	RD::Uniform u_source(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ nearest_sampler, p_source }));
 	RD::Uniform u_dest(RD::UNIFORM_TYPE_IMAGE, 1, p_dest);
-	RD::Uniform u_stats(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, stats_buffer);
-	const RID layer_shader = shader.version_get_shader(shader_version, 0);
+	const RID layer_shader = shader.version_get_shader(shader_version, report ? 1 : 0);
+	RID uniform_set;
+	if (report) {
+		RD::Uniform u_stats(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, stats_buffer);
+		uniform_set = uniform_set_cache->get_cache(layer_shader, 0, u_source, u_dest, u_stats);
+	} else {
+		uniform_set = uniform_set_cache->get_cache(layer_shader, 0, u_source, u_dest);
+	}
 
 	RD::ComputeListID compute_list = rd->compute_list_begin();
 	rd->compute_list_bind_compute_pipeline(compute_list, pipeline);
-	rd->compute_list_bind_uniform_set(compute_list, uniform_set_cache->get_cache(layer_shader, 0, u_source, u_dest, u_stats), 0);
+	rd->compute_list_bind_uniform_set(compute_list, uniform_set, 0);
 	rd->compute_list_set_push_constant(compute_list, &push_constant, sizeof(PushConstant));
 	rd->compute_list_dispatch_threads(compute_list, p_size.x, p_size.y, 1);
 	rd->compute_list_end();
+
+	if (!report) {
+		return;
+	}
 
 	// The statistics add up over the window, so that no burst between two reads is missed; then 20 bytes come back
 	// asynchronously and the counters start again (the render graph orders the reset after the read).

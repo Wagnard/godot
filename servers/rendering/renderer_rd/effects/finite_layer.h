@@ -37,9 +37,10 @@
 namespace RendererRD {
 
 /// Copies a layer of premultiplied contributions (the path tracer's DLSS-RR transparency layer) with its NaN and Inf
-/// texels cleared to 0, and counts them: RR composites that layer and keeps the result in its history, where a single
-/// invalid texel spread into a black area. The count and the rectangle they cover accumulate on the GPU over a window of
-/// frames and are read back asynchronously (20 bytes), so that the renderer can warn and name the effects drawn there.
+/// texels cleared to 0: RR composites that layer and keeps the result in its history, where a single invalid texel
+/// spread into a black area. With GODOT_RR_LAYER_NAN_WARNING=1 it also counts them: the count and the rectangle they
+/// cover accumulate on the GPU over a window of frames and are read back asynchronously (20 bytes), so that the renderer
+/// can warn and name the effects drawn there.
 class FiniteLayer {
 public:
 	struct Report {
@@ -61,6 +62,7 @@ private:
 	RID pipeline;
 	RID stats_buffer;
 	uint32_t window_frame = 0;
+	bool report = false; // GODOT_RR_LAYER_NAN_WARNING=1.
 
 	static Mutex report_mutex;
 	static Report pending_report;
@@ -72,7 +74,7 @@ private:
 public:
 	/// Copies p_source into p_dest (RGBA16F, storage) over p_size, clearing non-finite texels.
 	void process(RID p_source, RID p_dest, const Size2i &p_size);
-	/// The last window's report when non-finite texels were found, once.
+	/// The last window's report when non-finite texels were found, once (only with GODOT_RR_LAYER_NAN_WARNING=1).
 	static bool take_report(Report &r_report);
 
 	FiniteLayer();
