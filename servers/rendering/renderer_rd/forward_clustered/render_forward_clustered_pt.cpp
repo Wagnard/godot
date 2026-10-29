@@ -630,6 +630,17 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 				layer_params.rr_transparency_layer = true;
 				const Vector<Color> transparent_black = { Color(0, 0, 0, 0) };
 				_render_list_with_draw_list(&layer_params, layer_framebuffer, RD::DRAW_CLEAR_COLOR_0, transparent_black, 0.0f, 0u, p_render_data->render_region);
+
+				// RR composites the layer over its output and keeps the result in its history: a NaN or Inf an effect's
+				// shader computes there became a black area that spread as the camera moved (godot3d's fights with
+				// skeleton archers and mages). In the noisy color the same texel stays a local black spot. An invalid
+				// texel adds and covers nothing, so it is cleared to 0 in the copy RR reads.
+				if (!rb->has_texture(RB_SCOPE_DLSS_RR, SNAME("transparency_layer_finite"))) {
+					rb->create_texture(RB_SCOPE_DLSS_RR, SNAME("transparency_layer_finite"), rb->get_base_data_format(), RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT, RD::TEXTURE_SAMPLES_1);
+				}
+				const RID layer_drawn = rr_transparency_layer;
+				rr_transparency_layer = rb->get_texture(RB_SCOPE_DLSS_RR, SNAME("transparency_layer_finite"));
+				copy_effects->copy_to_rect(layer_drawn, rr_transparency_layer, Rect2i(Point2i(), rb->get_internal_size()), false, false, false, false, false, false, true);
 			}
 		}
 		front_layer_reflection = RID();
@@ -693,11 +704,9 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 // Raytracing methods
 
 bool RenderForwardClusteredPT::_rr_transparency_layer_enabled() {
-	// Off unless GODOT_RR_TRANSPARENCY_LAYER=1: in godot3d, fights with skeleton archers and mages left black areas with
-	// a white glow edge that spread as the camera moved, gone with the layer off. Its cause is not found yet; the
-	// effects stay in RR's noisy input meanwhile.
-	static const bool on = OS::get_singleton()->get_environment("GODOT_RR_TRANSPARENCY_LAYER") == "1";
-	return on;
+	// GODOT_RR_TRANSPARENCY_LAYER=0: the effects stay in RR's noisy input, as before (comparisons).
+	static const bool off = OS::get_singleton()->get_environment("GODOT_RR_TRANSPARENCY_LAYER") == "0";
+	return !off;
 }
 
 bool RenderForwardClusteredPT::_rr_transparency_layer_surface(const GeometryInstanceSurfaceDataCache *p_surf) {
