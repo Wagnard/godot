@@ -38,6 +38,7 @@
 #include "servers/rendering/renderer_rd/effects/fsr2.h"
 #include "servers/rendering/renderer_rd/effects/fsr_frame_generation.h"
 #include "servers/rendering/renderer_rd/effects/motion_vectors_store.h"
+#include "servers/rendering/renderer_rd/effects/shadow_watch.h"
 #include "servers/rendering/renderer_rd/effects/ss_effects.h"
 #include "servers/rendering/renderer_rd/effects/taa.h"
 #include "servers/rendering/renderer_rd/forward_clustered/render_raytracing.h"
@@ -1356,6 +1357,7 @@ protected:
 		CUBE_SHADOW_ALL_FACES = 6,
 	};
 	bool shadow_cube_one_pass = false;
+	RendererRD::ShadowWatch *shadow_watch = nullptr; // Wagnard/godot#1 diagnostic.
 	// The gathered cube lights share one shadow session; each light's cubemap is copied into the atlas right after its
 	// draw list, before the next light reuses the cubemap.
 	bool cube_shadow_batching = false;

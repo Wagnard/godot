@@ -2874,6 +2874,10 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	}
 	bool is_reflection_probe = p_render_data->reflection_probe.is_valid();
 
+	if (shadow_watch) {
+		shadow_watch->begin_render();
+	}
+
 	static const int texture_multisamples[RSE::VIEWPORT_MSAA_MAX] = { 1, 2, 4, 8 };
 
 	//first of all, make a new render pass
@@ -3326,6 +3330,10 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	}
 	_pre_opaque_render(p_render_data, using_ssao, using_ssil, using_ssr, using_sdfgi || using_voxelgi, normal_roughness_views, rb_data.is_valid() && rb_data->has_voxelgi() ? rb_data->get_voxelgi() : RID());
 
+	if (shadow_watch) {
+		shadow_watch->watch_lights(p_render_data);
+	}
+
 	if (current_cluster_builder) {
 		base_specialization.cluster_has_area_light = current_cluster_builder->get_cluster_count_by_type(ClusterBuilderRD::ELEMENT_TYPE_AREA_LIGHT) != 0;
 	}
@@ -3593,6 +3601,10 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	}
 
 	RD::get_singleton()->draw_command_end_label();
+
+	if (shadow_watch) {
+		shadow_watch->watch_screen(p_render_data, rb->get_depth_texture(), rb->get_internal_texture());
+	}
 
 	RD::get_singleton()->draw_command_begin_label("Copy Framebuffer for SSIL/SSR");
 	if (using_ssil || using_ssr) {
@@ -4882,6 +4894,9 @@ void RenderForwardClustered::_render_shadow_cube_copy(const CubeShadowCopy &p_co
 	copy_effects->copy_cubemap_to_dp(p_copy.cubemap, p_copy.atlas_fb, atlas_rect_norm, p_copy.atlas_rect.size, p_copy.z_near, p_copy.z_far, false);
 	atlas_rect_norm.position += Vector2(p_copy.dual_paraboloid_offset) * atlas_rect_norm.size;
 	copy_effects->copy_cubemap_to_dp(p_copy.cubemap, p_copy.atlas_fb, atlas_rect_norm, p_copy.atlas_rect.size, p_copy.z_near, p_copy.z_far, true);
+	if (shadow_watch) {
+		shadow_watch->cube_copied(p_copy.light, p_copy.cubemap, p_copy.z_near, p_copy.z_far);
+	}
 
 	// Restore transform so it can be properly used.
 	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
@@ -7411,6 +7426,9 @@ RenderForwardClustered::RenderForwardClustered() {
 	shadow_cube_one_pass = scene_shader.is_cube_layered_shader_group_enabled();
 #endif
 	cube_shadow_instances.set_page_pool(&cube_shadow_instance_pool);
+	if (RendererRD::ShadowWatch::is_enabled()) {
+		shadow_watch = memnew(RendererRD::ShadowWatch);
+	}
 
 	/* shadow sampler */
 	{
@@ -7515,6 +7533,10 @@ RenderForwardClustered::~RenderForwardClustered() {
 	parallel_helpers_stop.set();
 	_parallel_release_groups(true);
 
+	if (shadow_watch) {
+		memdelete(shadow_watch);
+		shadow_watch = nullptr;
+	}
 	cube_shadow_instances.reset();
 	cube_shadow_instance_pool.reset();
 
