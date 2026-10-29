@@ -18,7 +18,6 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 #define FLAG_COPY_ALL_SOURCE (1 << 7)
 #define FLAG_ALPHA_TO_ONE (1 << 8)
 #define FLAG_SANITIZE_INF_NAN (1 << 9)
-#define FLAG_SANITIZE_INF_NAN_TO_ZERO (1 << 10)
 
 layout(push_constant, std430) uniform Params {
 	ivec4 section;
@@ -234,13 +233,6 @@ void main() {
 	if (bool(params.flags & FLAG_SANITIZE_INF_NAN)) {
 		color = mix(color, vec4(100.0, 100.0, 100.0, 1.0), isinf(color));
 		color = mix(color, vec4(100.0, 100.0, 100.0, 1.0), isnan(color));
-	}
-	if (bool(params.flags & FLAG_SANITIZE_INF_NAN_TO_ZERO)) {
-		// A layer of premultiplied contributions (the path tracer's DLSS-RR transparency layer): an invalid texel adds
-		// nothing and covers nothing.
-		if (any(isnan(color)) || any(isinf(color))) {
-			color = vec4(0.0);
-		}
 	}
 
 	imageStore(dest_buffer, pos + params.target, color);

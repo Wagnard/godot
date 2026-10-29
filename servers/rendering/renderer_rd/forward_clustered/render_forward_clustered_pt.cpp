@@ -640,7 +640,15 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 				}
 				const RID layer_drawn = rr_transparency_layer;
 				rr_transparency_layer = rb->get_texture(RB_SCOPE_DLSS_RR, SNAME("transparency_layer_finite"));
-				copy_effects->copy_to_rect(layer_drawn, rr_transparency_layer, Rect2i(Point2i(), rb->get_internal_size()), false, false, false, false, false, false, true);
+				if (!finite_layer) {
+					finite_layer = memnew(RendererRD::FiniteLayer);
+				}
+				finite_layer->process(layer_drawn, rr_transparency_layer, rb->get_internal_size());
+				// A shader computing NaN or Inf is a bug of that shader: say so, with the effects drawn where they were.
+				RendererRD::FiniteLayer::Report report;
+				if (RendererRD::FiniteLayer::take_report(report)) {
+					_warn_non_finite_layer(p_render_data, report, lit_count, alpha_count);
+				}
 			}
 		}
 		front_layer_reflection = RID();
@@ -702,6 +710,54 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 }
 
 // Raytracing methods
+
+void RenderForwardClusteredPT::_warn_non_finite_layer(const RenderDataRD *p_render_data, const RendererRD::FiniteLayer::Report &p_report, uint32_t p_from, uint32_t p_to) {
+	// At most one warning every 2 seconds: a broken effect on screen reports every window.
+	static uint64_t last_warning_usec = 0;
+	const uint64_t now = OS::get_singleton()->get_ticks_usec();
+	if (last_warning_usec != 0 && now - last_warning_usec < 2000000) {
+		return;
+	}
+	last_warning_usec = now;
+
+	// The layer's effects drawn this frame whose screen rectangle meets the report's: the candidates (a report comes a
+	// few frames after the texels were found, and an effect lasts longer than that).
+	const Ref<RenderSceneBuffersRD> rb = p_render_data->render_buffers;
+	const Size2i size = rb->get_internal_size();
+	const Projection view_projection = p_render_data->scene_data->cam_projection * Projection(p_render_data->scene_data->cam_transform.affine_inverse());
+	Vector<String> candidates;
+	for (uint32_t i = p_from; i < p_to && candidates.size() < 8; i++) {
+		const GeometryInstanceSurfaceDataCache *surf = render_list[RENDER_LIST_ALPHA].elements[i];
+		const AABB &aabb = surf->owner->transformed_aabb;
+		Rect2 ndc;
+		bool behind = false;
+		for (int corner = 0; corner < 8; corner++) {
+			const Vector4 clip = view_projection.xform(Vector4(aabb.get_endpoint(corner).x, aabb.get_endpoint(corner).y, aabb.get_endpoint(corner).z, 1.0));
+			if (clip.w <= 0.0) {
+				behind = true; // Crosses the camera plane: it may cover anything.
+				break;
+			}
+			const Vector2 p(clip.x / clip.w, clip.y / clip.w);
+			ndc = corner == 0 ? Rect2(p, Vector2()) : ndc.expand(p);
+		}
+		bool overlaps = behind;
+		if (!behind) {
+			// NDC y points up, the layer's rows go down.
+			const Rect2i pixels(Point2i(Math::floor((ndc.position.x * 0.5 + 0.5) * size.x), Math::floor((0.5 - (ndc.position.y + ndc.size.y) * 0.5) * size.y)),
+					Size2i(Math::ceil(ndc.size.x * 0.5 * size.x) + 1, Math::ceil(ndc.size.y * 0.5 * size.y) + 1));
+			overlaps = pixels.intersects(p_report.rect);
+		}
+		if (overlaps) {
+			const String path = surf->shader && !surf->shader->path.is_empty() ? surf->shader->path : String("<built-in or unnamed shader>");
+			if (!candidates.has(path)) {
+				candidates.push_back(path);
+			}
+		}
+	}
+	WARN_PRINT(vformat("Path tracing: %d texel(s) of the DLSS-RR transparency layer were NaN or Inf over the 8 frames to frame %d, in pixels (%d, %d)-(%d, %d) of %dx%d, cleared to 0. A shader computes an invalid value (pow() of a negative number, sqrt() of a negative number, 0/0, ...). Effects drawn there: %s.",
+			p_report.count, int64_t(p_report.frame), p_report.rect.position.x, p_report.rect.position.y, p_report.rect.get_end().x - 1, p_report.rect.get_end().y - 1, size.x, size.y,
+			candidates.is_empty() ? String("none found this frame") : String(", ").join(candidates)));
+}
 
 bool RenderForwardClusteredPT::_rr_transparency_layer_enabled() {
 	// GODOT_RR_TRANSPARENCY_LAYER=0: the effects stay in RR's noisy input, as before (comparisons).
@@ -907,5 +963,8 @@ RenderForwardClusteredPT::RenderForwardClusteredPT() {
 RenderForwardClusteredPT::~RenderForwardClusteredPT() {
 	if (raytracing) {
 		memdelete(raytracing);
+	}
+	if (finite_layer) {
+		memdelete(finite_layer);
 	}
 }
