@@ -6124,6 +6124,9 @@ RDD::PipelineID RenderingDeviceDriverD3D12::render_pipeline_create(
 			bd.DestBlendAlpha = RD_TO_D3D12_BLEND_FACTOR[bs.dst_alpha_blend_factor];
 			bd.BlendOpAlpha = RD_TO_D3D12_BLEND_OP[bs.alpha_blend_op];
 
+			// The stream's BlendState starts as CD3DX12_BLEND_DESC(D3D12_DEFAULT), every channel writable: the mask is built
+			// from nothing, or a channel left out (write_a = false) would still be written.
+			bd.RenderTargetWriteMask = 0;
 			if (bs.write_r) {
 				bd.RenderTargetWriteMask |= D3D12_COLOR_WRITE_ENABLE_RED;
 			}
