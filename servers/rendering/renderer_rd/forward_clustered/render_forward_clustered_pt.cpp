@@ -671,6 +671,10 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 				static const bool rasterized_guides_off = OS::get_singleton()->get_environment("GODOT_RR_RASTERIZED_GUIDES") == "0";
 				if (raytracing && raytracing->dlss_rr_has_buffers(rb.ptr()) && !rasterized_guides_off) {
 					RENDER_TIMESTAMP("Rasterized Cards RR Guides");
+					// The material pass' variants are in the advanced group, which the motion vectors enable. RR's buffers follow
+					// the Environment, not the viewport's scaling: on the first frame of a map, before DLSS, the group could
+					// be off and the pipeline fell on a placeholder ("Pre-raster shader is not provided", once).
+					scene_shader.enable_advanced_shader_group(p_render_data->scene_data->view_count > 1);
 					const RD::DataFormat material_formats[6] = { RD::DATA_FORMAT_R8G8B8A8_UNORM, RD::DATA_FORMAT_R8G8B8A8_UNORM, RD::DATA_FORMAT_R8G8B8A8_UNORM, RD::DATA_FORMAT_R16G16B16A16_SFLOAT, RD::DATA_FORMAT_R32_SFLOAT, RD::DATA_FORMAT_D32_SFLOAT };
 					const StringName material_names[6] = { SNAME("rasterized_albedo"), SNAME("rasterized_normal"), SNAME("rasterized_orm"), SNAME("rasterized_emission"), SNAME("rasterized_view_depth"), SNAME("rasterized_depth") };
 					RID material_textures[6];
