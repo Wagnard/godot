@@ -6112,7 +6112,8 @@ RDD::PipelineID RenderingDeviceDriverD3D12::render_pipeline_create(
 			const PipelineColorBlendState::Attachment &bs = p_blend_state.attachments[i];
 			D3D12_RENDER_TARGET_BLEND_DESC &bd = (&pipeline_desc.BlendState)->RenderTarget[i];
 
-			bd.BlendEnable = bs.enable_blend;
+			// A logic op replaces blending (Vulkan ignores blendEnable then), and D3D12 requires BlendEnable to be FALSE with it.
+			bd.BlendEnable = bs.enable_blend && !p_blend_state.enable_logic_op;
 			bd.LogicOpEnable = p_blend_state.enable_logic_op;
 			bd.LogicOp = RD_TO_D3D12_LOGIC_OP[p_blend_state.logic_op];
 
@@ -6141,7 +6142,14 @@ RDD::PipelineID RenderingDeviceDriverD3D12::render_pipeline_create(
 			}
 
 			if (i > 0 && all_attachments_same_blend) {
-				all_attachments_same_blend = &(&pipeline_desc.BlendState)->RenderTarget[i] == &(&pipeline_desc.BlendState)->RenderTarget[0];
+				// Compared field by field: this compared the two addresses, so any pipeline with several attachments used
+				// independent blending, and refused a logic op.
+				const D3D12_RENDER_TARGET_BLEND_DESC &bd0 = (&pipeline_desc.BlendState)->RenderTarget[0];
+				all_attachments_same_blend = bd.BlendEnable == bd0.BlendEnable && bd.LogicOpEnable == bd0.LogicOpEnable &&
+						bd.SrcBlend == bd0.SrcBlend && bd.DestBlend == bd0.DestBlend && bd.BlendOp == bd0.BlendOp &&
+						bd.SrcBlendAlpha == bd0.SrcBlendAlpha && bd.DestBlendAlpha == bd0.DestBlendAlpha &&
+						bd.BlendOpAlpha == bd0.BlendOpAlpha && bd.LogicOp == bd0.LogicOp &&
+						bd.RenderTargetWriteMask == bd0.RenderTargetWriteMask;
 			}
 		}
 
