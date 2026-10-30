@@ -1369,10 +1369,14 @@ void ParticlesStorage::_particles_update_buffers(Particles *particles) {
 	bool index_draw_order = particles->draw_order == RSE::ParticlesDrawOrder::PARTICLES_DRAW_ORDER_INDEX;
 	bool enable_motion_vectors = uses_motion_vectors && index_draw_order && !particles->instance_motion_vectors_enabled;
 	bool only_instances_changed = false;
+	// The instance buffer is re-created below while geometry instances may still hold the transforms uniform set that
+	// was freed with the previous one: they must fetch it again.
+	bool buffers_changed = false;
 
 	if (userdata_count != particles->userdata_count) {
 		// Mismatch userdata, re-create all buffers.
 		_particles_free_data(particles);
+		buffers_changed = true;
 	} else if (enable_motion_vectors) {
 		// Only motion vectors are required, release the transforms buffer and uniform set.
 		if (particles->particle_instance_buffer.is_valid()) {
@@ -1382,6 +1386,16 @@ void ParticlesStorage::_particles_update_buffers(Particles *particles) {
 
 		particles->particles_transforms_buffer_uniform_set = RID();
 		only_instances_changed = true;
+	} else if (particles->particle_buffer.is_valid() && !RD::get_singleton()->uniform_set_is_valid(particles->particles_copy_uniform_set)) {
+		// The copy uniform set is gone while the buffers were kept: re-create it, with the instance buffer it depends on.
+		WARN_PRINT_ONCE("The copy uniform set of GPU particles was freed while their buffers were kept. Re-creating it.");
+		if (particles->particle_instance_buffer.is_valid()) {
+			RD::get_singleton()->free_rid(particles->particle_instance_buffer);
+			particles->particle_instance_buffer = RID();
+		}
+
+		particles->particles_transforms_buffer_uniform_set = RID();
+		buffers_changed = true;
 	} else if (!particles->particle_buffer.is_null()) {
 		// No operation is required because a buffer already exists, return early.
 		return;
@@ -1436,7 +1450,9 @@ void ParticlesStorage::_particles_update_buffers(Particles *particles) {
 		particles->instance_motion_vectors_previous_offset = 0;
 		particles->instance_motion_vectors_last_change = -1;
 
-		if (only_instances_changed) {
+		if (buffers_changed) {
+			particles->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_PARTICLES);
+		} else if (only_instances_changed) {
 			// Notify the renderer the instances uniform must be retrieved again, as it's the only element that has been changed because motion vectors were enabled.
 			particles->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_PARTICLES_INSTANCES);
 		}
@@ -1532,7 +1548,7 @@ void ParticlesStorage::update_particles() {
 				particles->trail_bind_poses_dirty = true;
 			}
 
-			if (particles->trail_bind_pose_uniform_set.is_null()) {
+			if (!RD::get_singleton()->uniform_set_is_valid(particles->trail_bind_pose_uniform_set)) {
 				Vector<RD::Uniform> uniforms;
 				{
 					RD::Uniform u;

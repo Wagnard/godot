@@ -7771,6 +7771,14 @@ void RenderingDevice::compute_list_dispatch(ComputeListID p_list, uint32_t p_x_g
 		}
 	}
 #endif
+	// A set the pipeline expects that was never bound (its bind failed) or was freed since is not dispatched with: the
+	// release build has no format check above, and the bind loop below would dereference it.
+	for (uint32_t i = 0; i < compute_list.state.set_count; i++) {
+		if (compute_list.state.sets[i].pipeline_expected_format != 0 && !compute_list.state.sets[i].bound) {
+			ERR_FAIL_NULL_MSG(uniform_set_owner.get_or_null(compute_list.state.sets[i].uniform_set), vformat("Uniform set (%d) required by the compute pipeline was not supplied or was freed before the dispatch. The dispatch is skipped.", i));
+		}
+	}
+
 	thread_local LocalVector<RDD::UniformSetID> valid_descriptor_ids;
 	valid_descriptor_ids.clear();
 	valid_descriptor_ids.resize(compute_list.state.set_count);
@@ -7914,6 +7922,13 @@ void RenderingDevice::compute_list_dispatch_indirect(ComputeListID p_list, RID p
 		}
 	}
 #endif
+	// See compute_list_dispatch().
+	for (uint32_t i = 0; i < compute_list.state.set_count; i++) {
+		if (compute_list.state.sets[i].pipeline_expected_format != 0 && !compute_list.state.sets[i].bound) {
+			ERR_FAIL_NULL_MSG(uniform_set_owner.get_or_null(compute_list.state.sets[i].uniform_set), vformat("Uniform set (%d) required by the compute pipeline was not supplied or was freed before the dispatch. The dispatch is skipped.", i));
+		}
+	}
+
 	thread_local LocalVector<RDD::UniformSetID> valid_descriptor_ids;
 	valid_descriptor_ids.clear();
 	valid_descriptor_ids.resize(compute_list.state.set_count);
