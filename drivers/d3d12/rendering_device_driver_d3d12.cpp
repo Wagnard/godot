@@ -3220,11 +3220,28 @@ void RenderingDeviceDriverD3D12::command_buffer_end(CommandBufferID p_cmd_buffer
 }
 
 void RenderingDeviceDriverD3D12::command_buffer_execute_secondary(CommandBufferID p_cmd_buffer, VectorView<CommandBufferID> p_secondary_cmd_buffers) {
-	const CommandBufferInfo *cmd_buf_info = (const CommandBufferInfo *)p_cmd_buffer.id;
+	CommandBufferInfo *cmd_buf_info = (CommandBufferInfo *)p_cmd_buffer.id;
 	for (uint32_t i = 0; i < p_secondary_cmd_buffers.size(); i++) {
 		const CommandBufferInfo *secondary_cb_info = (const CommandBufferInfo *)p_secondary_cmd_buffers[i].id;
 		cmd_buf_info->cmd_list->ExecuteBundle(secondary_cb_info->cmd_list.Get());
 	}
+
+	// "Any state that is set within a bundle (the PSO itself, non-PSO-based state, and resource bindings) affects the
+	// state of its parent direct command list" (Managing Graphics Pipeline State in Direct3D 12, Graphics pipeline
+	// state inheritance). The bundles left their own PSO, root signatures and dynamic state bound here: what this list
+	// remembers having bound is no longer so, and a bind skipped on it would leave theirs. Wagnard/godot#1: a cube shadow
+	// copy after the shadow pass's bundles skipped its root signature (the remembered one was its own), so its push
+	// constants went to the bundle's root signature and it ran with a previous copy's.
+	// The descriptor heaps stay: a bundle must use its parent's (Creating and recording command lists and bundles,
+	// Bundle restrictions).
+	cmd_buf_info->graphics_pso = nullptr;
+	cmd_buf_info->compute_pso = nullptr;
+	cmd_buf_info->raytracing_pso = nullptr;
+	cmd_buf_info->graphics_root_signature_crc = 0;
+	cmd_buf_info->compute_root_signature_crc = 0;
+	cmd_buf_info->nir_graphics_runtime_data_root_param_idx = UINT32_MAX;
+	cmd_buf_info->nir_compute_runtime_data_root_param_idx = UINT32_MAX;
+	cmd_buf_info->pending_dyn_params = true;
 }
 
 /********************/
