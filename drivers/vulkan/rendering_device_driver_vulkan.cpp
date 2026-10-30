@@ -1675,7 +1675,17 @@ Error RenderingDeviceDriverVulkan::_initialize_device(const LocalVector<VkDevice
 		}
 
 		// GODOT_VK_DEFERRED_PIPELINES=0: ray tracing pipelines compiled by one synchronous call, as before (comparisons).
-		if (enabled_device_extension_names.has(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME) && OS::get_singleton()->get_environment("GODOT_VK_DEFERRED_PIPELINES") != "0") {
+		// Intel: synchronous by default, a driver defect (INTEL-VK-DEFERRED-RT-PIPELINES-WA.md): Intel's shader compiler
+		// (igc_default64.dll, Arc B580) crashed at igc_default64+0x2727bcd, 2 minidumps, every time a deferred operation
+		// compiled the path tracer's NRD ReBLUR variant; compiled by one call, the same pipeline works.
+		// GODOT_VK_DEFERRED_PIPELINES=1 brings deferred operations back there (to retest a newer driver).
+		const String deferred_pipelines = OS::get_singleton()->get_environment("GODOT_VK_DEFERRED_PIPELINES");
+		bool use_deferred_pipelines = deferred_pipelines != "0";
+		if (use_deferred_pipelines && physical_device_properties.vendorID == RenderingContextDriver::Vendor::VENDOR_INTEL && deferred_pipelines != "1") {
+			use_deferred_pipelines = false;
+			print_verbose("Vulkan: ray tracing pipelines compiled without deferred host operations on Intel (a driver defect, INTEL-VK-DEFERRED-RT-PIPELINES-WA); GODOT_VK_DEFERRED_PIPELINES=1 uses them.");
+		}
+		if (enabled_device_extension_names.has(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME) && use_deferred_pipelines) {
 			device_functions.CreateDeferredOperationKHR = PFN_vkCreateDeferredOperationKHR(functions.GetDeviceProcAddr(vk_device, "vkCreateDeferredOperationKHR"));
 			device_functions.DestroyDeferredOperationKHR = PFN_vkDestroyDeferredOperationKHR(functions.GetDeviceProcAddr(vk_device, "vkDestroyDeferredOperationKHR"));
 			device_functions.GetDeferredOperationMaxConcurrencyKHR = PFN_vkGetDeferredOperationMaxConcurrencyKHR(functions.GetDeviceProcAddr(vk_device, "vkGetDeferredOperationMaxConcurrencyKHR"));
@@ -7365,6 +7375,7 @@ VkResult RenderingDeviceDriverVulkan::_raytracing_pipeline_create_deferred(const
 	// The driver compiles every stage and group of a pipeline in this one call: deferred, the calling thread and as many
 	// WorkerThreadPool threads as the operation can use join it (Vulkan spec, "Deferred Host Operations"; NVIDIA's ray
 	// tracing best practices). Everything it reads stays alive here until it is complete.
+	const uint64_t start_usec = OS::get_singleton()->get_ticks_usec();
 	VkDeferredOperationKHR operation = VK_NULL_HANDLE;
 	WorkerThreadPool *pool = WorkerThreadPool::get_singleton();
 	if (device_functions.CreateDeferredOperationKHR && pool && pool->get_thread_count() > 1) {
@@ -7374,6 +7385,7 @@ VkResult RenderingDeviceDriverVulkan::_raytracing_pipeline_create_deferred(const
 	}
 	VkResult err = device_functions.CreateRaytracingPipelinesKHR(vk_device, operation, pipelines_cache.vk_cache, 1, &p_create_info, nullptr, r_pipeline);
 	if (operation == VK_NULL_HANDLE) {
+		print_verbose(vformat("Vulkan: raytracing pipeline of %d stages, %d groups compiled by one call in %d ms.", p_create_info.stageCount, p_create_info.groupCount, (OS::get_singleton()->get_ticks_usec() - start_usec) / 1000));
 		return err;
 	}
 	if (err == VK_OPERATION_DEFERRED_KHR) {
@@ -7399,6 +7411,7 @@ VkResult RenderingDeviceDriverVulkan::_raytracing_pipeline_create_deferred(const
 		err = VK_SUCCESS;
 	}
 	device_functions.DestroyDeferredOperationKHR(vk_device, operation, nullptr);
+	print_verbose(vformat("Vulkan: raytracing pipeline of %d stages, %d groups compiled deferred in %d ms.", p_create_info.stageCount, p_create_info.groupCount, (OS::get_singleton()->get_ticks_usec() - start_usec) / 1000));
 	return err;
 }
 
