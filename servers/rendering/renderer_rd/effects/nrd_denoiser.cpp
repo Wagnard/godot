@@ -30,10 +30,38 @@
 
 #include "nrd_denoiser.h"
 
+#include "core/io/marshalls.h"
+
+// A cache file: header, version, the binary's size, the binary (RenderingDevice::shader_compile_binary_from_spirv()).
+static const char *nrd_binary_cache_header = "GDNR";
+static const uint32_t nrd_binary_cache_version = 1;
+
+String RendererRD::NRDDenoiser::get_cache_file_name(const String &p_key, const String &p_api) {
+	return String(CACHE_FOLDER).path_join(p_key + "." + p_api + ".cache");
+}
+
+Vector<uint8_t> RendererRD::NRDDenoiser::make_cache_file(const Vector<uint8_t> &p_binary) {
+	Vector<uint8_t> bytes;
+	bytes.resize(12 + p_binary.size());
+	uint8_t *w = bytes.ptrw();
+	memcpy(w, nrd_binary_cache_header, 4);
+	encode_uint32(nrd_binary_cache_version, w + 4);
+	encode_uint32(p_binary.size(), w + 8);
+	memcpy(w + 12, p_binary.ptr(), p_binary.size());
+	return bytes;
+}
+
 #ifdef NRD_DENOISER_ENABLED
 
+#include "core/crypto/crypto_core.h"
+#include "core/io/dir_access.h"
+#include "core/io/file_access.h"
+#include "core/os/thread.h"
+#include "core/string/string_builder.h"
 #include "core/templates/hash_map.h"
 #include "core/templates/local_vector.h"
+#include "core/version.h"
+#include "servers/rendering/renderer_rd/shader_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_buffer_custom_data_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_scene_buffers_rd.h"
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
@@ -107,12 +135,26 @@ struct NRDPipeline {
 	RID pipeline;
 };
 
+// The binaries of NRD's programs (NRDDenoiser::CACHE_FOLDER), as SceneShaderRaytracing keeps its own.
+struct NRDBinaryCache {
+	// ShaderRD's cache folders: the user's (empty when rendering/shader_compiler/shader_cache/enabled is off) and the
+	// shader baker's in an exported project.
+	String dir;
+	String res_dir;
+	String api;
+
+	void init();
+	Vector<uint8_t> load(const String &p_key) const;
+	void save(const String &p_key, const Vector<uint8_t> &p_binary) const;
+};
+
 struct NRDDenoiser::State {
 	// NRD's pipelines, created at their first dispatch, by shader identifier (the same in every instance).
 	HashMap<String, NRDPipeline> pipelines;
 	NRDPipeline frontend;
 	NRDPipeline backend;
 	RID samplers[2]; // nrd::Sampler: NEAREST_CLAMP, LINEAR_CLAMP.
+	NRDBinaryCache cache;
 };
 
 #define RB_NRD_CONTEXT SNAME("nrd_context")
@@ -233,14 +275,109 @@ static void _store_matrix(float *r_dst, const Projection &p_matrix) {
 	}
 }
 
-static NRDPipeline _create_pipeline(const uint8_t *p_spirv, uint64_t p_size, const String &p_name) {
+// The programs' names, in their binaries and their cache keys.
+static const char *NRD_FRONTEND_NAME = "NRD front end";
+static const char *NRD_BACKEND_NAME = "NRD back end";
+
+static String _pass_name(const String &p_shader_identifier) {
+	return "NRD " + p_shader_identifier.get_slicec('|', 0);
+}
+
+// Keyed by the program's SPIR-V (NRD's version is in it) and the engine's version (RenderingDevice's binary format).
+static String _cache_key(const String &p_name, const uint8_t *p_spirv, uint64_t p_size) {
+	unsigned char hash[32];
+	CryptoCore::sha256(p_spirv, p_size, hash);
+	StringBuilder key;
+	key.append("[GodotVersionNumber]");
+	key.append(GODOT_VERSION_NUMBER);
+	key.append("[GodotVersionHash]");
+	key.append(GODOT_VERSION_HASH);
+	key.append("[Name]");
+	key.append(p_name);
+	key.append("[SPIRV]");
+	key.append(String::hex_encode_buffer(hash, 32));
+	return key.as_string().sha256_text();
+}
+
+void NRDBinaryCache::init() {
+	api = String(RD::get_singleton()->get_device_api_name()).validate_filename().to_lower();
+	const String &user_dir = ShaderRD::get_shader_cache_user_dir();
+	if (!user_dir.is_empty()) {
+		Ref<DirAccess> d = DirAccess::open(user_dir);
+		if (d.is_valid() && (d->dir_exists(NRDDenoiser::CACHE_FOLDER) || d->make_dir(NRDDenoiser::CACHE_FOLDER) == OK)) {
+			dir = user_dir;
+		} else {
+			ERR_PRINT("Can't create the NRD shader cache folder, its shaders will be compiled at every launch: " + user_dir.path_join(NRDDenoiser::CACHE_FOLDER));
+		}
+	}
+	const String &shader_res_dir = ShaderRD::get_shader_cache_res_dir();
+	if (!shader_res_dir.is_empty() && shader_res_dir != user_dir && DirAccess::dir_exists_absolute(shader_res_dir.path_join(NRDDenoiser::CACHE_FOLDER))) {
+		res_dir = shader_res_dir;
+	}
+}
+
+Vector<uint8_t> NRDBinaryCache::load(const String &p_key) const {
+	const String file_name = NRDDenoiser::get_cache_file_name(p_key, api);
+	Ref<FileAccess> f;
+	if (!dir.is_empty()) {
+		f = FileAccess::open(dir.path_join(file_name), FileAccess::READ);
+	}
+	if (f.is_null() && !res_dir.is_empty()) {
+		f = FileAccess::open(res_dir.path_join(file_name), FileAccess::READ);
+	}
+	if (f.is_null()) {
+		return Vector<uint8_t>();
+	}
+	char header[5] = {};
+	f->get_buffer((uint8_t *)header, 4);
+	if (String(header) != nrd_binary_cache_header || f->get_32() != nrd_binary_cache_version) {
+		return Vector<uint8_t>();
+	}
+	const uint32_t size = f->get_32();
+	if (size == 0 || uint64_t(size) > f->get_length() - f->get_position()) {
+		return Vector<uint8_t>();
+	}
+	Vector<uint8_t> binary;
+	binary.resize(size);
+	if (f->get_buffer(binary.ptrw(), size) != size) {
+		return Vector<uint8_t>();
+	}
+	return binary;
+}
+
+void NRDBinaryCache::save(const String &p_key, const Vector<uint8_t> &p_binary) const {
+	if (dir.is_empty() || p_binary.is_empty()) {
+		return;
+	}
+	const String path = dir.path_join(NRDDenoiser::get_cache_file_name(p_key, api));
+	// Written aside, then renamed: a crash while writing leaves no truncated entry.
+	const String temporary_path = path + "." + itos(Thread::get_caller_id()) + ".tmp";
+	{
+		Ref<FileAccess> f = FileAccess::open(temporary_path, FileAccess::WRITE);
+		ERR_FAIL_COND_MSG(f.is_null(), "Can't write the NRD shader cache: " + temporary_path);
+		f->store_buffer(NRDDenoiser::make_cache_file(p_binary));
+	}
+	Ref<DirAccess> d = DirAccess::open(dir);
+	ERR_FAIL_COND(d.is_null());
+	if (d->rename(temporary_path, path) != OK) {
+		d->remove(temporary_path);
+	}
+}
+
+static NRDPipeline _create_pipeline(const NRDBinaryCache &p_cache, const uint8_t *p_spirv, uint64_t p_size, const String &p_name) {
 	RD *rd = RD::get_singleton();
-	RD::ShaderStageSPIRVData stage;
-	stage.shader_stage = RD::SHADER_STAGE_COMPUTE;
-	stage.spirv.resize(p_size);
-	memcpy(stage.spirv.ptrw(), p_spirv, p_size);
-	const Vector<uint8_t> binary = rd->shader_compile_binary_from_spirv({ stage }, p_name);
-	ERR_FAIL_COND_V_MSG(binary.is_empty(), NRDPipeline(), "NRD: could not compile " + p_name + ".");
+	const String key = _cache_key(p_name, p_spirv, p_size);
+	Vector<uint8_t> binary = p_cache.load(key);
+	if (binary.is_empty()) {
+		print_verbose(vformat("NRD: shader cache miss for %s, compiling it.", p_name));
+		RD::ShaderStageSPIRVData stage;
+		stage.shader_stage = RD::SHADER_STAGE_COMPUTE;
+		stage.spirv.resize(p_size);
+		memcpy(stage.spirv.ptrw(), p_spirv, p_size);
+		binary = rd->shader_compile_binary_from_spirv({ stage }, p_name);
+		ERR_FAIL_COND_V_MSG(binary.is_empty(), NRDPipeline(), "NRD: could not compile " + p_name + ".");
+		p_cache.save(key, binary);
+	}
 	NRDPipeline pipeline;
 	pipeline.shader = rd->shader_create_from_bytecode(binary);
 	ERR_FAIL_COND_V_MSG(pipeline.shader.is_null(), NRDPipeline(), "NRD: could not create " + p_name + ".");
@@ -253,6 +390,33 @@ bool NRDDenoiser::is_available() {
 	return true;
 }
 
+void NRDDenoiser::get_bake_programs(LocalVector<BakeProgram> &r_programs) {
+	auto add = [&r_programs](const String &p_name, const uint8_t *p_spirv, uint64_t p_size) {
+		BakeProgram program;
+		program.name = p_name;
+		program.cache_key = _cache_key(p_name, p_spirv, p_size);
+		program.spirv.resize(p_size);
+		memcpy(program.spirv.ptrw(), p_spirv, p_size);
+		r_programs.push_back(program);
+	};
+	add(NRD_FRONTEND_NAME, nrd_frontend_spirv, sizeof(nrd_frontend_spirv));
+	add(NRD_BACKEND_NAME, nrd_backend_spirv, sizeof(nrd_backend_spirv));
+
+	// Every pass denoise() dispatches: an instance's pipelines, as it makes them (no GPU work).
+	const nrd::DenoiserDesc denoiser_desc = { NRD_IDENTIFIER, NRD_DENOISER };
+	nrd::InstanceCreationDesc creation_desc = {};
+	creation_desc.denoisers = &denoiser_desc;
+	creation_desc.denoisersNum = 1;
+	nrd::Instance *instance = nullptr;
+	ERR_FAIL_COND_MSG(nrd::CreateInstance(creation_desc, instance) != nrd::Result::SUCCESS, "NRD: could not create its instance.");
+	const nrd::InstanceDesc &instance_desc = *nrd::GetInstanceDesc(*instance);
+	for (uint32_t i = 0; i < instance_desc.pipelinesNum; i++) {
+		const nrd::PipelineDesc &pipeline_desc = instance_desc.pipelines[i];
+		add(_pass_name(String::utf8(pipeline_desc.shaderIdentifier)), (const uint8_t *)pipeline_desc.computeShaderSPIRV.bytecode, pipeline_desc.computeShaderSPIRV.size);
+	}
+	nrd::DestroyInstance(*instance);
+}
+
 NRDDenoiser::NRDDenoiser() {
 	state = memnew(State);
 	RD *rd = RD::get_singleton();
@@ -263,8 +427,9 @@ NRDDenoiser::NRDDenoiser() {
 	sampler_state.mag_filter = RD::SAMPLER_FILTER_LINEAR;
 	sampler_state.min_filter = RD::SAMPLER_FILTER_LINEAR;
 	state->samplers[int(nrd::Sampler::LINEAR_CLAMP)] = rd->sampler_create(sampler_state);
-	state->frontend = _create_pipeline(nrd_frontend_spirv, sizeof(nrd_frontend_spirv), "NRD front end");
-	state->backend = _create_pipeline(nrd_backend_spirv, sizeof(nrd_backend_spirv), "NRD back end");
+	state->cache.init();
+	state->frontend = _create_pipeline(state->cache, nrd_frontend_spirv, sizeof(nrd_frontend_spirv), NRD_FRONTEND_NAME);
+	state->backend = _create_pipeline(state->cache, nrd_backend_spirv, sizeof(nrd_backend_spirv), NRD_BACKEND_NAME);
 }
 
 NRDDenoiser::~NRDDenoiser() {
@@ -413,7 +578,7 @@ void NRDDenoiser::denoise(RenderSceneBuffersRD *p_render_buffers, const Paramete
 		const String identifier = String::utf8(pipeline_desc.shaderIdentifier);
 		NRDPipeline *pipeline = state->pipelines.getptr(identifier);
 		if (!pipeline) {
-			pipeline = &state->pipelines.insert(identifier, _create_pipeline((const uint8_t *)pipeline_desc.computeShaderSPIRV.bytecode, pipeline_desc.computeShaderSPIRV.size, "NRD " + identifier.get_slicec('|', 0)))->value;
+			pipeline = &state->pipelines.insert(identifier, _create_pipeline(state->cache, (const uint8_t *)pipeline_desc.computeShaderSPIRV.bytecode, pipeline_desc.computeShaderSPIRV.size, _pass_name(identifier)))->value;
 		}
 		ERR_FAIL_COND(pipeline->pipeline.is_null());
 
@@ -527,6 +692,8 @@ struct NRDDenoiser::State {};
 bool NRDDenoiser::is_available() {
 	return false;
 }
+
+void NRDDenoiser::get_bake_programs(LocalVector<BakeProgram> &r_programs) {}
 
 void NRDDenoiser::denoise(RenderSceneBuffersRD *p_render_buffers, const Parameters &p_params) {}
 

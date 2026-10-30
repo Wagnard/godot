@@ -34,7 +34,10 @@
 #include "core/math/transform_3d.h"
 #include "core/math/vector2.h"
 #include "core/math/vector2i.h"
+#include "core/string/ustring.h"
+#include "core/templates/local_vector.h"
 #include "core/templates/rid.h"
+#include "core/templates/vector.h"
 
 class RenderSceneBuffersRD;
 
@@ -70,6 +73,20 @@ public:
 	};
 
 	static bool is_available();
+
+	// The binaries of NRD's programs are kept under the shader cache (CACHE_FOLDER), keyed by their SPIR-V: on D3D12 each one
+	// would otherwise be translated to DXIL again at every launch. The shader baker (ShaderBakerExportPlugin) writes the same
+	// files for an exported project. They are NRD's object code, inside the application: allowed by its licence.
+	static constexpr const char *CACHE_FOLDER = "NRDDenoiser";
+	struct BakeProgram {
+		String name;
+		String cache_key;
+		Vector<uint8_t> spirv; // A compute shader.
+	};
+	// Every program a denoise() may build, none without NRD.
+	static void get_bake_programs(LocalVector<BakeProgram> &r_programs);
+	static String get_cache_file_name(const String &p_key, const String &p_api);
+	static Vector<uint8_t> make_cache_file(const Vector<uint8_t> &p_binary);
 
 	// Denoises p_params.diffuse and specular, keeping its history in p_render_buffers.
 	void denoise(RenderSceneBuffersRD *p_render_buffers, const Parameters &p_params);

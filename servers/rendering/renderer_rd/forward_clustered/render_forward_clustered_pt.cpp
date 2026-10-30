@@ -990,7 +990,8 @@ bool RenderForwardClusteredPT::setup_raytracing_for_shader_baker() {
 		scene_shader.enable_rt_shadows_shader_group();
 	}
 	// The effects made at their first use under the path tracer: their ShaderRD versions exist only once made, and the
-	// baker bakes the versions that exist. NRD's passes are SPIR-V of its own, not ShaderRD.
+	// baker bakes the versions that exist. NRD's passes are SPIR-V of its own, not ShaderRD: the baker takes them from
+	// NRDDenoiser::get_bake_programs().
 	if (!pt_probes) {
 		pt_probes = memnew(RendererRD::PTProbes);
 	}

@@ -72,17 +72,20 @@ protected:
 		LocalVector<WorkerThreadPool::TaskID> variant_tasks;
 	};
 
-	// A program the path tracer builds outside ShaderRD (SceneShaderRaytracing::BakeProgram): one binary per file.
+	// A program the path tracer builds outside ShaderRD (SceneShaderRaytracing::BakeProgram, and its denoiser's
+	// NRDDenoiser::BakeProgram): one binary per file.
 	struct RaytracingWorkItem {
 		String cache_path; // Relative to the shader cache.
 		String shader_name;
 		Vector<int> stages; // RD::ShaderStage, in the order the run time compiles them.
 		Vector<String> stage_sources;
+		PackedByteArray spirv; // NRD's: a compute stage already in SPIR-V, instead of stages and stage_sources.
 	};
 
 	struct RaytracingItem {
 		String cache_path;
 		WorkerThreadPool::TaskID task = WorkerThreadPool::INVALID_TASK_ID;
+		bool nrd = false; // In NRDDenoiser's cache file format, else SceneShaderRaytracing's.
 	};
 
 	String shader_cache_platform_name;
@@ -124,6 +127,7 @@ protected:
 	void _process_work_item(WorkItem p_work_item);
 	// The path tracer's programs for p_material (invalid: those of no material, each variant's base).
 	void _customize_raytracing_programs(RID p_material);
+	void _customize_nrd_programs();
 	void _process_raytracing_work_item(RaytracingWorkItem p_work_item);
 
 public:

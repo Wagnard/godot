@@ -38,6 +38,7 @@
 #include "editor/editor_node.h"
 #include "scene/3d/label_3d.h"
 #include "scene/3d/sprite_3d.h"
+#include "servers/rendering/renderer_rd/effects/nrd_denoiser.h"
 #include "servers/rendering/renderer_rd/forward_clustered/render_forward_clustered_pt.h"
 #include "servers/rendering/renderer_rd/forward_clustered/scene_shader_raytracing.h"
 #include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
@@ -185,8 +186,9 @@ bool ShaderBakerExportPlugin::_begin_customize_resources(const Ref<EditorExportP
 
 	material_storage->shader_embedded_set_unlock();
 
-	// The path tracer's programs that belong to no material.
+	// The path tracer's programs that belong to no material, and its NRD denoiser's.
 	_customize_raytracing_programs(RID());
+	_customize_nrd_programs();
 
 	return true;
 }
@@ -278,7 +280,7 @@ void ShaderBakerExportPlugin::_end_customize_resources() {
 			continue;
 		}
 
-		const PackedByteArray cache_file_bytes = RendererSceneRenderImplementation::SceneShaderRaytracing::make_binary_cache_file(binary);
+		const PackedByteArray cache_file_bytes = item.nrd ? RendererRD::NRDDenoiser::make_cache_file(binary) : RendererSceneRenderImplementation::SceneShaderRaytracing::make_binary_cache_file(binary);
 		add_file(shader_cache_user_dir.path_join(item.cache_path), cache_file_bytes, false);
 
 		String cache_file_path = shader_cache_export_path.path_join(item.cache_path);
@@ -578,10 +580,45 @@ void ShaderBakerExportPlugin::_customize_raytracing_programs(RID p_material) {
 	}
 }
 
+// NRD's compute programs, from the SPIR-V the engine embeds, as NRDDenoiser makes them at their first use. Only with the path
+// tracer's shaders: NRD denoises it alone.
+void ShaderBakerExportPlugin::_customize_nrd_programs() {
+	if (!bool(get_option("shader_baker/path_tracing"))) {
+		return;
+	}
+	LocalVector<RendererRD::NRDDenoiser::BakeProgram> programs;
+	RendererRD::NRDDenoiser::get_bake_programs(programs);
+	for (const RendererRD::NRDDenoiser::BakeProgram &program : programs) {
+		const String cache_path = RendererRD::NRDDenoiser::get_cache_file_name(program.cache_key, shader_container_driver);
+		if (shader_paths_processed.has(cache_path)) {
+			continue;
+		}
+		shader_paths_processed.insert(cache_path);
+
+		RaytracingWorkItem work_item;
+		work_item.cache_path = cache_path;
+		work_item.shader_name = program.name;
+		work_item.spirv = program.spirv;
+
+		RaytracingItem item;
+		item.cache_path = cache_path;
+		item.nrd = true;
+		item.task = WorkerThreadPool::get_singleton()->add_template_task(this, &ShaderBakerExportPlugin::_process_raytracing_work_item, work_item);
+		raytracing_items.push_back(item);
+		tasks_total++;
+	}
+}
+
 void ShaderBakerExportPlugin::_process_raytracing_work_item(RaytracingWorkItem p_work_item) {
 	if (!tasks_cancelled) {
 		// As SceneShaderRaytracing compiles them at run time: each stage on its own, the binary from all of them.
 		Vector<RD::ShaderStageSPIRVData> spirv_data;
+		if (!p_work_item.spirv.is_empty()) {
+			RD::ShaderStageSPIRVData stage;
+			stage.shader_stage = RD::SHADER_STAGE_COMPUTE;
+			stage.spirv = p_work_item.spirv;
+			spirv_data.push_back(stage);
+		}
 		for (int i = 0; i < p_work_item.stages.size(); i++) {
 			RD::ShaderStageSPIRVData stage;
 			String error;
