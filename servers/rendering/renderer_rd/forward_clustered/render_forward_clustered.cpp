@@ -4878,7 +4878,6 @@ void RenderForwardClustered::_render_shadow_end() {
 		}
 	}
 
-	RD::get_singleton()->debug_shadow_section_begin();
 	for (uint32_t i = 0; i < pass_count; i++) {
 		SceneState::ShadowPass &shadow_pass = shadow_passes[i];
 		const BitField<RD::DrawFlags> draw_flags = shadow_pass.clear_depth ? RD::DRAW_CLEAR_DEPTH : RD::DRAW_DEFAULT_ALL;
@@ -4898,7 +4897,6 @@ void RenderForwardClustered::_render_shadow_end() {
 			_render_shadow_cube_copy(cube_shadow_copies[shadow_pass.cube_copy]);
 		}
 	}
-	RD::get_singleton()->debug_shadow_section_end();
 
 	if (part_count > 0) {
 		RD::get_singleton()->draw_list_split_detached_end();

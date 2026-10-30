@@ -247,8 +247,6 @@ private:
 		LocalVector<RID> params_buffers;
 		uint32_t params_buffers_used = 0;
 		uint64_t params_frame = UINT64_MAX;
-		// Debugging (GODOT_SHADOW_DP_CLEAR=1): clear each dual paraboloid region before the copy writes it.
-		bool clear_region = false;
 	} cube_to_dp;
 
 	// Copy to Octmap

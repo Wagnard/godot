@@ -6240,7 +6240,7 @@ RenderingDevice::DrawListID RenderingDevice::draw_list_begin(RID p_framebuffer, 
 		clear_values[i] = clear_value;
 	}
 
-	draw_graph->add_draw_list_begin(framebuffer->framebuffer_cache, Rect2i(viewport_offset, viewport_size), operations, clear_values, stages, p_breadcrumb, shadow_section_split && shadow_section_active);
+	draw_graph->add_draw_list_begin(framebuffer->framebuffer_cache, Rect2i(viewport_offset, viewport_size), operations, clear_values, stages, p_breadcrumb);
 	draw_graph->add_draw_list_usages(resource_trackers, resource_usages);
 
 	// Mark textures as bound.
@@ -6770,9 +6770,6 @@ void RenderingDevice::draw_list_draw(DrawListID p_list, bool p_use_indices, uint
 				_draw_list_uniform_set_bound(split, uniform_set);
 				batch_has_dynamic_buffers = batch_has_dynamic_buffers || uniform_set->has_dynamic_buffers;
 
-				if (unlikely(graph_check_uniform_sets)) {
-					_graph_check_uniform_set(uniform_set);
-				}
 				draw_graph->add_draw_list_usages(uniform_set->draw_trackers, uniform_set->draw_trackers_usage, graph_split);
 				dl->state.sets[i].bound = true;
 
@@ -6917,9 +6914,6 @@ void RenderingDevice::draw_list_draw_indirect(DrawListID p_list, bool p_use_indi
 			ERR_FAIL_NULL(uniform_set);
 			_draw_list_uniform_set_bound(split, uniform_set);
 
-			if (unlikely(graph_check_uniform_sets)) {
-				_graph_check_uniform_set(uniform_set);
-			}
 			draw_graph->add_draw_list_usages(uniform_set->draw_trackers, uniform_set->draw_trackers_usage, graph_split);
 
 			dl->state.sets[i].bound = true;
@@ -7257,18 +7251,6 @@ void RenderingDevice::draw_list_end() {
 	}
 
 	draw_list_bound_textures.clear();
-}
-
-void RenderingDevice::debug_shadow_section_begin() {
-	ERR_RENDER_THREAD_GUARD();
-	shadow_section_active = true;
-	draw_graph->debug_order_chain_begin();
-}
-
-void RenderingDevice::debug_shadow_section_end() {
-	ERR_RENDER_THREAD_GUARD();
-	shadow_section_active = false;
-	draw_graph->debug_order_chain_end();
 }
 
 /***************************/
@@ -7848,9 +7830,6 @@ void RenderingDevice::compute_list_dispatch(ComputeListID p_list, uint32_t p_x_g
 			_uniform_set_update_clears(uniform_set);
 			batch_has_dynamic_buffers = batch_has_dynamic_buffers || uniform_set->has_dynamic_buffers;
 
-			if (unlikely(graph_check_uniform_sets)) {
-				_graph_check_uniform_set(uniform_set);
-			}
 			draw_graph->add_compute_list_usages(uniform_set->draw_trackers, uniform_set->draw_trackers_usage);
 			compute_list.state.sets[i].bound = true;
 		}
@@ -7991,9 +7970,6 @@ void RenderingDevice::compute_list_dispatch_indirect(ComputeListID p_list, RID p
 			_uniform_set_update_clears(uniform_set);
 			batch_has_dynamic_buffers = batch_has_dynamic_buffers || uniform_set->has_dynamic_buffers;
 
-			if (unlikely(graph_check_uniform_sets)) {
-				_graph_check_uniform_set(uniform_set);
-			}
 			draw_graph->add_compute_list_usages(uniform_set->draw_trackers, uniform_set->draw_trackers_usage);
 			compute_list.state.sets[i].bound = true;
 		}
@@ -8501,34 +8477,6 @@ bool RenderingDevice::_index_array_make_mutable(IndexArray *p_index_array, RDG::
 	}
 }
 
-void RenderingDevice::_graph_check_uniform_set(const UniformSet *p_uniform_set) {
-	auto report = [&](RID p_resource, const String &p_what) {
-		const uint64_t key = hash_murmur3_one_64(p_resource.get_id(), hash_murmur3_one_64(uint64_t(p_uniform_set)));
-		MutexLock lock(graph_check_mutex);
-		if (graph_check_reported.has(key)) {
-			return;
-		}
-		graph_check_reported.insert(key);
-		print_line(vformat("RenderingDevice check: a uniform set reads %s without the graph tracking it (resource %s): its commands can be reordered around the writes.", p_what, String::num_uint64(p_resource.get_id(), 16)));
-	};
-
-	for (const KeyValue<RID, RDG::ResourceUsage> &E : p_uniform_set->untracked_usage) {
-		if (const Texture *texture = texture_owner.get_or_null(E.key)) {
-			const Texture *owner = texture->owner.is_valid() ? texture_owner.get_or_null(texture->owner) : nullptr;
-			const String what = vformat("a %dx%d texture (format %d, %d layers, %s)", texture->width, texture->height, int(texture->format), texture->layers, owner ? "a view of another texture" : "its own resource");
-			if (texture->draw_tracker != nullptr) {
-				report(E.key, what + ", left untracked although it is tracked now");
-			} else if (owner != nullptr && owner->draw_tracker != nullptr) {
-				report(E.key, what + ", whose texture is tracked but the view is not");
-			}
-		} else if (const Buffer *buffer = _get_buffer_from_owner(E.key)) {
-			if (buffer->draw_tracker != nullptr) {
-				report(E.key, vformat("a %d-byte buffer, left untracked although it is tracked now", buffer->size));
-			}
-		}
-	}
-}
-
 bool RenderingDevice::_uniform_set_make_mutable(UniformSet *p_uniform_set, RID p_resource_id, RDG::ResourceTracker *p_resource_tracker) {
 	HashMap<RID, RDG::ResourceUsage>::Iterator E = p_uniform_set->untracked_usage.find(p_resource_id);
 	if (!E) {
@@ -8932,9 +8880,7 @@ void RenderingDevice::swap_buffers(bool p_present) {
 
 	// Advance to the next frame and begin recording again, into the other graph.
 	frame = (frame + 1) % frames.size();
-	if (!single_draw_graph) {
-		draw_graph = draw_graph == &draw_graphs[0] ? &draw_graphs[1] : &draw_graphs[0];
-	}
+	draw_graph = draw_graph == &draw_graphs[0] ? &draw_graphs[1] : &draw_graphs[0];
 
 	if (frame_stats.enabled) {
 		const uint64_t now = OS::get_singleton()->get_ticks_usec();
@@ -9218,18 +9164,7 @@ void RenderingDevice::_replay_frame(uint32_t p_frame, RenderingDeviceGraph *p_gr
 	}
 
 	GodotProfileZoneGrouped(_profile_zone, "draw_graph->end");
-	// The two settings above can also be changed when launching, to debug synchronization without a rebuild:
-	// GODOT_RD_NO_REORDER=1 records the commands in submission order, GODOT_RD_FULL_BARRIERS=1 issues full barriers.
-	static const bool reorder_commands = RENDER_GRAPH_REORDER == 1 && OS::get_singleton()->get_environment("GODOT_RD_NO_REORDER") != "1";
-	static const bool full_barriers = RENDER_GRAPH_FULL_BARRIERS == 1 || OS::get_singleton()->get_environment("GODOT_RD_FULL_BARRIERS") == "1";
-	static bool settings_printed = false;
-	if (!settings_printed) {
-		settings_printed = true;
-		if (!reorder_commands || full_barriers) {
-			print_line(vformat("RenderingDevice: command graph %s, %s (debugging, slow).", reorder_commands ? "reordered" : "in submission order", full_barriers ? "full barriers" : "minimal barriers"));
-		}
-	}
-	p_graph->end(reorder_commands, full_barriers, command_buffer, frames[p_frame].command_buffer_pool);
+	p_graph->end(RENDER_GRAPH_REORDER == 1, RENDER_GRAPH_FULL_BARRIERS == 1, command_buffer, frames[p_frame].command_buffer_pool);
 	GodotProfileZoneGrouped(_profile_zone, "driver->command_buffer_end");
 	driver->command_buffer_end(command_buffer);
 	GodotProfileZoneGrouped(_profile_zone, "driver->end_segment");
@@ -9845,7 +9780,6 @@ Error RenderingDevice::initialize(RenderingContextDriver *p_context, DisplayServ
 	// Create draw graph and start it initialized as well.
 	for (RenderingDeviceGraph &graph : draw_graphs) {
 		graph.initialize(driver, &_render_pass_create_from_graph, frames.size(), main_queue_family, SECONDARY_COMMAND_BUFFERS_PER_FRAME);
-		graph_check_uniform_sets = OS::get_singleton()->get_environment("GODOT_RD_GRAPH_CHECK") == "1";
 	}
 	draw_graph->begin();
 
@@ -9870,18 +9804,6 @@ Error RenderingDevice::initialize(RenderingContextDriver *p_context, DisplayServ
 		}
 #endif
 	}
-	// Debugging (Wagnard/godot#1): GODOT_RD_SINGLE_GRAPH=1 records every frame into the same graph instead of
-	// alternating two, which only the replay thread needs. The frame slots keep alternating, so a defect that
-	// alternates with the frames tells per-graph state from per-slot state.
-	single_draw_graph = main_surface != 0 && OS::get_singleton()->get_environment("GODOT_RD_SINGLE_GRAPH") == "1";
-	if (single_draw_graph) {
-		print_line("GODOT_RD_SINGLE_GRAPH=1: every frame is recorded into the same graph; the replay thread is off.");
-	}
-	shadow_section_split = main_surface != 0 && OS::get_singleton()->get_environment("GODOT_RD_SHADOW_SPLIT") == "1";
-	if (shadow_section_split) {
-		print_line("GODOT_RD_SHADOW_SPLIT=1: each shadow draw list starts a command buffer of its own (debugging).");
-	}
-
 	submit_thread_enabled = main_surface != 0 && submit_thread_api && OS::get_singleton()->get_environment("GODOT_SUBMIT_THREAD") != "0";
 	if (submit_thread_enabled) {
 		submit_frame_job.resize(frames.size());
@@ -9892,7 +9814,7 @@ Error RenderingDevice::initialize(RenderingContextDriver *p_context, DisplayServ
 		print_verbose("RenderingDevice: frames are submitted and presented by a thread of their own.");
 
 		// And replayed by another (GODOT_RD_REPLAY_THREAD=0 disables it).
-		replay_thread_enabled = !single_draw_graph && OS::get_singleton()->get_environment("GODOT_RD_REPLAY_THREAD") != "0";
+		replay_thread_enabled = OS::get_singleton()->get_environment("GODOT_RD_REPLAY_THREAD") != "0";
 		if (replay_thread_enabled) {
 			replay_thread.start(_replay_thread_func, this);
 			print_verbose("RenderingDevice: recorded frames are replayed by a thread of their own.");

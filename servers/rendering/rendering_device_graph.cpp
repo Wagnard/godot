@@ -30,8 +30,6 @@
 
 #include "rendering_device_graph.h"
 
-#include "core/io/dir_access.h"
-#include "core/io/file_access.h"
 #include "core/os/os.h"
 #include "core/os/thread.h"
 #include "core/templates/hash_set.h"
@@ -251,146 +249,6 @@ bool RenderingDeviceGraph::_check_command_partial_coverage(ResourceTracker *p_re
 
 	Rect2i texture_region(Point2i(0, 0), p_resource_tracker->texture_size);
 	return !draw_list_command.region.encloses(texture_region);
-}
-
-void RenderingDeviceGraph::_graph_dump(const RecordedCommandSort *p_sorted_commands, uint32_t p_count) {
-	const uint32_t serial = graph_dump_serial.increment();
-	const String path = graph_dump_directory.path_join(vformat("frame_%03d.txt", serial));
-	Ref<FileAccess> file = FileAccess::open(path, FileAccess::WRITE);
-	if (file.is_null()) {
-		graph_dump_frames_left.decrement();
-		return;
-	}
-
-	static const char *type_names[] = { "none", "blas build", "tlas build", "buffer clear", "buffer copy", "buffer get data", "buffer update", "compute list", "raytracing list", "draw list", "texture clear color", "texture clear depth", "texture copy", "texture get data", "texture resolve", "texture update", "timestamp", "driver callback", "blas update", "omm build" };
-	static_assert(std_size(type_names) == RecordedCommand::TYPE_MAX, "One name per RecordedCommand::Type");
-
-	// The accesses are recorded command after command: where each command's start.
-	LocalVector<int32_t> first_access;
-	first_access.resize(command_count + 1);
-	for (uint32_t i = 0; i <= command_count; i++) {
-		first_access[i] = -1;
-	}
-	for (uint32_t i = 0; i < graph_check_accesses.size(); i++) {
-		const int32_t command = graph_check_accesses[i].command_index;
-		if (first_access[command] < 0) {
-			first_access[command] = int32_t(i);
-		}
-	}
-
-	file->store_line(vformat("graph %s, dump %d, frame %d commands, levels and accesses in execution order (GODOT_RD_GRAPH_DUMP)", String::num_uint64(uint64_t(this), 16), serial, p_count));
-	for (uint32_t i = 0; i < p_count; i++) {
-		const int32_t index = p_sorted_commands[i].index;
-		const RecordedCommand *command = reinterpret_cast<const RecordedCommand *>(&command_data[command_data_offsets[index]]);
-		String label;
-		if (command->label_index >= 0 && uint32_t(command->label_index) < command_label_offsets.size()) {
-			label = String::utf8(&command_label_chars[command_label_offsets[command->label_index]]);
-		}
-		String line = vformat("L%d #%d %s", p_sorted_commands[i].level, index, type_names[command->type]);
-		if (command->type == RecordedCommand::TYPE_DRAW_LIST) {
-			line += vformat(" region %s", reinterpret_cast<const RecordedDrawListCommand *>(command)->region);
-		}
-		if (!label.is_empty()) {
-			line += " \"" + label + "\"";
-		}
-		file->store_line(line);
-		if (first_access[index] < 0) {
-			continue;
-		}
-		for (uint32_t a = uint32_t(first_access[index]); a < graph_check_accesses.size() && graph_check_accesses[a].command_index == index; a++) {
-			const GraphCheckAccess &access = graph_check_accesses[a];
-			const ResourceTracker *tracker = access.tracker;
-			const bool texture = tracker->texture_driver_id.id != 0;
-			file->store_line(vformat("    %s %s %s %s%s, subresources %s%s", access.write ? "W" : "R", texture ? "texture" : "buffer", String::num_uint64(uint64_t(texture ? tracker->texture_driver_id.id : tracker->buffer_driver_id.id), 16),
-					texture ? vformat("%dx%d ", tracker->texture_size.x, tracker->texture_size.y) : String(), _usage_to_string(access.usage), access.subresources, access.region_write ? vformat(", region %s", access.region) : String()));
-		}
-	}
-	file.unref();
-	if (graph_dump_frames_left.decrement() <= 0) {
-		print_line(vformat("RenderingDeviceGraph: dump written to %s.", graph_dump_directory));
-	}
-}
-
-void RenderingDeviceGraph::_graph_check_levels(const RecordedCommandSort *p_levels_by_command) {
-	// Accesses grouped by resource, in recording order.
-	graph_check_order.resize(graph_check_accesses.size());
-	for (uint32_t i = 0; i < graph_check_order.size(); i++) {
-		graph_check_order[i] = i;
-	}
-	struct ByTrackerThenCommand {
-		const GraphCheckAccess *accesses = nullptr;
-		_FORCE_INLINE_ bool operator()(uint32_t p_a, uint32_t p_b) const {
-			const GraphCheckAccess &a = accesses[p_a];
-			const GraphCheckAccess &b = accesses[p_b];
-			if (a.tracker != b.tracker) {
-				return a.tracker < b.tracker;
-			}
-			return p_a < p_b; // Recording order.
-		}
-	};
-	SortArray<uint32_t, ByTrackerThenCommand> sorter;
-	sorter.compare.accesses = graph_check_accesses.ptr();
-	sorter.sort(graph_check_order.ptr(), graph_check_order.size());
-
-	graph_check_frames++;
-	uint32_t violations = 0;
-	String first_violations;
-	const uint32_t MAX_LOOKBACK = 256;
-	for (uint32_t i = 0; i < graph_check_order.size(); i++) {
-		const GraphCheckAccess &current = graph_check_accesses[graph_check_order[i]];
-		uint32_t steps = 0;
-		for (int64_t j = int64_t(i) - 1; j >= 0 && steps < MAX_LOOKBACK; j--, steps++) {
-			const GraphCheckAccess &previous = graph_check_accesses[graph_check_order[j]];
-			if (previous.tracker != current.tracker) {
-				break;
-			}
-			if (previous.command_index == current.command_index) {
-				continue;
-			}
-			if (!previous.write && !current.write) {
-				continue;
-			}
-			if (!previous.subresources.intersects(current.subresources)) {
-				continue;
-			}
-			if (previous.region_write && current.region_write && !previous.region.intersects(current.region)) {
-				continue;
-			}
-
-			// Conflicting accesses: the earlier command must be in a lower level.
-			if (p_levels_by_command[previous.command_index].level >= p_levels_by_command[current.command_index].level) {
-				violations++;
-				if (violations <= 4) {
-					auto describe = [&](const GraphCheckAccess &p_access) {
-						const RecordedCommand *command = reinterpret_cast<const RecordedCommand *>(&command_data[command_data_offsets[p_access.command_index]]);
-						String label = "-";
-						if (command->label_index >= 0 && uint32_t(command->label_index) < command_label_offsets.size()) {
-							label = String::utf8(&command_label_chars[command_label_offsets[command->label_index]]);
-						}
-						return vformat("command #%d (type %d, label \"%s\", level %d) %s %s, subresources %s, region %s", p_access.command_index, int(command->type), label,
-								p_levels_by_command[p_access.command_index].level, p_access.write ? "writes" : "reads", _usage_to_string(p_access.usage), p_access.subresources, p_access.region_write ? String(p_access.region) : String("whole"));
-					};
-					const ResourceTracker *tracker = current.tracker;
-					first_violations += vformat("\n  %s %s, size %s:\n    earlier %s\n    later   %s", tracker->texture_driver_id.id != 0 ? "texture" : (tracker->buffer_driver_id.id != 0 ? "buffer" : "resource"),
-							String::num_uint64(uint64_t(tracker->texture_driver_id.id != 0 ? tracker->texture_driver_id.id : tracker->buffer_driver_id.id), 16), tracker->texture_size, describe(previous), describe(current));
-				}
-			}
-
-			// An earlier write of the whole subresources is ordered before this one: what precedes it was checked against it.
-			if (previous.write && !previous.region_write && previous.subresources.encloses(current.subresources)) {
-				break;
-			}
-		}
-	}
-
-	if (violations > 0) {
-		graph_check_violation_frames++;
-		const uint64_t now = OS::get_singleton()->get_ticks_msec();
-		if (graph_check_last_print_msec == 0 || now - graph_check_last_print_msec > 5000) {
-			graph_check_last_print_msec = now;
-			print_line(vformat("RenderingDeviceGraph check: %d accesses out of order in this frame (%d of %d frames so far):%s", violations, graph_check_violation_frames, graph_check_frames, first_violations));
-		}
-	}
 }
 
 int32_t RenderingDeviceGraph::_add_to_command_list(int32_t p_command_index, int32_t p_list_index) {
@@ -770,22 +628,6 @@ void RenderingDeviceGraph::_add_command_to_graph(ResourceTracker **p_resource_tr
 		}
 
 		bool write_usage_has_partial_coverage = !different_usage && _check_command_partial_coverage(resource_tracker, p_command_index);
-
-		if (unlikely(graph_check_enabled || graph_dump_active)) {
-			GraphCheckAccess access;
-			access.tracker = search_tracker;
-			access.subresources = search_tracker_rect;
-			access.command_index = p_command_index;
-			access.usage = new_resource_usage;
-			access.write = write_usage;
-			const RecordedCommand *command = reinterpret_cast<const RecordedCommand *>(&command_data[command_data_offsets[p_command_index]]);
-			const bool attachment = new_resource_usage == RESOURCE_USAGE_ATTACHMENT_COLOR_READ_WRITE || new_resource_usage == RESOURCE_USAGE_ATTACHMENT_DEPTH_STENCIL_READ_WRITE;
-			if (attachment && command->type == RecordedCommand::TYPE_DRAW_LIST) {
-				access.region = reinterpret_cast<const RecordedDrawListCommand *>(command)->region;
-				access.region_write = !access.region.encloses(Rect2i(Point2i(), resource_tracker->texture_size));
-			}
-			graph_check_accesses.push_back(access);
-		}
 		if (search_tracker->write_command_or_list_index >= 0) {
 			if (search_tracker->write_command_list_enabled) {
 				// Make this command adjacent to any commands that wrote to this resource and intersect with the slice if it applies.
@@ -2510,41 +2352,6 @@ void RenderingDeviceGraph::initialize(RDD *p_driver, RenderPassCreationFunction 
 	const String parallel_min_env = OS::get_singleton()->get_environment("GODOT_PARALLEL_RECORDING_MIN");
 	parallel_min_size = parallel_min_env.is_empty() ? 16384 : uint32_t(MAX(parallel_min_env.to_int(), 0));
 	parallel_stats = OS::get_singleton()->get_environment("GODOT_PARALLEL_RECORDING_STATS") == "1";
-	graph_check_enabled = OS::get_singleton()->get_environment("GODOT_RD_GRAPH_CHECK") == "1";
-	// GODOT_RD_SERIALIZE_LEVELS=1 (debugging, slow): the commands keep the graph's order, but each one runs after a full
-	// barrier carrying its own transitions, instead of a level's commands sharing one barrier and running together.
-	serialize_levels = OS::get_singleton()->get_environment("GODOT_RD_SERIALIZE_LEVELS") == "1";
-	graph_dump_directory = OS::get_singleton()->get_environment("GODOT_RD_GRAPH_DUMP");
-	if (!graph_dump_directory.is_empty()) {
-		print_line(vformat("RenderingDeviceGraph: GODOT_RD_GRAPH_DUMP: create %s to dump the next 4 frames' commands (debugging).", graph_dump_directory.path_join("dump_now")));
-	}
-	if (serialize_levels) {
-		print_line("RenderingDeviceGraph: GODOT_RD_SERIALIZE_LEVELS=1, every command runs alone after a full barrier, in the reordered order (debugging, slow).");
-	}
-	if (graph_check_enabled) {
-		print_line("RenderingDeviceGraph: GODOT_RD_GRAPH_CHECK=1, every frame's levels are checked against the recorded accesses (debugging, slow).");
-	}
-	order_chain_enabled = OS::get_singleton()->get_environment("GODOT_SHADOW_CHAIN_ORDER") == "1";
-	if (order_chain_enabled) {
-		print_line("RenderingDeviceGraph: GODOT_SHADOW_CHAIN_ORDER=1, shadow passes and their cube-to-DP copies keep submission order (debugging).");
-	}
-	updates_in_place = OS::get_singleton()->get_environment("GODOT_RD_UPDATES_IN_PLACE") == "1";
-	if (updates_in_place) {
-		print_line("RenderingDeviceGraph: GODOT_RD_UPDATES_IN_PLACE=1, buffer and texture updates no longer move above the previous command (debugging).");
-	}
-	const String in_place_range = OS::get_singleton()->get_environment("GODOT_RD_UPDATES_IN_PLACE_RANGE");
-	if (!in_place_range.is_empty()) {
-		updates_in_place = true;
-		updates_in_place_from = in_place_range.get_slicec('-', 0).to_int();
-		updates_in_place_to = in_place_range.contains_char('-') ? in_place_range.get_slicec('-', 1).to_int() : updates_in_place_from;
-		const String anchor = OS::get_singleton()->get_environment("GODOT_RD_UPDATES_IN_PLACE_ANCHOR");
-		updates_in_place_anchor = anchor.is_empty() ? -1 : anchor.to_int();
-		print_line(vformat("RenderingDeviceGraph: GODOT_RD_UPDATES_IN_PLACE_RANGE=%d-%d, only the updates submitted at those indices stay after %s (debugging).", updates_in_place_from, updates_in_place_to, updates_in_place_anchor >= 0 ? vformat("command #%d", updates_in_place_anchor) : String("the previous command")));
-	}
-	shadow_section_fence = OS::get_singleton()->get_environment("GODOT_SHADOW_SECTION_FENCE") == "1";
-	if (shadow_section_fence) {
-		print_line("RenderingDeviceGraph: GODOT_SHADOW_SECTION_FENCE=1, every command submitted before the shadow passes runs before them (debugging).");
-	}
 	// GODOT_PARALLEL_RECORDING_SPLIT_DRAW_LISTS=0 keeps every draw list in one slice.
 	parallel_split_draw_lists = driver->api_trait_get(RDD::API_TRAIT_RESUMABLE_RENDER_PASSES) && OS::get_singleton()->get_environment("GODOT_PARALLEL_RECORDING_SPLIT_DRAW_LISTS") != "0";
 	print_verbose(vformat("RenderingDeviceGraph: parallel recording in up to %d command buffers.", parallel_slice_count));
@@ -2588,18 +2395,6 @@ void RenderingDeviceGraph::begin() {
 	command_synchronization_pending = false;
 	command_tlas_build_index = -1;
 	command_label_index = -1;
-	order_chain_active = false;
-	order_chain_last = -1;
-	graph_check_accesses.clear();
-	if (unlikely(!graph_dump_directory.is_empty())) {
-		const String trigger = graph_dump_directory.path_join("dump_now");
-		if (graph_dump_frames_left.get() <= 0 && FileAccess::exists(trigger)) {
-			DirAccess::remove_absolute(trigger);
-			graph_dump_frames_left.set(4);
-			print_line(vformat("RenderingDeviceGraph: dumping the next 4 frames' commands to %s.", graph_dump_directory));
-		}
-		graph_dump_active = graph_dump_frames_left.get() > 0;
-	}
 	frames[frame].secondary_command_buffers_used = 0;
 	draw_instruction_list.index = 0;
 	compute_instruction_list.index = 0;
@@ -2814,34 +2609,6 @@ void RenderingDeviceGraph::add_buffer_update(RDD::BufferID p_dst, ResourceTracke
 
 	ResourceUsage buffer_usage = RESOURCE_USAGE_COPY_TO;
 	_add_command_to_graph(&p_dst_tracker, &buffer_usage, 1, command_index, command);
-
-	if (unlikely(updates_in_place)) {
-		uint64_t bytes = 0;
-		for (uint32_t i = 0; i < command->buffer_copies_count; i++) {
-			bytes += buffer_copies[i].region.size;
-		}
-		_debug_update_in_place(command_index, command, p_dst_tracker->buffer_driver_id.id, false, bytes);
-	}
-}
-
-void RenderingDeviceGraph::_debug_update_in_place(int32_t p_command_index, RecordedCommand *r_command, uint64_t p_destination, bool p_texture, uint64_t p_bytes) {
-	if (p_command_index < updates_in_place_from || p_command_index > updates_in_place_to) {
-		return;
-	}
-	const int32_t previous = updates_in_place_anchor >= 0 ? updates_in_place_anchor : p_command_index - 1;
-	if (previous < 0 || previous >= p_command_index) {
-		return;
-	}
-	_add_adjacent_command(previous, p_command_index, r_command);
-
-	if (updates_in_place_from > 0 || updates_in_place_to < INT32_MAX) {
-		// Ranged: say once which update each index is, to name it.
-		if (updates_in_place_logged.find(p_command_index) < 0) {
-			updates_in_place_logged.push_back(p_command_index);
-			const String label = command_label_index >= 0 ? String::utf8(&command_label_chars[command_label_offsets[command_label_index]]) : String("(no label)");
-			print_line(vformat("RenderingDeviceGraph: update #%d kept after #%d: %s %s, %d bytes, label \"%s\".", p_command_index, previous, p_texture ? "texture" : "buffer", String::num_uint64(p_destination, 16), p_bytes, label));
-		}
-	}
 }
 
 void RenderingDeviceGraph::add_driver_callback(RDD::DriverCallback p_callback, void *p_userdata, VectorView<ResourceTracker *> p_trackers, VectorView<RenderingDeviceGraph::ResourceUsage> p_usages) {
@@ -3403,14 +3170,6 @@ void RenderingDeviceGraph::add_draw_list_end() {
 		DEV_ASSERT(offset == instruction_data_size);
 	}
 	_add_command_to_graph(draw_instruction_list.command_trackers.ptr(), draw_instruction_list.command_tracker_usages.ptr(), draw_instruction_list.command_trackers.size(), command_index, command);
-
-	if (unlikely(order_chain_active)) {
-		// GODOT_SHADOW_CHAIN_ORDER: after the chain's previous draw list.
-		if (order_chain_last >= 0) {
-			_add_adjacent_command(order_chain_last, command_index, command);
-		}
-		order_chain_last = command_index;
-	}
 }
 
 void RenderingDeviceGraph::add_texture_clear_color(RDD::TextureID p_dst, ResourceTracker *p_dst_tracker, const Color &p_color, const RDD::TextureSubresourceRange &p_range) {
@@ -3573,10 +3332,6 @@ void RenderingDeviceGraph::add_texture_update(RDD::TextureID p_dst, ResourceTrac
 		ResourceUsage usage = RESOURCE_USAGE_COPY_TO;
 		_add_command_to_graph(&p_dst_tracker, &usage, 1, command_index, command);
 	}
-
-	if (unlikely(updates_in_place)) {
-		_debug_update_in_place(command_index, command, p_dst_tracker->texture_driver_id.id, true, 0);
-	}
 }
 
 void RenderingDeviceGraph::add_capture_timestamp(RDD::QueryPoolID p_query_pool, uint32_t p_index) {
@@ -3594,20 +3349,6 @@ void RenderingDeviceGraph::add_synchronization() {
 	if (command_count > 0) {
 		command_synchronization_pending = true;
 	}
-}
-
-void RenderingDeviceGraph::debug_order_chain_begin() {
-	if (shadow_section_fence) {
-		add_synchronization();
-	}
-	if (order_chain_enabled) {
-		order_chain_active = true;
-		order_chain_last = -1;
-	}
-}
-
-void RenderingDeviceGraph::debug_order_chain_end() {
-	order_chain_active = false;
 }
 
 void RenderingDeviceGraph::begin_label(const Span<char> &p_label_name, const Color &p_color) {
@@ -3743,10 +3484,6 @@ void RenderingDeviceGraph::end(bool p_reorder_commands, bool p_full_barriers, RD
 			commands_sorted[sorted_command_index].index = sorted_command_index;
 			commands_sorted[sorted_command_index].priority = PriorityTable[recorded_command.type];
 		}
-
-		if (unlikely(graph_check_enabled)) {
-			_graph_check_levels(commands_sorted.ptr());
-		}
 	} else {
 		commands_sorted.clear();
 		commands_sorted.resize(command_count);
@@ -3780,10 +3517,6 @@ void RenderingDeviceGraph::end(bool p_reorder_commands, bool p_full_barriers, RD
 
 			commands_sorted.sort();
 
-			if (unlikely(graph_dump_active)) {
-				_graph_dump(commands_sorted.ptr(), command_count);
-			}
-
 #if PRINT_RENDER_GRAPH
 			print_line("AFTER SORT");
 			_print_render_commands(commands_sorted.ptr(), command_count);
@@ -3793,7 +3526,7 @@ void RenderingDeviceGraph::end(bool p_reorder_commands, bool p_full_barriers, RD
 			print_line(vformat("Recording %d commands", command_count));
 #endif
 
-			if (parallel_slice_count > 1 && command_label_count == 0 && !serialize_levels) {
+			if (parallel_slice_count > 1 && command_label_count == 0) {
 				// Boost the priorities of every level first. A level's boost only depends on the levels before it, so
 				// this gives the order the serial loop records in.
 				uint32_t boosted_priority = 0;
@@ -3912,15 +3645,7 @@ void RenderingDeviceGraph::end(bool p_reorder_commands, bool p_full_barriers, RD
 				uint32_t boosted_priority = 0;
 				uint32_t current_level = commands_sorted[0].level;
 				uint32_t current_level_start = 0;
-				if (serialize_levels) {
-					// The reordered order, each command after a full barrier with its own transitions.
-					for (uint32_t i = 0; i < command_count; i++) {
-						_group_barriers_for_render_commands(barrier_group, r_command_buffer, &commands_sorted[i], 1, true);
-						_run_render_commands(commands_sorted[i].level, &commands_sorted[i], 1, r_command_buffer, r_command_buffer_pool, current_label_index, current_label_level);
-					}
-					current_level_start = command_count;
-				}
-				for (uint32_t i = current_level_start; i < command_count; i++) {
+				for (uint32_t i = 0; i < command_count; i++) {
 					if (current_level != commands_sorted[i].level) {
 						RecordedCommandSort *level_command_ptr = &commands_sorted[current_level_start];
 						uint32_t level_command_count = i - current_level_start;
@@ -3932,13 +3657,11 @@ void RenderingDeviceGraph::end(bool p_reorder_commands, bool p_full_barriers, RD
 					}
 				}
 
-				if (current_level_start < command_count) {
-					RecordedCommandSort *level_command_ptr = &commands_sorted[current_level_start];
-					uint32_t level_command_count = command_count - current_level_start;
-					_boost_priority_for_render_commands(level_command_ptr, level_command_count, boosted_priority);
-					_group_barriers_for_render_commands(barrier_group, r_command_buffer, level_command_ptr, level_command_count, p_full_barriers);
-					_run_render_commands(current_level, level_command_ptr, level_command_count, r_command_buffer, r_command_buffer_pool, current_label_index, current_label_level);
-				}
+				RecordedCommandSort *level_command_ptr = &commands_sorted[current_level_start];
+				uint32_t level_command_count = command_count - current_level_start;
+				_boost_priority_for_render_commands(level_command_ptr, level_command_count, boosted_priority);
+				_group_barriers_for_render_commands(barrier_group, r_command_buffer, level_command_ptr, level_command_count, p_full_barriers);
+				_run_render_commands(current_level, level_command_ptr, level_command_count, r_command_buffer, r_command_buffer_pool, current_label_index, current_label_level);
 
 #if PRINT_RENDER_GRAPH
 				print_line("COMMANDS", command_count, "LEVELS", current_level + 1);

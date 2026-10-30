@@ -8030,20 +8030,9 @@ Error RenderingDeviceDriverD3D12::_initialize_allocator() {
 	HRESULT res = D3D12MA::CreateAllocator(&allocator_desc, &allocator);
 	ERR_FAIL_COND_V_MSG(!SUCCEEDED(res), ERR_CANT_CREATE, "D3D12MA::CreateAllocator failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
 
-	// Read by RenderingShaderContainerD3D12 and ShaderRD; said here once.
-	if (OS::get_singleton()->get_environment("GODOT_D3D12_VOLATILE_ROOTSIG") == "1") {
-		print_line("D3D12: GODOT_D3D12_VOLATILE_ROOTSIG=1, root signatures use 1.0 volatility, shaders cached apart (.rs10.cache) (debugging).");
-	}
-
-	// GODOT_D3D12_NO_GPU_UPLOAD_HEAP=1 (debugging): the dynamic persistent buffers use regular UPLOAD heaps, as on a device
-	// without ReBAR.
-	const bool gpu_upload_heap_disabled = OS::get_singleton()->get_environment("GODOT_D3D12_NO_GPU_UPLOAD_HEAP") == "1";
-	if (allocator->IsGPUUploadHeapSupported() && !gpu_upload_heap_disabled) {
+	if (allocator->IsGPUUploadHeapSupported()) {
 		dynamic_persistent_upload_heap = D3D12_HEAP_TYPE_GPU_UPLOAD;
 		print_verbose("D3D12: Device supports GPU UPLOAD heap.");
-	} else if (gpu_upload_heap_disabled) {
-		dynamic_persistent_upload_heap = D3D12_HEAP_TYPE_UPLOAD;
-		print_line("D3D12: GODOT_D3D12_NO_GPU_UPLOAD_HEAP=1, dynamic persistent buffers use regular UPLOAD heaps (debugging).");
 	} else {
 		dynamic_persistent_upload_heap = D3D12_HEAP_TYPE_UPLOAD;
 		// Print it as a warning (instead of verbose) because in the rare chance this lesser-used code path

@@ -30,7 +30,6 @@
 
 #include "rendering_shader_container_d3d12.h"
 
-#include "core/os/os.h"
 #include "core/templates/sort_array.h"
 #include "drivers/d3d12/dxil_hash.h"
 
@@ -43,14 +42,6 @@
 extern "C" {
 void dxil_reassign_driver_locations(nir_shader *s, nir_variable_mode modes,
 		uint64_t other_stage_mask, const BITSET_WORD *other_stage_frac_mask);
-}
-
-// Debugging (Wagnard/godot#1): GODOT_D3D12_VOLATILE_ROOTSIG=1 gives every range and root descriptor the volatile flags,
-// which is root signature 1.0's behaviour, to tell whether a static data promise is broken. ShaderRD keys its cache on
-// the same variable, as the root signature is stored in the shader container.
-static bool _volatile_root_signature() {
-	static const bool enabled = OS::get_singleton()->get_environment("GODOT_D3D12_VOLATILE_ROOTSIG") == "1";
-	return enabled;
 }
 
 // SPIR-V to DXIL does way too many allocations, which causes worker threads
@@ -1240,10 +1231,6 @@ bool RenderingShaderContainerD3D12::_generate_root_signature(BitField<RenderingD
 				} else if (p_range_type == D3D12_DESCRIPTOR_RANGE_TYPE_CBV) {
 					flags = D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE;
 				}
-				if (_volatile_root_signature()) {
-					// Root signature 1.0 behaviour ("Root Signature Version 1.1" > "Flag Summary"). Sampler ranges take no DATA flags.
-					flags = p_range_type == D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER ? D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE : (D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE);
-				}
 
 				if (p_num_descriptors == UINT_MAX) {
 					// An unbounded array: as many descriptors as the uniform set gives it, not all of them initialized.
@@ -1325,7 +1312,7 @@ bool RenderingShaderContainerD3D12::_generate_root_signature(BitField<RenderingD
 
 					switch (range_type) {
 						case D3D12_DESCRIPTOR_RANGE_TYPE_CBV: {
-							root_param.InitAsConstantBufferView(dxil_register, 0, _volatile_root_signature() ? D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE : D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE, visibility);
+							root_param.InitAsConstantBufferView(dxil_register, 0, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE, visibility);
 						} break;
 						case D3D12_DESCRIPTOR_RANGE_TYPE_SRV: {
 							root_param.InitAsShaderResourceView(dxil_register, 0, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE, visibility);

@@ -128,9 +128,6 @@ private:
 		uint64_t id = 0;
 	};
 	bool replay_thread_enabled = false;
-	bool single_draw_graph = false; // GODOT_RD_SINGLE_GRAPH=1, debugging.
-	bool shadow_section_split = false; // GODOT_RD_SHADOW_SPLIT=1, debugging.
-	bool shadow_section_active = false;
 	Thread replay_thread;
 	ConditionVariable replay_condition; // A job was pushed, or the thread must exit (under submit_mutex).
 	LocalVector<ReplayJob> replay_jobs; // FIFO, under submit_mutex.
@@ -1782,11 +1779,6 @@ public:
 
 	void draw_list_end();
 
-	// Debugging (Wagnard/godot#1): the scene renderer marks its shadow passes, for GODOT_SHADOW_CHAIN_ORDER (they keep
-	// submission order) and GODOT_RD_SHADOW_SPLIT (each of their draw lists starts a command buffer of its own).
-	void debug_shadow_section_begin();
-	void debug_shadow_section_end();
-
 	// Splits the active draw list in p_count parts that other threads may record at the same time, each with the
 	// DrawListID it gets in r_split_ids and the usual draw_list_*() functions. Each part starts with nothing bound.
 	// draw_list_split_end(), on the render thread once every part is recorded, appends them to the draw list in order.
@@ -1980,12 +1972,6 @@ private:
 	bool _vertex_array_make_mutable(VertexArray *p_vertex_array, RID p_resource_id, RDG::ResourceTracker *p_resource_tracker);
 	bool _index_array_make_mutable(IndexArray *p_index_array, RDG::ResourceTracker *p_resource_tracker);
 	bool _uniform_set_make_mutable(UniformSet *p_uniform_set, RID p_resource_id, RDG::ResourceTracker *p_resource_tracker);
-	// GODOT_RD_GRAPH_CHECK=1: a resource a uniform set reads without the graph knowing (left in untracked_usage although it
-	// is tracked now, or a view without a tracker of a tracked texture) is reported once.
-	bool graph_check_uniform_sets = false;
-	Mutex graph_check_mutex;
-	HashSet<uint64_t> graph_check_reported;
-	void _graph_check_uniform_set(const UniformSet *p_uniform_set);
 	bool _acceleration_structure_make_mutable(AccelerationStructure *p_acceleration_structure, RID p_resource_id, RDG::ResourceTracker *p_resource_tracker);
 	bool _dependency_make_mutable(RID p_id, RID p_resource_id, RDG::ResourceTracker *p_resource_tracker);
 	bool _dependencies_make_mutable_recursive(RID p_id, RDG::ResourceTracker *p_resource_tracker);

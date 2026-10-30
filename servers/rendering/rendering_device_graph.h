@@ -36,7 +36,6 @@
 
 #ifdef DEV_ENABLED
 #include "core/templates/rb_map.h"
-#include "core/templates/safe_refcount.h"
 #endif
 
 // Buffer barriers have not shown any significant improvement or shown to be
@@ -993,52 +992,6 @@ private:
 		uint32_t slice_on_calling_thread[MAX_SLICES] = {};
 	};
 	bool parallel_stats = false;
-
-	// GODOT_RD_GRAPH_CHECK=1 (debugging): every access of a command to a resource is kept, and once the levels are computed,
-	// any two accesses that conflict (a write, overlapping subresources and draw list regions) must be in increasing levels,
-	// else the sort may run them out of order. A violation means a dependency the graph did not record.
-	struct GraphCheckAccess {
-		ResourceTracker *tracker = nullptr; // The parent's for a slice.
-		Rect2i subresources; // Mipmaps x layers.
-		Rect2i region; // The draw list's region for an attachment usage.
-		int32_t command_index = -1;
-		ResourceUsage usage = RESOURCE_USAGE_NONE;
-		bool write = false;
-		bool region_write = false; // An attachment write to only a region of the texture.
-	};
-	bool graph_check_enabled = false;
-	bool serialize_levels = false;
-
-	// Debugging (Wagnard/godot#1). GODOT_SHADOW_CHAIN_ORDER=1: the draw lists recorded between debug_order_chain_begin()
-	// and debug_order_chain_end() keep their submission order. GODOT_RD_UPDATES_IN_PLACE=1: a buffer or texture update
-	// runs after the command submitted before it instead of being moved up.
-	// GODOT_RD_UPDATES_IN_PLACE_RANGE=a-b limits that to the updates submitted at indices a to b of the frame (the dump's
-	// #), GODOT_RD_UPDATES_IN_PLACE_ANCHOR=N makes them run after command N instead, and each such update is printed once.
-	// GODOT_SHADOW_SECTION_FENCE=1: every command submitted before the shadow section runs before it.
-	bool order_chain_enabled = false;
-	bool order_chain_active = false;
-	int32_t order_chain_last = -1;
-	bool updates_in_place = false;
-	int32_t updates_in_place_from = 0;
-	int32_t updates_in_place_to = INT32_MAX;
-	int32_t updates_in_place_anchor = -1;
-	LocalVector<int32_t> updates_in_place_logged;
-	bool shadow_section_fence = false;
-	void _debug_update_in_place(int32_t p_command_index, RecordedCommand *r_command, uint64_t p_destination, bool p_texture, uint64_t p_bytes);
-
-	// GODOT_RD_GRAPH_DUMP=<directory> (debugging): when <directory>/dump_now appears, the next 4 frames' commands are written
-	// to <directory>, in level order with their accesses. Shared by the graphs that alternate frames.
-	String graph_dump_directory;
-	static inline SafeNumeric<int32_t> graph_dump_frames_left;
-	static inline SafeNumeric<uint32_t> graph_dump_serial;
-	bool graph_dump_active = false;
-	void _graph_dump(const RecordedCommandSort *p_sorted_commands, uint32_t p_count);
-	LocalVector<GraphCheckAccess> graph_check_accesses;
-	LocalVector<uint32_t> graph_check_order;
-	uint64_t graph_check_frames = 0;
-	uint64_t graph_check_violation_frames = 0;
-	uint64_t graph_check_last_print_msec = 0;
-	void _graph_check_levels(const RecordedCommandSort *p_levels_by_command);
 	ParallelStats parallel_stats_data;
 	uint64_t stats_callback_usec = 0; // This frame's driver callbacks; they are all recorded by the calling thread.
 	uint64_t parallel_launch_usec = 0;
@@ -1163,8 +1116,6 @@ public:
 	void add_texture_update(RDD::TextureID p_dst, ResourceTracker *p_dst_tracker, VectorView<RecordedBufferToTextureCopy> p_buffer_copies, VectorView<ResourceTracker *> p_buffer_trackers = VectorView<ResourceTracker *>());
 	void add_capture_timestamp(RDD::QueryPoolID p_query_pool, uint32_t p_index);
 	void add_synchronization();
-	void debug_order_chain_begin();
-	void debug_order_chain_end();
 	void begin_label(const Span<char> &p_label_name, const Color &p_color);
 	void end_label();
 	void end(bool p_reorder_commands, bool p_full_barriers, RDD::CommandBufferID &r_command_buffer, CommandBufferPool &r_command_buffer_pool);

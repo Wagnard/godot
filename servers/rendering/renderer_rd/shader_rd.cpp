@@ -621,12 +621,6 @@ static const uint32_t cache_file_version = 4;
 
 String ShaderRD::_get_cache_file_relative_path(Version *p_version, int p_group, const String &p_api_name) {
 	String sha1 = _version_get_sha1(p_version);
-	// Debugging (Wagnard/godot#1): GODOT_D3D12_VOLATILE_ROOTSIG=1 changes the root signatures stored in D3D12 shaders, so
-	// they get their own cache files instead of reusing or overwriting the regular ones.
-	static const bool volatile_root_signature = OS::get_singleton()->get_environment("GODOT_D3D12_VOLATILE_ROOTSIG") == "1";
-	if (volatile_root_signature && p_api_name.to_lower() == "d3d12") {
-		return name.path_join(group_sha256[p_group]).path_join(sha1) + "." + p_api_name + ".rs10.cache";
-	}
 	return name.path_join(group_sha256[p_group]).path_join(sha1) + "." + p_api_name + ".cache";
 }
 
