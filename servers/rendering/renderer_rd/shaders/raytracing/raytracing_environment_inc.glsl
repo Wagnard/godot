@@ -203,9 +203,11 @@ bool rt_environment_visible(vec3 p_origin, vec3 p_direction) {
 
 // One direction from the sky's distribution: what each lobe would take from it, as shade_and_bounce()'s BRDF sampling
 // weighs that direction (its sample weight times its density), times the sky's share of the direction. p_n: the clamped
-// shading normal; p_ao: the occlusion the diffuse bounce applies. r_specular: the specular lobe's part of the result.
-vec3 rt_environment_nee(RTEnvSampling p_env, vec3 p_origin, vec3 p_geometry_normal, vec3 p_n, vec3 p_v, MaterialProperties p_material, float p_ao, inout uint r_rng_state, out vec3 r_specular) {
+// shading normal; p_ao: the occlusion the diffuse bounce applies. With NRD, r_specular: the specular lobe's part of it.
+vec3 rt_environment_nee(RTEnvSampling p_env, vec3 p_origin, vec3 p_geometry_normal, vec3 p_n, vec3 p_v, MaterialProperties p_material, float p_ao, inout uint r_rng_state NRD_SPECULAR_PARAM) {
+#ifdef NRD_ENABLED
 	r_specular = vec3(0.0);
+#endif
 	const vec3 sky_dir = rt_sky_sample(p_env, rand2(r_rng_state));
 	const vec3 l = normalize(transpose(p_env.world_to_sky) * sky_dir);
 	// Directions the BRDF sampling never traces as they are: below the surface or the shading normal.
@@ -254,15 +256,23 @@ vec3 rt_environment_nee(RTEnvSampling p_env, vec3 p_origin, vec3 p_geometry_norm
 		const float lobe_pdf = rt_env_lobe_pdf(p_env, true, v_local, l_local);
 		const vec3 specular = ms * f * specularSampleWeight(data.alpha, data.alphaSquared, n_dot_l, n_dot_v, h_dot_l, n_dot_h) * (lobe_pdf / p_env.specular_probability);
 		const float share = float(rt_env_mis_share(lobe_pdf, sky_pdf)) / 65535.0;
+#ifdef NRD_ENABLED
 		r_specular = specular * rt_environment_light(sky_dir, true) * share;
 		value += r_specular;
+#else
+		value += specular * rt_environment_light(sky_dir, true) * share;
+#endif
 	}
 
 	if (!(dot(value, vec3(1.0)) > 0.0) || !rt_environment_visible(p_origin, l)) {
+#ifdef NRD_ENABLED
 		r_specular = vec3(0.0);
+#endif
 		return vec3(0.0);
 	}
+#ifdef NRD_ENABLED
 	r_specular /= sky_pdf;
+#endif
 	return value / sky_pdf;
 }
 

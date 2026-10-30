@@ -6,6 +6,7 @@
 layout(constant_id = 0) const uint RT_FLAGS = 0u;
 
 #define RT_FLAG_DLSS_RR_ENABLED (1u << 1)
+#define RT_FLAG_NRD_ENABLED (1u << 2) // NRD_ENABLED: the raygen's split for NRD (PT_DENOISER_NRD_REBLUR).
 
 // The Environment's fog, from the scene data as raster reads it: uniform across the dispatch, so switching it keeps the
 // pipeline and its hit groups.

@@ -248,6 +248,9 @@ struct PathState {
 #define NRD_MISS_HIT_T 65504.0
 // The floor of the albedo guides each lobe's light is divided by, and multiplied back by (raytracing_nrd_composite.glsl).
 #define NRD_ALBEDO_MIN 0.001
+// The specular part of the direct light, which the split needs: a parameter of lights_evaluate_direct_lighting(),
+// lights_evaluate_light() and rt_environment_nee() in this variant only, so that the others' code is unchanged.
+#define NRD_SPECULAR_PARAM , out vec3 r_specular
 
 void nrd_path_init(inout PathState ps, bool p_camera_path) {
 	ps.nrd_emission = vec3(0.0);
@@ -270,6 +273,8 @@ float nrd_lobe_threshold(uvec2 p_pixel, uint p_frame) {
 	const float value = (float(bayer[(p_pixel.y & 3u) * 4u + (p_pixel.x & 3u)]) + 0.5) / 16.0;
 	return fract(value + float(p_frame) * 0.61803398875);
 }
+#else
+#define NRD_SPECULAR_PARAM
 #endif
 
 // Bounce count helpers (bits 0-3: total, bits 4-7: diffuse). A path ends at RT_MAX_BOUNCES (8) and MAX_DIFFUSE_BOUNCES.

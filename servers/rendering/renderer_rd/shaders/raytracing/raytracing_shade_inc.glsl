@@ -197,9 +197,14 @@ bool shade_and_bounce(inout PathState ps, HitRecord r, vec3 p_ray_origin, vec3 p
 		vec3 hit_pos_offset = offset_ray_origin(hit_pos, r.geometry_normal);
 		vec3 hit_pos_back = offset_ray_origin(hit_pos, -r.geometry_normal);
 		bool is_indirect = (diffuse_bounces > 0u);
+#ifdef NRD_ENABLED
 		vec3 direct_specular;
 		vec3 direct_light = lights_evaluate_direct_lighting(
 				hit_pos_offset, hit_pos_back, r.geometry_normal, N, V, brdf_mat, r.backlight, (r.flags & HIT_FLAG_SPECULAR_DISABLED) != 0u, ps.rng_state, is_indirect, rt_light_count, geometries[r.geometry_idx].layer_mask, direct_specular);
+#else
+		vec3 direct_light = lights_evaluate_direct_lighting(
+				hit_pos_offset, hit_pos_back, r.geometry_normal, N, V, brdf_mat, r.backlight, (r.flags & HIT_FLAG_SPECULAR_DISABLED) != 0u, ps.rng_state, is_indirect, rt_light_count, geometries[r.geometry_idx].layer_mask);
+#endif
 		ps.radiance += ps.throughput * direct_light * mix(1.0, r.ao, r.ao_light_affect);
 #ifdef NRD_ENABLED
 		if (nrd_primary) {
@@ -219,10 +224,10 @@ bool shade_and_bounce(inout PathState ps, HitRecord r, vec3 p_ray_origin, vec3 p
 	// nrd_lobe_threshold()); the sky's sampling below weighs its directions with this same chance.
 #ifdef NRD_ENABLED
 	const vec2 lobe_probability_range = nrd_primary ? vec2(0.25, 0.75) : vec2(0.01, 0.99);
-#else
-	const vec2 lobe_probability_range = vec2(0.01, 0.99);
-#endif
 	const float specular_probability = diffuseLum < 0.0001 ? 1.0 : (specularLum < 0.0001 ? 0.0 : clamp(specularLum / (specularLum + diffuseLum), lobe_probability_range.x, lobe_probability_range.y));
+#else
+	const float specular_probability = diffuseLum < 0.0001 ? 1.0 : (specularLum < 0.0001 ? 0.0 : clamp(specularLum / (specularLum + diffuseLum), 0.01, 0.99));
+#endif
 
 	// =================================================================
 	// NEE of the Environment: one direction from the sky's distribution, combined with the BRDF sampling below by
@@ -230,8 +235,12 @@ bool shade_and_bounce(inout PathState ps, HitRecord r, vec3 p_ray_origin, vec3 p
 	// =================================================================
 	RTEnvSampling env_sampling = rt_env_sampling_setup(specular_probability, roughness, !is_unextended(ps.packed_bounces_flags), dot(N, V));
 	if (env_sampling.diffuse || env_sampling.specular) {
+#ifdef NRD_ENABLED
 		vec3 env_specular;
 		vec3 env_light = rt_environment_nee(env_sampling, offset_ray_origin(hit_pos, r.geometry_normal), r.geometry_normal, N, V, brdf_mat, r.ao, ps.rng_state, env_specular);
+#else
+		vec3 env_light = rt_environment_nee(env_sampling, offset_ray_origin(hit_pos, r.geometry_normal), r.geometry_normal, N, V, brdf_mat, r.ao, ps.rng_state);
+#endif
 		ps.radiance += ps.throughput * env_light;
 #ifdef NRD_ENABLED
 		if (nrd_primary) {
@@ -248,19 +257,14 @@ bool shade_and_bounce(inout PathState ps, HitRecord r, vec3 p_ray_origin, vec3 p
 		brdfType = DIFFUSE_TYPE;
 	} else {
 		float brdfProbability = specular_probability;
-		float lobe_random;
 #ifdef NRD_ENABLED
-		if (nrd_primary) {
-			// NRD's lobe choice at the primary hit: against a Bayer threshold (nrd_lobe_threshold()), so that the hit
-			// distance NRD rebuilds for the skipped lobe has neighbors to come from.
-			lobe_random = nrd_lobe_threshold(gl_LaunchIDEXT.xy, uint(get_rt_param(RT_PARAM_FRAME_INDEX)));
-		} else {
-			lobe_random = rand(ps.rng_state);
-		}
-#else
-		lobe_random = rand(ps.rng_state);
-#endif
+		// NRD's lobe choice at the primary hit: against a Bayer threshold (nrd_lobe_threshold()), so that the hit distance
+		// NRD rebuilds for the skipped lobe has neighbors to come from.
+		const float lobe_random = nrd_primary ? nrd_lobe_threshold(gl_LaunchIDEXT.xy, uint(get_rt_param(RT_PARAM_FRAME_INDEX))) : rand(ps.rng_state);
 		if (lobe_random < brdfProbability) {
+#else
+		if (rand(ps.rng_state) < brdfProbability) {
+#endif
 			brdfType = SPECULAR_TYPE;
 			ps.throughput /= brdfProbability;
 		} else {
