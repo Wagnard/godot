@@ -33,6 +33,7 @@
 #include "core/object/callable_mp.h"
 #include "core/os/os.h"
 #include "servers/rendering/renderer_compositor.h"
+#include "servers/rendering/renderer_rd/effects/copy_effects.h"
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
@@ -144,6 +145,9 @@ ShadowWatch::ShadowWatch() {
 }
 
 ShadowWatch::~ShadowWatch() {
+	if (driver_watch_shader.is_valid()) {
+		RD::get_singleton()->debug_watch_push_constants(driver_watch_shader, nullptr);
+	}
 	singleton = nullptr;
 	for (KeyValue<uint64_t, LocalVector<LightSample *>> &E : light_history) {
 		for (LightSample *sample : E.value) {
@@ -178,7 +182,28 @@ void ShadowWatch::begin_render() {
 	next_slot = (next_slot + 1) % SLOT_COUNT;
 }
 
+void ShadowWatch::_push_constants_bound_static(const uint32_t *p_data, uint32_t p_count, bool p_root_signature_bound) {
+	// CopyEffects::CopyToDPPushConstant: z_far, z_near, texel size x and y, record offset, stamp, z_far again, pad.
+	if (singleton == nullptr || p_count < 6) {
+		return;
+	}
+	const uint64_t key = (uint64_t(p_data[5]) << 32) | p_data[4];
+	MutexLock lock(singleton->driver_push_mutex);
+	if (singleton->driver_pushes.size() > 8192) {
+		// Copies of renders the watch skipped are never looked up.
+		singleton->driver_pushes.clear();
+	}
+	singleton->driver_pushes[key] = { p_data[0], p_root_signature_bound };
+}
+
 void ShadowWatch::cube_copy_record(RID p_light, RID p_cubemap, float p_z_near, float p_z_far, RID &r_record, uint32_t r_offset[2], uint32_t &r_stamp) {
+	if (!driver_watch_registered) {
+		driver_watch_registered = true;
+		driver_watch_shader = CopyEffects::get_singleton()->get_cube_to_dp_watch_shader();
+		if (driver_watch_shader.is_valid()) {
+			RD::get_singleton()->debug_watch_push_constants(driver_watch_shader, &ShadowWatch::_push_constants_bound_static);
+		}
+	}
 	CubeCopy copy;
 	copy.light = p_light;
 	copy.world_position = LightStorage::get_singleton()->light_instance_get_base_transform(p_light).origin;
@@ -312,6 +337,7 @@ void ShadowWatch::watch_lights(const RenderDataRD *p_render_data) {
 			wl.recorded = copies[i].record != UINT32_MAX;
 			wl.copy_z_near = copies[i].z_near;
 			wl.copy_z_far = copies[i].z_far;
+			wl.record_offset = copies[i].record;
 			if (wl.recorded) {
 				for (int pass = 0; pass < 2; pass++) {
 					const LocalVector<CubeCopy> *list = pass == 0 ? &copies : previous;
@@ -564,6 +590,19 @@ String ShadowWatch::_copy_verdict(const LightSample &p_sample, const WatchedLigh
 			} else {
 				text += vformat(" Its second copy of z_far is %.4f, neither.", got[6]);
 			}
+			// What our D3D12 driver was handed for this copy, right where it calls SetGraphicsRoot32BitConstants().
+			if (!p_sample.driver_seen[p_half]) {
+				text += " The D3D12 driver never reported receiving this copy's constants (not D3D12, or never handed over).";
+			} else {
+				float driver_z_far;
+				memcpy(&driver_z_far, &p_sample.driver_z_far[p_half], sizeof(float));
+				const char *root = p_sample.driver_root_signature_bound[p_half] ? "the root signature it last bound being the copy shader's" : "the root signature it last bound NOT being the copy shader's";
+				if (driver_z_far == expected[0]) {
+					text += vformat(" The D3D12 driver was handed the right z_far (%.4f), %s, and set it with SetGraphicsRoot32BitConstants(): the value changed after our driver handed it to Direct3D 12.", driver_z_far, root);
+				} else {
+					text += vformat(" The D3D12 driver was already handed z_far %.4f, %s: it changed before our driver, in RenderingDevice or its graph.", driver_z_far, root);
+				}
+			}
 		}
 		String owners;
 		for (const CopyParams &params : p_render.copy_params) {
@@ -639,6 +678,17 @@ void ShadowWatch::_analyze(const WatchedRender &p_render, uint64_t p_serial, con
 			}
 			for (uint32_t w = 0; w < 7; w++) {
 				s->header[h][w] = half[80 + w];
+			}
+			if (wl.record_offset != UINT32_MAX) {
+				const uint64_t key = (uint64_t(uint32_t(p_serial)) << 32) | (wl.record_offset + h * COPY_HALF_RECORD);
+				MutexLock lock(driver_push_mutex);
+				const DriverPush *push = driver_pushes.getptr(key);
+				if (push) {
+					s->driver_seen[h] = true;
+					s->driver_z_far[h] = push->z_far;
+					s->driver_root_signature_bound[h] = push->root_signature_bound;
+					driver_pushes.erase(key);
+				}
 			}
 		}
 

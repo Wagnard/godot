@@ -7271,6 +7271,13 @@ void RenderingDevice::debug_shadow_section_end() {
 	draw_graph->debug_order_chain_end();
 }
 
+void RenderingDevice::debug_watch_push_constants(RID p_shader, RenderingDeviceDriver::PushConstantWatchCallback p_callback) {
+	ERR_RENDER_THREAD_GUARD();
+	const Shader *shader = shader_owner.get_or_null(p_shader);
+	ERR_FAIL_NULL(shader);
+	driver->debug_watch_push_constants(shader->driver_id, p_callback);
+}
+
 /***************************/
 /**** RAYTRACING LISTS ****/
 /**************************/

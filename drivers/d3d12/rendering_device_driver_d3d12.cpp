@@ -4972,6 +4972,9 @@ void RenderingDeviceDriverD3D12::command_bind_push_constants(CommandBufferID p_c
 		cmd_buf_info->cmd_list->SetComputeRoot32BitConstants(0, p_data.size(), p_data.ptr(), p_dst_first_index);
 	} else if (shader_info_in->pipeline_type == PIPELINE_TYPE_RASTERIZATION) {
 		cmd_buf_info->cmd_list->SetGraphicsRoot32BitConstants(0, p_data.size(), p_data.ptr(), p_dst_first_index);
+		if (unlikely(debug_watch_callback != nullptr) && p_shader.id == debug_watch_shader.id) {
+			debug_watch_callback(p_data.ptr(), p_data.size(), cmd_buf_info->graphics_root_signature_crc == shader_info_in->root_signature_crc);
+		}
 	} else if (shader_info_in->pipeline_type == PIPELINE_TYPE_RAYTRACING) {
 		ERR_FAIL_MSG("Ray tracing is not currently supported by the D3D12 driver.");
 	} else {
@@ -7251,6 +7254,11 @@ void RenderingDeviceDriverD3D12::command_buffer_invalidate_state_cache(CommandBu
 	cmd_buf_info->nir_compute_runtime_data_root_param_idx = UINT32_MAX;
 	cmd_buf_info->pending_dyn_params = true;
 	cmd_buf_info->descriptor_heaps_set = false;
+}
+
+void RenderingDeviceDriverD3D12::debug_watch_push_constants(ShaderID p_shader, PushConstantWatchCallback p_callback) {
+	debug_watch_shader = p_shader;
+	debug_watch_callback = p_callback;
 }
 
 /********************/

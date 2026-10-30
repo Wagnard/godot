@@ -1072,7 +1072,13 @@ public:
 	virtual void command_insert_breadcrumb(CommandBufferID p_cmd_buffer, uint32_t p_data) override final;
 	virtual void *command_buffer_get_native_handle(CommandBufferID p_cmd_buffer) override final;
 	virtual void command_buffer_invalidate_state_cache(CommandBufferID p_cmd_buffer) override final;
+	virtual void debug_watch_push_constants(ShaderID p_shader, PushConstantWatchCallback p_callback) override final;
 
+private:
+	ShaderID debug_watch_shader;
+	PushConstantWatchCallback debug_watch_callback = nullptr;
+
+public:
 	/********************/
 	/**** SUBMISSION ****/
 	/********************/
