@@ -33,7 +33,6 @@
 #include "core/object/callable_mp.h"
 #include "core/os/os.h"
 #include "servers/rendering/renderer_compositor.h"
-#include "servers/rendering/renderer_rd/effects/copy_effects.h"
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
@@ -145,9 +144,6 @@ ShadowWatch::ShadowWatch() {
 }
 
 ShadowWatch::~ShadowWatch() {
-	if (driver_watch_shader.is_valid()) {
-		RD::get_singleton()->debug_watch_push_constants(driver_watch_shader, nullptr);
-	}
 	singleton = nullptr;
 	for (KeyValue<uint64_t, LocalVector<LightSample *>> &E : light_history) {
 		for (LightSample *sample : E.value) {
@@ -182,28 +178,7 @@ void ShadowWatch::begin_render() {
 	next_slot = (next_slot + 1) % SLOT_COUNT;
 }
 
-void ShadowWatch::_push_constants_bound_static(const uint32_t *p_data, uint32_t p_count, bool p_root_signature_bound) {
-	// CopyEffects::CopyToDPPushConstant: z_far, z_near, texel size x and y, record offset, stamp, z_far again, pad.
-	if (singleton == nullptr || p_count < 6) {
-		return;
-	}
-	const uint64_t key = (uint64_t(p_data[5]) << 32) | p_data[4];
-	MutexLock lock(singleton->driver_push_mutex);
-	if (singleton->driver_pushes.size() > 8192) {
-		// Copies of renders the watch skipped are never looked up.
-		singleton->driver_pushes.clear();
-	}
-	singleton->driver_pushes[key] = { p_data[0], p_root_signature_bound };
-}
-
 void ShadowWatch::cube_copy_record(RID p_light, RID p_cubemap, float p_z_near, float p_z_far, RID &r_record, uint32_t r_offset[2], uint32_t &r_stamp) {
-	if (!driver_watch_registered) {
-		driver_watch_registered = true;
-		driver_watch_shader = CopyEffects::get_singleton()->get_cube_to_dp_watch_shader();
-		if (driver_watch_shader.is_valid()) {
-			RD::get_singleton()->debug_watch_push_constants(driver_watch_shader, &ShadowWatch::_push_constants_bound_static);
-		}
-	}
 	CubeCopy copy;
 	copy.light = p_light;
 	copy.world_position = LightStorage::get_singleton()->light_instance_get_base_transform(p_light).origin;
@@ -337,7 +312,6 @@ void ShadowWatch::watch_lights(const RenderDataRD *p_render_data) {
 			wl.recorded = copies[i].record != UINT32_MAX;
 			wl.copy_z_near = copies[i].z_near;
 			wl.copy_z_far = copies[i].z_far;
-			wl.record_offset = copies[i].record;
 			if (wl.recorded) {
 				for (int pass = 0; pass < 2; pass++) {
 					const LocalVector<CubeCopy> *list = pass == 0 ? &copies : previous;
@@ -542,7 +516,7 @@ String ShadowWatch::_history(const LocalVector<LightSample *> &p_history) const 
 }
 
 void ShadowWatch::_expected_copy_header(const WatchedLight &p_light, int p_half, float r_header[6]) {
-	// As CopyEffects::copy_cubemap_to_dp() sets the push constants, and where the first grid point lands.
+	// As CopyEffects::copy_cubemap_to_dp() sets the parameters, and where the first grid point lands.
 	const Rect2i &rect = p_light.half_rect[p_half];
 	r_header[0] = p_light.copy_z_far;
 	r_header[1] = p_light.copy_z_near;
@@ -570,15 +544,7 @@ String ShadowWatch::_copy_verdict(const LightSample &p_sample, const WatchedLigh
 		return "Its copy left no record (more than 16 copies in the view): no verdict.";
 	}
 	if (p_sample.stale[p_half]) {
-		String stale = vformat("The copy of half %d left no record in this frame: it did not run, or ran with another record offset or stamp than it was given.", p_half);
-		if (p_sample.driver_seen[p_half]) {
-			float driver_z_far;
-			memcpy(&driver_z_far, &p_sample.driver_z_far[p_half], sizeof(float));
-			stale += vformat(" Yet the D3D12 driver WAS handed its constants with that record offset and stamp (z_far %.4f, given %.4f), the root signature it last bound %s, and set them: the draw was submitted with them, so after our driver handed them to Direct3D 12 the copy either did not run or ran with other constants.", driver_z_far, p_light.copy_z_far, p_sample.driver_root_signature_bound[p_half] ? "being the copy shader's" : "NOT being the copy shader's");
-		} else {
-			stale += " The D3D12 driver never reported receiving its constants either: they were lost before our driver.";
-		}
-		return stale;
+		return vformat("The copy of half %d left no record in this frame: it did not run, or ran with another record offset or stamp than it was given.", p_half);
 	}
 	const uint32_t points = 1024;
 	String text;
@@ -587,29 +553,16 @@ String ShadowWatch::_copy_verdict(const LightSample &p_sample, const WatchedLigh
 	float got[7];
 	memcpy(got, p_sample.header[p_half], sizeof(got));
 	if (!_copy_params_as_given(p_sample, p_light, p_half)) {
-		text = vformat("The copy of half %d RAN WITH OTHER CONSTANTS than it was given: z_far %.4f (given %.4f), z_near %.4f (given %.4f), texel size (%.6f, %.6f) (given (%.6f, %.6f)), first point at (%.1f, %.1f) (expected (%.1f, %.1f)).",
+		text = vformat("The copy of half %d RAN WITH OTHER PARAMETERS than it was given: z_far %.4f (given %.4f), z_near %.4f (given %.4f), texel size (%.6f, %.6f) (given (%.6f, %.6f)), first point at (%.1f, %.1f) (expected (%.1f, %.1f)).",
 				p_half, got[0], expected[0], got[1], expected[1], got[2], got[3], expected[2], expected[3], got[4], got[5], expected[4], expected[5]);
-		// The second copy of z_far, at the end of the same constants, written by the same CPU code.
+		// The second copy of z_far, at the end of the same parameters, written by the same CPU code.
 		if (got[0] != expected[0]) {
 			if (got[6] == expected[0]) {
-				text += vformat(" Its second copy of z_far, at the end of the same constants, is right (%.4f): only the FIRST constant changed after the CPU recorded them, on the way to the GPU (driver or GPU side).", got[6]);
+				text += vformat(" Its second copy of z_far, at the end of the same parameters, is right (%.4f): only the first one changed.", got[6]);
 			} else if (got[6] == got[0]) {
-				text += vformat(" Its second copy of z_far is wrong the same way (%.4f): the constants were RECORDED with that z_far, on the CPU side.", got[6]);
+				text += vformat(" Its second copy of z_far is wrong the same way (%.4f).", got[6]);
 			} else {
 				text += vformat(" Its second copy of z_far is %.4f, neither.", got[6]);
-			}
-			// What our D3D12 driver was handed for this copy, right where it calls SetGraphicsRoot32BitConstants().
-			if (!p_sample.driver_seen[p_half]) {
-				text += " The D3D12 driver never reported receiving this copy's constants (not D3D12, or never handed over).";
-			} else {
-				float driver_z_far;
-				memcpy(&driver_z_far, &p_sample.driver_z_far[p_half], sizeof(float));
-				const char *root = p_sample.driver_root_signature_bound[p_half] ? "the root signature it last bound being the copy shader's" : "the root signature it last bound NOT being the copy shader's";
-				if (driver_z_far == expected[0]) {
-					text += vformat(" The D3D12 driver was handed the right z_far (%.4f), %s, and set it with SetGraphicsRoot32BitConstants(): the value changed after our driver handed it to Direct3D 12.", driver_z_far, root);
-				} else {
-					text += vformat(" The D3D12 driver was already handed z_far %.4f, %s: it changed before our driver, in RenderingDevice or its graph.", driver_z_far, root);
-				}
 			}
 		}
 		String owners;
@@ -621,7 +574,7 @@ String ShadowWatch::_copy_verdict(const LightSample &p_sample, const WatchedLigh
 		text += owners.is_empty() ? " No other copy of this view was given that z_far and z_near. " : " That z_far and z_near were given to the copies of the omni lights at" + owners + ". ";
 	}
 	if (got[0] == expected[0] && got[1] == expected[1] && got[2] == expected[2] && got[3] == expected[3] && (got[4] != expected[4] || got[5] != expected[5])) {
-		text += "Its constants are right but it drew elsewhere than its region. ";
+		text += "Its parameters are right but it drew elsewhere than its region. ";
 	}
 	if (p_sample.write_diff[p_half] * 50 > points) {
 		text += vformat("The copy of half %d wrote other depth than the atlas now holds at %d of %d points: the half was written over after the copy. ", p_half, p_sample.write_diff[p_half], points);
@@ -686,17 +639,6 @@ void ShadowWatch::_analyze(const WatchedRender &p_render, uint64_t p_serial, con
 			}
 			for (uint32_t w = 0; w < 7; w++) {
 				s->header[h][w] = half[80 + w];
-			}
-			if (wl.record_offset != UINT32_MAX) {
-				const uint64_t key = (uint64_t(uint32_t(p_serial)) << 32) | (wl.record_offset + h * COPY_HALF_RECORD);
-				MutexLock lock(driver_push_mutex);
-				const DriverPush *push = driver_pushes.getptr(key);
-				if (push) {
-					s->driver_seen[h] = true;
-					s->driver_z_far[h] = push->z_far;
-					s->driver_root_signature_bound[h] = push->root_signature_bound;
-					driver_pushes.erase(key);
-				}
 			}
 		}
 
@@ -768,7 +710,7 @@ void ShadowWatch::_analyze(const WatchedRender &p_render, uint64_t p_serial, con
 			const bool record_problem = s->recorded && (s->stale[h] || s->write_diff[h] * 50 > 1024);
 			const bool params_problem = s->recorded && !s->stale[h] && !_copy_params_as_given(*s, wl, h);
 			if ((cube_mismatch || record_problem || params_problem) && _may_report(REPORT_COPY + uint64_t(h) * 16, wl.light)) {
-				String what = cube_mismatch ? vformat("atlas half %d does not match the cubemap it was copied from at %d of %d samples", h, s->mismatch[h], s->checked[h]) : (record_problem ? vformat("atlas half %d is not what its copy wrote", h) : vformat("the copy of atlas half %d ran with other constants than it was given", h));
+				String what = cube_mismatch ? vformat("atlas half %d does not match the cubemap it was copied from at %d of %d samples", h, s->mismatch[h], s->checked[h]) : (record_problem ? vformat("atlas half %d is not what its copy wrote", h) : vformat("the copy of atlas half %d ran with other parameters than it was given", h));
 				print_line(vformat("ShadowWatch: [COPY] %s: %s.\n  => %s%s", _light_name(wl, p_render), what, _copy_verdict(*s, wl, p_render, h), _history(history)));
 			}
 			// Against the view's previous render only: in a render this watch skipped, the light may have been redrawn.

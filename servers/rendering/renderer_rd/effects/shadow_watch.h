@@ -30,7 +30,6 @@
 
 #pragma once
 
-#include "core/os/mutex.h"
 #include "core/templates/hash_map.h"
 #include "core/templates/local_vector.h"
 #include "servers/rendering/renderer_rd/shaders/effects/shadow_watch.glsl.gen.h"
@@ -143,7 +142,6 @@ private:
 		bool recorded = false;
 		float copy_z_near = 0.0; // Given to its last copy of the render.
 		float copy_z_far = 0.0;
-		uint32_t record_offset = UINT32_MAX; // Of that copy's first half.
 		Candidate candidates[MAX_CANDIDATES];
 		uint32_t candidate_count = 0;
 		uint32_t face_casters[6] = {};
@@ -194,10 +192,6 @@ private:
 		uint32_t matches[2][MAX_CANDIDATES] = {};
 		// What each copy ran with: z_far, z_near, texel size x and y, first point x and y, the second copy of z_far.
 		uint32_t header[2][7] = {};
-		// What the D3D12 driver was handed for each half's copy (z_far bits), if it reported it.
-		bool driver_seen[2] = {};
-		uint32_t driver_z_far[2] = {};
-		bool driver_root_signature_bound[2] = {};
 		uint32_t face_casters[6] = {};
 		bool screen = false;
 		uint8_t vis[GRID_POINTS] = {};
@@ -234,18 +228,6 @@ private:
 	uint64_t anomalies = 0;
 	uint64_t heartbeat_usec = 0;
 	HashMap<uint64_t, uint64_t> last_report_usec; // By report kind and light.
-
-	// The copies' push constants as the D3D12 driver received them, by stamp and record offset, from the driver's
-	// recording threads (RenderingDevice::debug_watch_push_constants()).
-	struct DriverPush {
-		uint32_t z_far = 0;
-		bool root_signature_bound = false;
-	};
-	Mutex driver_push_mutex;
-	HashMap<uint64_t, DriverPush> driver_pushes;
-	bool driver_watch_registered = false;
-	RID driver_watch_shader;
-	static void _push_constants_bound_static(const uint32_t *p_data, uint32_t p_count, bool p_root_signature_bound);
 
 	static ShadowWatch *singleton;
 

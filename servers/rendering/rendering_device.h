@@ -1786,9 +1786,6 @@ public:
 	// submission order) and GODOT_RD_SHADOW_SPLIT (each of their draw lists starts a command buffer of its own).
 	void debug_shadow_section_begin();
 	void debug_shadow_section_end();
-	// Debugging (Wagnard/godot#1, ShadowWatch): the push constants of p_shader as the driver receives them (see
-	// RenderingDeviceDriver::debug_watch_push_constants()).
-	void debug_watch_push_constants(RID p_shader, RenderingDeviceDriver::PushConstantWatchCallback p_callback);
 
 	// Splits the active draw list in p_count parts that other threads may record at the same time, each with the
 	// DrawListID it gets in r_split_ids and the usual draw_list_*() functions. Each part starts with nothing bound.

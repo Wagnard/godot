@@ -36,6 +36,7 @@
 #include "servers/rendering/renderer_rd/renderer_compositor_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
+#include "servers/rendering/rendering_server_globals.h"
 
 #include <thirdparty/misc/cubemap_coeffs.h>
 
@@ -420,6 +421,9 @@ CopyEffects::~CopyEffects() {
 	}
 
 	copy_to_fb.shader.version_free(copy_to_fb.shader_version);
+	for (const RID &params_buffer : cube_to_dp.params_buffers) {
+		RD::get_singleton()->free_rid(params_buffer);
+	}
 	cube_to_dp.shader.version_free(cube_to_dp.shader_version);
 	cube_to_octmap.shader.version_free(cube_to_octmap.shader_version);
 
@@ -1146,18 +1150,36 @@ void CopyEffects::copy_cubemap_to_dp(RID p_source_rd_texture, RID p_dst_framebuf
 	screen_rect.size.width = (int32_t)(Math::round(p_dst_size.width));
 	screen_rect.size.height = (int32_t)(Math::round(p_dst_size.height));
 
-	CopyToDPPushConstant push_constant;
-	push_constant.z_far = p_z_far;
-	push_constant.z_near = p_z_near;
-	push_constant.texel_size[0] = 1.0f / p_dst_size.width;
-	push_constant.texel_size[1] = 1.0f / p_dst_size.height;
-	push_constant.texel_size[0] *= p_dp_flip ? -1.0f : 1.0f; // Encode dp flip as x size sign
-	push_constant.watch_offset = p_watch_offset;
-	push_constant.watch_stamp = p_watch_stamp;
-	// A second copy of z_far, at the end of the constants: ShadowWatch tells from it whether a wrong z_far was already in
-	// what was recorded, or only the first constant changed afterwards.
-	memcpy(&push_constant.pad[0], &push_constant.z_far, sizeof(float));
-	push_constant.pad[1] = 0;
+	CopyToDPParams params;
+	params.z_far = p_z_far;
+	params.z_near = p_z_near;
+	params.texel_size[0] = 1.0f / p_dst_size.width;
+	params.texel_size[1] = 1.0f / p_dst_size.height;
+	params.texel_size[0] *= p_dp_flip ? -1.0f : 1.0f; // Encode dp flip as x size sign
+	params.watch_offset = p_watch_offset;
+	params.watch_stamp = p_watch_stamp;
+	// A second copy of z_far, at the end of the parameters: ShadowWatch tells from it whether a wrong z_far was already
+	// in what was recorded, or only the first parameter changed afterwards.
+	memcpy(&params.pad[0], &params.z_far, sizeof(float));
+	params.pad[1] = 0;
+
+	// WORKAROUND, not a fix of our code (Wagnard/godot#1): the parameters go in a uniform buffer, not push constants. On
+	// D3D12 with NVIDIA (RTX 3080 Ti and 5070, 2026-10), these copies were seen running with another z_far than the one
+	// set in their root constants: our D3D12 driver was handed the right values and set them with
+	// SetGraphicsRoot32BitConstants() under the copy shader's root signature, yet the shader read 15.0, the value most of
+	// the copies get, in the two words holding z_far, while the words between them held this copy's own values. The
+	// half of the light's shadow it wrote then flickered. Nothing reads a uniform buffer's contents ahead of the draw.
+	// Each copy of a frame gets a buffer of its own: none is rewritten before the copy that reads it ran.
+	const uint64_t frame = RSG::rasterizer->get_frame_number();
+	if (frame != cube_to_dp.params_frame) {
+		cube_to_dp.params_frame = frame;
+		cube_to_dp.params_buffers_used = 0;
+	}
+	if (cube_to_dp.params_buffers_used == cube_to_dp.params_buffers.size()) {
+		cube_to_dp.params_buffers.push_back(RD::get_singleton()->uniform_buffer_create(sizeof(CopyToDPParams)));
+	}
+	const RID params_buffer = cube_to_dp.params_buffers[cube_to_dp.params_buffers_used++];
+	RD::get_singleton()->buffer_update(params_buffer, 0, sizeof(CopyToDPParams), &params);
 
 	const bool watch = p_watch_record.is_valid() && cube_to_dp.shader.is_variant_enabled(CUBE_TO_DP_WATCH);
 
@@ -1165,6 +1187,7 @@ void CopyEffects::copy_cubemap_to_dp(RID p_source_rd_texture, RID p_dst_framebuf
 	RID default_sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
 
 	RD::Uniform u_source_rd_texture(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ default_sampler, p_source_rd_texture }));
+	RD::Uniform u_params(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 2, params_buffer);
 
 	RID shader = cube_to_dp.shader.version_get_shader(cube_to_dp.shader_version, watch ? CUBE_TO_DP_WATCH : CUBE_TO_DP_DEFAULT);
 	ERR_FAIL_COND(shader.is_null());
@@ -1174,14 +1197,12 @@ void CopyEffects::copy_cubemap_to_dp(RID p_source_rd_texture, RID p_dst_framebuf
 	RD::get_singleton()->draw_list_bind_render_pipeline(draw_list, pipeline.get_render_pipeline(RD::INVALID_ID, RD::get_singleton()->framebuffer_get_format(p_dst_framebuffer)));
 	if (watch) {
 		RD::Uniform u_watch_record(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, p_watch_record);
-		RD::get_singleton()->draw_list_bind_uniform_set(draw_list, uniform_set_cache->get_cache(shader, 0, u_source_rd_texture, u_watch_record), 0);
+		RD::get_singleton()->draw_list_bind_uniform_set(draw_list, uniform_set_cache->get_cache(shader, 0, u_source_rd_texture, u_watch_record, u_params), 0);
 	} else {
-		RD::get_singleton()->draw_list_bind_uniform_set(draw_list, uniform_set_cache->get_cache(shader, 0, u_source_rd_texture), 0);
+		RD::get_singleton()->draw_list_bind_uniform_set(draw_list, uniform_set_cache->get_cache(shader, 0, u_source_rd_texture, u_params), 0);
 	}
 	RD::get_singleton()->draw_list_bind_index_array(draw_list, material_storage->get_quad_index_array());
 
-	// Without the watch, the shader's push constants stop before the watch fields.
-	RD::get_singleton()->draw_list_set_push_constant(draw_list, &push_constant, watch ? sizeof(CopyToDPPushConstant) : offsetof(CopyToDPPushConstant, watch_offset));
 	RD::get_singleton()->draw_list_draw(draw_list, true);
 	RD::get_singleton()->draw_list_end();
 }

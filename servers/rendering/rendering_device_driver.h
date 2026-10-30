@@ -931,12 +931,6 @@ public:
 	// redundant binds must forget what it last bound here.
 	virtual void command_buffer_invalidate_state_cache(CommandBufferID p_cmd_buffer) {}
 
-	// Debugging (Wagnard/godot#1, ShadowWatch): the callback gets the push constants of every bind for p_shader, as the
-	// driver receives them, and whether the root signature the driver last bound is that shader's. It may be called from
-	// several recording threads at once. A null callback stops it.
-	typedef void (*PushConstantWatchCallback)(const uint32_t *p_data, uint32_t p_count, bool p_root_signature_bound);
-	virtual void debug_watch_push_constants(ShaderID p_shader, PushConstantWatchCallback p_callback) {}
-
 	/********************/
 	/**** SUBMISSION ****/
 	/********************/
