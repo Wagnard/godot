@@ -35,6 +35,9 @@
 #include "servers/rendering/renderer_rd/environment/fog.h"
 #include "servers/rendering/renderer_rd/forward_clustered/scene_shader_raytracing.h"
 #include "servers/rendering/renderer_rd/framebuffer_cache_rd.h"
+#ifdef STREAMLINE_ENABLED
+#include "drivers/streamline/streamline_context.h"
+#endif
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
 #include "servers/rendering/rendering_device.h"
@@ -296,6 +299,20 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 		RID rt_environment = p_render_data->environment.is_valid() ? p_render_data->environment : RID();
 		rt_flags = SceneShaderRaytracing::compute_rt_flags(rt_environment);
 
+		// DLSS Ray Reconstruction where it cannot denoise (a GPU it does not support, or a view not scaled with DLSS, which
+		// carries it): NRD instead, where the engine was built with it, rather than no denoiser.
+		if ((rt_flags & SceneShaderRaytracing::RT_FLAG_DLSS_RR_ENABLED) && RendererRD::NRDDenoiser::is_available()) {
+			bool rr_runs = scale_type == SCALE_3D_DLSS;
+#ifdef STREAMLINE_ENABLED
+			rr_runs = rr_runs && StreamlineContext::get().streamline_capabilities.dlss_rr_available;
+#else
+			rr_runs = false;
+#endif
+			if (!rr_runs) {
+				rt_flags = (rt_flags & ~SceneShaderRaytracing::RT_FLAG_DLSS_RR_ENABLED) | SceneShaderRaytracing::RT_FLAG_NRD_ENABLED;
+			}
+		}
+
 		const bool dlss_rr_enabled = (rt_flags & SceneShaderRaytracing::RT_FLAG_DLSS_RR_ENABLED) != 0;
 		if (dlss_rr_enabled) {
 			raytracing->dlss_rr_ensure_buffers(rb.ptr());
@@ -517,9 +534,34 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 			RD::get_singleton()->draw_command_end_label();
 		}
 
-		// With NRD the raygen left each lobe's light of the primary surfaces apart: back onto the output before the fog, which
-		// lies in front of them.
+		// With NRD the raygen left each lobe's light of the primary surfaces apart: denoised by NRD's ReBLUR (where the engine
+		// was built with it), then back onto the output before the fog, which lies in front of them.
 		if ((rt_flags & SceneShaderRaytracing::RT_FLAG_NRD_ENABLED) && raytracing->nrd_has_buffers(rb.ptr())) {
+			if (RendererRD::NRDDenoiser::is_available()) {
+				if (!nrd_denoiser) {
+					nrd_denoiser = memnew(RendererRD::NRDDenoiser);
+				}
+				RendererRD::NRDDenoiser::Parameters params;
+				params.diffuse = raytracing->nrd_get_texture(rb.ptr(), RB_TEX_NRD_DIFFUSE);
+				params.specular = raytracing->nrd_get_texture(rb.ptr(), RB_TEX_NRD_SPECULAR);
+				params.normal_roughness = raytracing->nrd_get_texture(rb.ptr(), RB_TEX_NRD_NORMAL_ROUGHNESS);
+				params.view_z = raytracing->nrd_get_texture(rb.ptr(), RB_TEX_NRD_VIEW_Z);
+				params.motion_vectors = rb->get_velocity_buffer(false);
+				params.size = rb->get_internal_size();
+				params.projection = p_render_data->scene_data->cam_projection;
+				params.prev_projection = p_render_data->scene_data->prev_cam_projection;
+				params.cam_transform = p_render_data->scene_data->cam_transform;
+				params.prev_cam_transform = p_render_data->scene_data->prev_cam_transform;
+				// In pixels, as the temporal upscalers take it (_render_3d_upscaling()).
+				params.jitter = p_render_data->scene_data->taa_jitter * Vector2(params.size) * 0.5f;
+				params.prev_jitter = p_render_data->scene_data->prev_taa_jitter * Vector2(params.size) * 0.5f;
+
+				RENDER_TIMESTAMP("NRD");
+				RD::get_singleton()->draw_command_begin_label("NRD");
+				nrd_denoiser->denoise(rb.ptr(), params);
+				RD::get_singleton()->draw_command_end_label();
+			}
+
 			RENDER_TIMESTAMP("NRD Composite");
 			RD::get_singleton()->draw_command_begin_label("NRD Composite");
 			raytracing->nrd_composite(rb.ptr(), raytracing->nrd_get_texture(rb.ptr(), RB_TEX_NRD_DIFFUSE), raytracing->nrd_get_texture(rb.ptr(), RB_TEX_NRD_SPECULAR));
@@ -1089,6 +1131,9 @@ RenderForwardClusteredPT::~RenderForwardClusteredPT() {
 	}
 	if (rasterized_guides) {
 		memdelete(rasterized_guides);
+	}
+	if (nrd_denoiser) {
+		memdelete(nrd_denoiser);
 	}
 	if (pt_probes) {
 		memdelete(pt_probes);

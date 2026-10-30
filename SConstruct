@@ -201,6 +201,11 @@ opts.Add(BoolVariable("metal", "Enable the Metal rendering driver on supported p
 opts.Add(BoolVariable("use_volk", "Use the volk library to load the Vulkan loader dynamically", True))
 opts.Add(BoolVariable("use_streamline", "Enable Streamline support", True))
 opts.Add(BoolVariable("use_aftermath", "Enable NVIDIA Nsight Aftermath GPU crash dump support", False))
+opts.Add(
+    "nrd_path",
+    "Path to NVIDIA's NRD denoiser built by misc/scripts/install_nrd.py (optional, default: where it installs)",
+    "",
+)
 opts.Add(BoolVariable("accesskit", "Enable the AccessKit driver for screen reader support", True))
 opts.Add(BoolVariable("angle", "Enable the ANGLE rendering driver for OpenGL ES 3.0 on supported platforms", True))
 opts.Add(BoolVariable("sdl", "Enable the SDL3 input driver", True))
@@ -739,6 +744,31 @@ if env["scu_build"]:
 # Must happen after the flags' definition, as configure is when most flags
 # are actually handled to change compile options, etc.
 detect.configure(env)
+
+# NVIDIA Real-time Denoisers, the path tracer's PT_DENOISER_NRD_REBLUR: used when misc/scripts/install_nrd.py built it
+# (NVIDIA RTX SDKs licence: not in this repository). servers/rendering/renderer_rd/effects/SCsub compiles with it.
+nrd_path = env["nrd_path"]
+if not nrd_path:
+    # As misc/scripts/install_nrd.py installs it.
+    if env["platform"] == "windows" and os.getenv("LOCALAPPDATA") and not os.getenv("MSYSTEM"):
+        nrd_path = os.path.join(os.getenv("LOCALAPPDATA"), "Godot", "build_deps", "nrd")
+    else:
+        nrd_path = os.path.join(Dir("#").abspath, "bin", "build_deps", "nrd")
+env["nrd_include_path"] = os.path.join(nrd_path, "include")
+nrd_libraries = [
+    os.path.join(nrd_path, "lib", name + (".lib" if env.msvc else ".a"))
+    for name in (["NRD", "ShaderMakeBlob"] if env.msvc else ["libNRD", "libShaderMakeBlob"])
+]
+env["nrd_enabled"] = os.path.isfile(os.path.join(nrd_path, "include", "nrd_godot_shaders.gen.h")) and all(
+    os.path.isfile(library) for library in nrd_libraries
+)
+if env["nrd_enabled"]:
+    # By their path: the library names in LIBS take the engine's own suffix (platform/windows/detect.py).
+    if env.msvc:
+        env.Append(LINKFLAGS=nrd_libraries)
+    else:
+        env.Append(LIBS=[File(library) for library in nrd_libraries])
+    print(f"NVIDIA NRD denoiser: {nrd_path}")
 
 platform_string = env["platform"]
 if env.get("simulator"):

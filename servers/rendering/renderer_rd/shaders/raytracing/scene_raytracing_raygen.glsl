@@ -47,7 +47,7 @@ layout(set = 0, binding = 43, rgba16f) uniform image2D nrd_specular_image;
 // NRD's IN_VIEWZ: the primary hit's view depth, NRD_SKY_VIEW_Z where the camera ray missed. Ray Reconstruction's depth
 // guide binding: the two are never in the same variant.
 layout(set = 0, binding = 39, r32f) uniform image2D nrd_view_z_image;
-// Past NRD's CommonSettings::denoisingRange (RenderRaytracing::nrd_denoising_range()): NRD leaves the pixel out.
+// Past NRD's CommonSettings::denoisingRange (500000 by default, effects/nrd_denoiser.cpp): NRD leaves the pixel out.
 #define NRD_SKY_VIEW_Z 1e7
 #endif
 layout(set = 0, binding = 1) uniform accelerationStructureEXT tlas;
@@ -232,6 +232,9 @@ void main() {
 			// What came after the primary hit's direct light is the indirect light of the lobe its bounce took.
 			const vec3 indirect = ps.radiance - ps.nrd_emission - ps.nrd_diffuse_direct - ps.nrd_specular_direct;
 			const bool specular = (ps.nrd_state & NRD_PATH_SPECULAR) != 0u;
+			// Each lobe keeps its direct light whichever lobe the bounce took: less noise than giving the skipped lobe
+			// nothing and the chosen one its direct light over its chance (NRD's README), and less of ReBLUR's darkening
+			// (denoiser study, 2026-10-30); the skipped lobe's hit distance stays 0, which NRD rebuilds.
 			nrd_emission += ps.nrd_emission;
 			nrd_diffuse += ps.nrd_diffuse_direct;
 			nrd_specular += ps.nrd_specular_direct;

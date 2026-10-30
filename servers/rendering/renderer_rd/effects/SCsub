@@ -59,6 +59,11 @@ inline constexpr const unsigned char search_tex_png[] = {{
 
 env.CommandNoCache("smaa_search_tex.gen.h", "#thirdparty/smaa/SearchTex.png", env.Run(searchtex_builder))
 
+# NVIDIA Real-time Denoisers (nrd_denoiser.cpp), when misc/scripts/install_nrd.py built it (SConstruct, `nrd_path`).
+if env["nrd_enabled"]:
+    env_effects.Append(CPPPATH=[env["nrd_include_path"]])
+    env_effects.Append(CPPDEFINES=["NRD_DENOISER_ENABLED"])
+
 # This flag doesn't actually control anything GCC specific in FSR2. It determines
 # if symbols should be exported, which is not required for Godot.
 env_effects.Append(CPPDEFINES=["FFX_GCC"])

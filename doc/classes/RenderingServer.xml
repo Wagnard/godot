@@ -6062,6 +6062,7 @@
 		</constant>
 		<constant name="PT_DENOISER_NRD_REBLUR" value="2" enum="PathtracingDenoiser">
 			Uses ReBLUR, from NVIDIA Real-time Denoisers (NRD), to denoise the path-traced image. ReBLUR is a spatio-temporal denoiser that runs on any GPU supporting path tracing, on Vulkan and Direct3D 12. It denoises the diffuse and specular light of the surfaces the camera sees; their own emission, the sky and the transparent surfaces are not denoised. It does not upscale or anti-alias: use it with a temporal anti-aliasing or upscaling method such as [constant VIEWPORT_SCALING_3D_MODE_FSR2] or [member ProjectSettings.rendering/anti_aliasing/quality/use_taa].
+			[b]Note:[/b] NRD is under the NVIDIA RTX SDKs license and is not part of the engine's source: the engine must be built after [code]misc/scripts/install_nrd.py[/code], otherwise this denoiser does nothing. A game that ships it must credit NVIDIA's SDK as its license requires.
 		</constant>
 		<constant name="SUB_SURFACE_SCATTERING_QUALITY_DISABLED" value="0" enum="SubSurfaceScatteringQuality">
 			Disables subsurface scattering entirely, even on materials that have [member BaseMaterial3D.subsurf_scatter_enabled] set to [code]true[/code]. This has the lowest GPU requirements.

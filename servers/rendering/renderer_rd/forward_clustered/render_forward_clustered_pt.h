@@ -32,6 +32,7 @@
 
 #include "servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.h"
 #include "servers/rendering/renderer_rd/effects/finite_layer.h"
+#include "servers/rendering/renderer_rd/effects/nrd_denoiser.h"
 #include "servers/rendering/renderer_rd/effects/pt_rasterized_guides.h"
 #include "servers/rendering/renderer_rd/forward_clustered/render_raytracing.h"
 
@@ -65,6 +66,8 @@ class RenderForwardClusteredPT : public RenderForwardClustered {
 	RendererRD::FiniteLayer *finite_layer = nullptr;
 	// DLSS-RR's guides where the raster pass drew a pathtracing_rasterized card.
 	RendererRD::PTRasterizedGuides *rasterized_guides = nullptr;
+	// PT_DENOISER_NRD_REBLUR's denoiser, made at its first use where the engine was built with NRD.
+	RendererRD::NRDDenoiser *nrd_denoiser = nullptr;
 	void _warn_non_finite_layer(const RenderDataRD *p_render_data, const RendererRD::FiniteLayer::Report &p_report, uint32_t p_from, uint32_t p_to);
 	static bool _rr_transparency_layer_surface(const GeometryInstanceSurfaceDataCache *p_surf);
 	// The factor that brings the rasterized instances' probes (pt_probes) to the units a lightmap capture is given in.
