@@ -18,7 +18,7 @@
 #define RT_PARAM_VIS_MODE 0 // rt_params[0].x - Debug visualization mode (0 = disabled)
 #define RT_PARAM_SAMPLE_COUNT 1 // rt_params[0].y - Samples per pixel
 #define RT_PARAM_MAX_BOUNCES 2 // rt_params[0].z - Maximum ray bounces
-#define RT_PARAM_DENOISER 3 // rt_params[0].w - Denoiser selection (0=none, 1=DLSS RR)
+#define RT_PARAM_DENOISER 3 // rt_params[0].w - Denoiser selection (0=none, 1=DLSS RR, 2=NRD ReBLUR)
 #define RT_PARAM_FRONT_LAYER_COUNT 4 // rt_params[1].x - Transparent surfaces in the TLAS (front layer reflections)
 #define RT_PARAM_DECAL_COUNT 5 // rt_params[1].y - Decals in the decal buffer (raytracing_decals_inc.glsl)
 #define RT_PARAM_PROCEDURAL_MASKS 6 // rt_params[1].z - RT_MASK_PROCEDURAL_* bits held by this frame's TLAS
@@ -224,7 +224,53 @@ struct PathState {
 	vec3 throughput;
 	uint packed_bounces_flags;
 	uint rng_state;
+#ifdef NRD_ENABLED
+	// A camera path's light split for NRD (shade_and_bounce()): what it gathered up to its primary hit's own emission (not
+	// denoised), the direct light the hit's diffuse and specular lobes reflect, the hit distance of the ray its bounce
+	// traced, and NRD_PATH_* with the lobe that bounce took. The rest of the path's light is that lobe's indirect light.
+	vec3 nrd_emission;
+	vec3 nrd_diffuse_direct;
+	vec3 nrd_specular_direct;
+	float nrd_hit_t;
+	uint nrd_state;
+#endif
 };
+
+#ifdef NRD_ENABLED
+#define NRD_PATH_NONE 0u // Not a camera path: nothing to split.
+#define NRD_PATH_PRIMARY 1u // A camera path before its primary hit is shaded.
+#define NRD_PATH_SHADED 2u // Its primary hit shaded, no bounce (the path ends there).
+#define NRD_PATH_BOUNCE 3u // Its bounce's ray leaves along the lobe, its hit distance still to come.
+#define NRD_PATH_DONE 4u // The bounce's hit distance is known.
+#define NRD_PATH_STAGE_MASK 0xFu
+#define NRD_PATH_SPECULAR 0x10u // The bounce took the specular lobe.
+// The hit distance of a ray that leaves the scene: NRD's NRD_FP16_MAX (NRD.hlsli, "distance to occluder").
+#define NRD_MISS_HIT_T 65504.0
+// The floor of the albedo guides each lobe's light is divided by, and multiplied back by (raytracing_nrd_composite.glsl).
+#define NRD_ALBEDO_MIN 0.001
+
+void nrd_path_init(inout PathState ps, bool p_camera_path) {
+	ps.nrd_emission = vec3(0.0);
+	ps.nrd_diffuse_direct = vec3(0.0);
+	ps.nrd_specular_direct = vec3(0.0);
+	ps.nrd_hit_t = 0.0;
+	ps.nrd_state = p_camera_path ? NRD_PATH_PRIMARY : NRD_PATH_NONE;
+}
+
+uint nrd_path_stage(PathState ps) {
+	return ps.nrd_state & NRD_PATH_STAGE_MASK;
+}
+
+// The threshold the primary hit's lobe choice compares its probability with: a 4x4 Bayer matrix, its values shifted each
+// frame. NRD's HitDistanceReconstructionMode::AREA_3X3 rebuilds the skipped lobe's hit distance from a 3x3 area, which must
+// hold a sample of each lobe: NRDSettings.h asks for a probability clamped to [1/4, 3/4] and "White noise must be
+// replaced with Bayer dithering".
+float nrd_lobe_threshold(uvec2 p_pixel, uint p_frame) {
+	const uint bayer[16] = uint[16](0u, 8u, 2u, 10u, 12u, 4u, 14u, 6u, 3u, 11u, 1u, 9u, 15u, 7u, 13u, 5u);
+	const float value = (float(bayer[(p_pixel.y & 3u) * 4u + (p_pixel.x & 3u)]) + 0.5) / 16.0;
+	return fract(value + float(p_frame) * 0.61803398875);
+}
+#endif
 
 // Bounce count helpers (bits 0-3: total, bits 4-7: diffuse). A path ends at RT_MAX_BOUNCES (8) and MAX_DIFFUSE_BOUNCES.
 uint get_total_bounces(uint packed) {

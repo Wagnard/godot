@@ -41,6 +41,7 @@
 #include "servers/rendering/renderer_rd/bindless_block.h"
 #include "servers/rendering/renderer_rd/shaders/raytracing/multimesh_merge.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/raytracing/raytracing_lod_compact.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/raytracing/raytracing_nrd_composite.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/raytracing/raytracing_output_copy.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/raytracing/raytracing_sky_guide.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/raytracing/raytracing_sky_sampling.glsl.gen.h"
@@ -61,6 +62,16 @@
 #define RB_TEX_DLSS_RR_SPECULAR_HIT_DIST SNAME("specular_hit_dist")
 #define RB_TEX_DLSS_RR_COLOR_BEFORE_TRANSPARENCY SNAME("color_before_transparency")
 #define RB_TEX_DLSS_RR_DEPTH SNAME("rr_depth")
+
+// NRD's inputs the raygen writes (RenderRaytracing::nrd_ensure_buffers()), in the guides' layout of DLSS Ray Reconstruction
+// (bindings 9-11), apart from them: what reads DLSS-RR's scope takes it for Ray Reconstruction.
+#define RB_SCOPE_NRD SNAME("nrd")
+#define RB_TEX_NRD_DIFFUSE SNAME("diffuse")
+#define RB_TEX_NRD_SPECULAR SNAME("specular")
+#define RB_TEX_NRD_DIFFUSE_ALBEDO SNAME("diffuse_albedo")
+#define RB_TEX_NRD_SPECULAR_ALBEDO SNAME("specular_albedo")
+#define RB_TEX_NRD_NORMAL_ROUGHNESS SNAME("normal_roughness")
+#define RB_TEX_NRD_VIEW_Z SNAME("view_z")
 
 class RenderDataRD;
 class RenderSceneBuffersRD;
@@ -844,6 +855,18 @@ class RenderRaytracing {
 		RID pipeline;
 	} output_copy_shader;
 
+	// Each lobe's light of the primary surfaces multiplied back by its albedo onto the path traced output (nrd_composite()).
+	struct NRDCompositeShader {
+		struct PushConstant {
+			int32_t size[2];
+			uint32_t pad[2];
+		};
+		RaytracingNrdCompositeShaderRD shader;
+		RID version;
+		RID version_shader;
+		RID pipeline;
+	} nrd_composite_shader;
+
 	struct MMSurfaceHandles {
 		LocalVector<RID> per_surface; // Grown on demand; entry per touched surface index.
 		uint32_t mm_validator = 0; // High 32 bits of MM RID id at last access.
@@ -1101,6 +1124,18 @@ public:
 	// its reflection dominates. The raster depth buffer keeps the opaque one, which the transparent pass reads.
 	RID dlss_rr_get_depth(RenderSceneBuffersRD *p_render_buffers) const;
 	RID dlss_rr_get_color_before_transparency(RenderSceneBuffersRD *p_render_buffers) const;
+
+	// NRD's inputs (PT_DENOISER_NRD_REBLUR, RT_FLAG_NRD_ENABLED): per lobe, the primary surfaces' light divided by the lobe's
+	// albedo with the hit distance of their bounce (bindings 41 and 43), the albedo, normal and roughness guides (9-11) and
+	// the view depth (39).
+	void nrd_ensure_buffers(RenderSceneBuffersRD *p_render_buffers);
+	void nrd_free_buffers(RenderSceneBuffersRD *p_render_buffers);
+	bool nrd_has_buffers(RenderSceneBuffersRD *p_render_buffers) const;
+	// One of the RB_TEX_NRD_* textures.
+	RID nrd_get_texture(RenderSceneBuffersRD *p_render_buffers, const StringName &p_name) const;
+	// Multiplies the denoised light of each lobe (or, before a denoiser runs, the raygen's own) back by its albedo onto the
+	// path tracer's output, which holds the light that is not denoised (raytracing_nrd_composite.glsl).
+	void nrd_composite(RenderSceneBuffersRD *p_render_buffers, RID p_diffuse, RID p_specular);
 
 	void register_raytracing_buffer_dependencies(RD::RaytracingListID p_list);
 	// The buffers written per frame that the shaders read through the addresses in RT_GeometryData and RT_MaterialData.

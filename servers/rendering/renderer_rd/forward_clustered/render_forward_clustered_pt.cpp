@@ -71,6 +71,9 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 				if (raytracing->dlss_rr_has_buffers(rb.ptr())) {
 					raytracing->dlss_rr_free_buffers(rb.ptr());
 				}
+				if (raytracing->nrd_has_buffers(rb.ptr())) {
+					raytracing->nrd_free_buffers(rb.ptr());
+				}
 			} else if (raytracing) {
 				_free_rt_viewport_state(rb.ptr());
 			}
@@ -300,6 +303,11 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 		} else if (raytracing->dlss_rr_has_buffers(rb.ptr())) {
 			raytracing->dlss_rr_free_buffers(rb.ptr());
 		}
+		if (rt_flags & SceneShaderRaytracing::RT_FLAG_NRD_ENABLED) {
+			raytracing->nrd_ensure_buffers(rb.ptr());
+		} else if (raytracing->nrd_has_buffers(rb.ptr())) {
+			raytracing->nrd_free_buffers(rb.ptr());
+		}
 
 		// The surfaces built by the render list fill above, out of the TLAS ones included.
 		_rt_precache_hit_groups();
@@ -506,6 +514,15 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 			RENDER_TIMESTAMP("Copy RT Depth (R32F -> D32F)");
 			RD::get_singleton()->draw_command_begin_label("Copy RT Depth");
 			copy_effects->copy_r32f_to_depth_fb(raytracing->rt_get_depth_texture(rb.ptr()), rb_data->get_depth_fb(), Rect2i(0, 0, rb->get_internal_size().x, rb->get_internal_size().y));
+			RD::get_singleton()->draw_command_end_label();
+		}
+
+		// With NRD the raygen left each lobe's light of the primary surfaces apart: back onto the output before the fog, which
+		// lies in front of them.
+		if ((rt_flags & SceneShaderRaytracing::RT_FLAG_NRD_ENABLED) && raytracing->nrd_has_buffers(rb.ptr())) {
+			RENDER_TIMESTAMP("NRD Composite");
+			RD::get_singleton()->draw_command_begin_label("NRD Composite");
+			raytracing->nrd_composite(rb.ptr(), raytracing->nrd_get_texture(rb.ptr(), RB_TEX_NRD_DIFFUSE), raytracing->nrd_get_texture(rb.ptr(), RB_TEX_NRD_SPECULAR));
 			RD::get_singleton()->draw_command_end_label();
 		}
 
@@ -1005,6 +1022,9 @@ void RenderForwardClusteredPT::_free_rt_viewport_state(RenderSceneBuffersRD *p_r
 	ERR_FAIL_NULL(p_render_buffers);
 	if (p_render_buffers->has_texture(RB_SCOPE_DLSS_RR, RB_TEX_DLSS_RR_DIFFUSE_ALBEDO)) {
 		p_render_buffers->clear_context(RB_SCOPE_DLSS_RR);
+	}
+	if (p_render_buffers->has_texture(RB_SCOPE_NRD, RB_TEX_NRD_DIFFUSE)) {
+		p_render_buffers->clear_context(RB_SCOPE_NRD);
 	}
 	if (p_render_buffers->has_texture(RB_SCOPE_RAYTRACING, RB_TEX_RAYTRACING)) {
 		p_render_buffers->clear_context(RB_SCOPE_RAYTRACING);

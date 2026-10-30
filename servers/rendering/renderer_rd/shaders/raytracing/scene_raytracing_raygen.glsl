@@ -38,6 +38,18 @@
 layout(set = 0, binding = 0, rgba16f) uniform image2D image;
 // The reflection of the first transparent surface in front of the opaque ones, and that surface's view depth (0: none).
 layout(set = 0, binding = 29, rgba16f) uniform image2D front_layer_image;
+#ifdef NRD_ENABLED
+// The light of the primary surfaces NRD denoises (RenderRaytracing::nrd_ensure_buffers()): per lobe, its radiance divided
+// by the lobe's albedo guide, and the hit distance of the bounce that took it (0 where the bounce took the other lobe).
+// The image above then holds the rest, which is not denoised.
+layout(set = 0, binding = 41, rgba16f) uniform image2D nrd_diffuse_image;
+layout(set = 0, binding = 43, rgba16f) uniform image2D nrd_specular_image;
+// NRD's IN_VIEWZ: the primary hit's view depth, NRD_SKY_VIEW_Z where the camera ray missed. Ray Reconstruction's depth
+// guide binding: the two are never in the same variant.
+layout(set = 0, binding = 39, r32f) uniform image2D nrd_view_z_image;
+// Past NRD's CommonSettings::denoisingRange (RenderRaytracing::nrd_denoising_range()): NRD leaves the pixel out.
+#define NRD_SKY_VIEW_Z 1e7
+#endif
 layout(set = 0, binding = 1) uniform accelerationStructureEXT tlas;
 
 layout(location = 0) rayPayloadEXT PathPayload payload;
@@ -117,6 +129,9 @@ void trace_probe_ray() {
 	// would: no per pixel writes (they are the primary ray's), and a miss takes the Environment's ambient light.
 	ps.packed_bounces_flags = pack_bounces(1u, 1u);
 	ps.rng_state = init_rng(uvec2(ray, probe), uint(get_rt_param(RT_PARAM_FRAME_INDEX)), 0x5052u);
+#ifdef NRD_ENABLED
+	nrd_path_init(ps, false);
+#endif
 
 	// Uniform over the sphere, stratified in height.
 	const float z = 1.0 - 2.0 * ((float(ray) + rand(ps.rng_state)) / float(RT_PROBE_RAYS));
@@ -167,6 +182,16 @@ void main() {
 	// Accumulate multiple samples per pixel
 	vec3 total_radiance = vec3(0.0);
 	float opaque_t = 10000.0;
+#ifdef NRD_ENABLED
+	// The samples' light split for NRD (PathState::nrd_*): what is not denoised, each lobe's light, and per lobe the sum and
+	// count of the hit distances of the samples whose bounce took it. Every sample's camera ray is the same, so they share
+	// the primary hit and its lobe threshold: with several samples per pixel, they all take its lobe.
+	vec3 nrd_emission = vec3(0.0);
+	vec3 nrd_diffuse = vec3(0.0);
+	vec3 nrd_specular = vec3(0.0);
+	vec2 nrd_hit_t_sum = vec2(0.0);
+	vec2 nrd_hit_t_count = vec2(0.0);
+#endif
 
 	const uint max_bounces = RT_GET_MAX_BOUNCES();
 
@@ -179,6 +204,9 @@ void main() {
 		ps.throughput = vec3(1.0);
 		ps.packed_bounces_flags = (sample_idx == 0u) ? set_sample_zero(0u) : 0u;
 		ps.rng_state = init_rng(pixel, frame_index, sample_idx);
+#ifdef NRD_ENABLED
+		nrd_path_init(ps, true);
+#endif
 
 		vec3 ray_origin = origin.xyz;
 		vec3 ray_dir = direction.xyz;
@@ -195,11 +223,57 @@ void main() {
 		}
 
 		total_radiance += ps.radiance;
+#ifdef NRD_ENABLED
+		const uint nrd_stage = nrd_path_stage(ps);
+		if (nrd_stage == NRD_PATH_PRIMARY) {
+			// No surface was shaded (the camera ray left the scene, or a debug view): nothing to denoise.
+			nrd_emission += ps.radiance;
+		} else {
+			// What came after the primary hit's direct light is the indirect light of the lobe its bounce took.
+			const vec3 indirect = ps.radiance - ps.nrd_emission - ps.nrd_diffuse_direct - ps.nrd_specular_direct;
+			const bool specular = (ps.nrd_state & NRD_PATH_SPECULAR) != 0u;
+			nrd_emission += ps.nrd_emission;
+			nrd_diffuse += ps.nrd_diffuse_direct;
+			nrd_specular += ps.nrd_specular_direct;
+			if (nrd_stage == NRD_PATH_SHADED) {
+				nrd_emission += indirect; // No bounce: only the rounding of the sums above.
+			} else if (specular) {
+				nrd_specular += indirect;
+			} else {
+				nrd_diffuse += indirect;
+			}
+			if (nrd_stage == NRD_PATH_DONE) {
+				nrd_hit_t_sum += specular ? vec2(0.0, ps.nrd_hit_t) : vec2(ps.nrd_hit_t, 0.0);
+				nrd_hit_t_count += specular ? vec2(0.0, 1.0) : vec2(1.0, 0.0);
+			}
+		}
+#endif
 	}
 
 	vec3 final_radiance = total_radiance / float(samples_per_pixel);
 
+#ifdef NRD_ENABLED
+	{
+		// The image keeps what is not denoised; each lobe's light goes divided by its albedo guide (the primary hit's, or
+		// the miss shader's), floored as raytracing_nrd_composite.glsl floors it to multiply the denoised light back.
+		const ivec2 nrd_pixel = ivec2(pixel);
+		const float inv_samples = 1.0 / float(samples_per_pixel);
+		const vec3 diffuse_albedo = max(imageLoad(dlss_rr_diffuse_albedo, nrd_pixel).rgb, vec3(NRD_ALBEDO_MIN));
+		const vec3 specular_albedo = max(imageLoad(dlss_rr_specular_albedo, nrd_pixel).rgb, vec3(NRD_ALBEDO_MIN));
+		const vec2 hit_t = nrd_hit_t_sum / max(nrd_hit_t_count, vec2(1.0));
+		// The primary hit's view depth, from the NDC depth its hit shader wrote (0 where the camera ray missed: what the
+		// composite and copy_output_texture() take for the background too).
+		const float ndc_depth = imageLoad(rt_depth_image, nrd_pixel).r;
+		const vec4 view_position = scene_data_block.data.inv_projection_matrix * vec4(0.0, 0.0, ndc_depth, 1.0);
+		const float view_z = ndc_depth == 0.0 ? NRD_SKY_VIEW_Z : -view_position.z / view_position.w;
+		imageStore(nrd_view_z_image, nrd_pixel, vec4(view_z));
+		imageStore(image, nrd_pixel, vec4(nrd_emission * inv_samples, 1.0));
+		imageStore(nrd_diffuse_image, nrd_pixel, vec4(nrd_diffuse * inv_samples / diffuse_albedo, hit_t.x));
+		imageStore(nrd_specular_image, nrd_pixel, vec4(nrd_specular * inv_samples / specular_albedo, hit_t.y));
+	}
+#else
 	imageStore(image, ivec2(pixel), vec4(final_radiance, 1.0));
+#endif
 
 	// Front layer: the first transparent surface before the opaque hit, and one path along its reflection, for the raster
 	// transparent pass (RenderForwardClustered::front_layer_reflection). Not a primary ray: no depth or motion; it adjusts
@@ -240,6 +314,9 @@ void main() {
 			// a miss takes the reflected light, as the raster transparent pass reflects.
 			rs.packed_bounces_flags = set_specular_lobe(pack_bounces(0u, 0u), true);
 			rs.rng_state = front_rng_state;
+#ifdef NRD_ENABLED
+			nrd_path_init(rs, false);
+#endif
 			vec3 ray_origin = offset_ray_origin(origin.xyz + direction.xyz * fr.hit_t, fr.geometry_normal);
 			vec3 ray_dir = front_dir;
 			// The reflected point's direct light and one indirect bounce, as Lumen's front layer reflections: a full path
@@ -405,7 +482,7 @@ void main() {
 		mis_weight = get_env_mis_weight(ps.packed_bounces_flags);
 	}
 
-#ifdef DLSS_RR_ENABLED
+#if defined(DLSS_RR_ENABLED) || defined(NRD_ENABLED)
 	{
 		uint total_bounces = get_total_bounces(ps.packed_bounces_flags);
 		if (total_bounces == 0u && is_sample_zero(ps.packed_bounces_flags)) {
@@ -413,7 +490,9 @@ void main() {
 			imageStore(dlss_rr_diffuse_albedo, pixel, vec4(DLSSRR_encodeDiffuseAlbedo(sky_color), 1.0));
 			imageStore(dlss_rr_specular_albedo, pixel, vec4(0.0));
 			imageStore(dlss_rr_normal_roughness, pixel, vec4(-gl_WorldRayDirectionEXT, 0.0));
+#ifdef DLSS_RR_ENABLED
 			imageStore(dlss_rr_specular_hit_dist, pixel, vec4(-1.0));
+#endif
 		}
 	}
 #endif

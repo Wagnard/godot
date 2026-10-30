@@ -78,7 +78,9 @@ public:
 		RT_FLAG_NONE = 0,
 		RT_FLAG_DEBUG_VIS_ENABLED = (1 << 0),
 		RT_FLAG_DLSS_RR_ENABLED = (1 << 1),
-		// (1 << 2) was the fog: a variant of its own until it was read from the scene data (SCENE_DATA_FLAGS_USE_FOG).
+		// The raygen splits the light of the surfaces the camera sees into diffuse and specular for NRD (PT_DENOISER_NRD_REBLUR).
+		// (1 << 2) was the fog until it was read from the scene data (SCENE_DATA_FLAGS_USE_FOG).
+		RT_FLAG_NRD_ENABLED = (1 << 2),
 		RT_FLAG_SER_ENABLED = (1 << 3),
 		RT_FLAG_RAY_QUERY_SHADOWS_ENABLED = (1 << 4),
 	};

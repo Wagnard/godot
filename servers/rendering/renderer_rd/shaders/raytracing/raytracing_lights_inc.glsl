@@ -331,7 +331,7 @@ float lights_target_weight(RTLightData p_light, vec3 p_hit_pos, vec3 p_N, bool p
 	return weight * max(cos_theta, 0.05);
 }
 
-vec3 lights_evaluate_light(RTLightData light, vec3 hit_pos, vec3 hit_pos_back, vec3 geometry_normal, vec3 N, vec3 V, MaterialProperties material, vec3 backlight, bool specular_disabled, inout uint rng_state, bool is_indirect_bounce);
+vec3 lights_evaluate_light(RTLightData light, vec3 hit_pos, vec3 hit_pos_back, vec3 geometry_normal, vec3 N, vec3 V, MaterialProperties material, vec3 backlight, bool specular_disabled, inout uint rng_state, bool is_indirect_bounce, out vec3 r_specular);
 
 // Evaluate direct lighting using NEE: one light, picked among those that can light the point in proportion to
 // lights_target_weight() (resampled importance sampling with each of them as a candidate: Talbot et al. 2005, "Importance
@@ -342,7 +342,7 @@ vec3 lights_evaluate_light(RTLightData light, vec3 hit_pos, vec3 hit_pos_back, v
 // in range, as before: a strong light among many weak ones is then sampled now and then, and its light is noise (and
 // that choice came out 0.6 % darker than every light summed on a sunlit wall, a cause not looked into).
 // A light behind the surface reaches it only through BACKLIGHT, and its shadow ray then leaves from hit_pos_back, on
-// that side of the surface.
+// that side of the surface. r_specular: the part of the returned light the specular lobe reflects (the rest is diffuse).
 vec3 lights_evaluate_direct_lighting(
 		vec3 hit_pos,
 		vec3 hit_pos_back,
@@ -355,7 +355,9 @@ vec3 lights_evaluate_direct_lighting(
 		inout uint rng_state,
 		bool is_indirect_bounce,
 		uint light_count,
-		uint layer_mask) {
+		uint layer_mask,
+		out vec3 r_specular) {
+	r_specular = vec3(0.0);
 	bool has_backlight = any(greaterThan(backlight, vec3(0.0)));
 	if (light_count == 0u) {
 		return vec3(0.0);
@@ -426,10 +428,13 @@ vec3 lights_evaluate_direct_lighting(
 		light_select_pdf = 1.0 / max(float(light_count) * (float(valid_found) / float(k)), 1.0);
 	}
 
-	return lights_evaluate_light(rt_lights[selected_idx], hit_pos, hit_pos_back, geometry_normal, N, V, material, backlight, specular_disabled, rng_state, is_indirect_bounce) / max(light_select_pdf, 1e-10);
+	const vec3 light = lights_evaluate_light(rt_lights[selected_idx], hit_pos, hit_pos_back, geometry_normal, N, V, material, backlight, specular_disabled, rng_state, is_indirect_bounce, r_specular);
+	r_specular /= max(light_select_pdf, 1e-10);
+	return light / max(light_select_pdf, 1e-10);
 }
 
 // The light one light brings to the point, before the probability of having picked it: one shadow ray toward it.
+// r_specular: the part of it the specular lobe reflects.
 vec3 lights_evaluate_light(
 		RTLightData light,
 		vec3 hit_pos,
@@ -441,7 +446,9 @@ vec3 lights_evaluate_light(
 		vec3 backlight,
 		bool specular_disabled,
 		inout uint rng_state,
-		bool is_indirect_bounce) {
+		bool is_indirect_bounce,
+		out vec3 r_specular) {
+	r_specular = vec3(0.0);
 	bool has_backlight = any(greaterThan(backlight, vec3(0.0)));
 	vec2 u = rand2(rng_state);
 
@@ -510,6 +517,7 @@ vec3 lights_evaluate_light(
 		float indirect_mul = is_indirect_bounce ? light.indirect_energy : 1.0;
 
 		// NdotL is already included in brdf_value (evalLambertian/evalMicrofacet bake it in).
+		r_specular = brdf_specular * spec_mul * light.emission * atten * indirect_mul * visibility;
 		return brdf_value * light.emission * atten * indirect_mul * visibility;
 	}
 	// === CONE LIGHT PATH (directional) ===
@@ -545,6 +553,7 @@ vec3 lights_evaluate_light(
 
 		float indirect_mul = is_indirect_bounce ? light.indirect_energy : 1.0;
 
+		r_specular = brdf_specular * spec_mul * light.emission * projector * indirect_mul * visibility;
 		return brdf_value * light.emission * projector * indirect_mul * visibility;
 	}
 }

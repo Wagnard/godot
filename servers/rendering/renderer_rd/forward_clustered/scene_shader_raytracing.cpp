@@ -75,6 +75,7 @@ static constexpr RaygenShaderOption RAYGEN_SHADER_OPTIONS[] = {
 	{ SceneShaderRaytracing::RT_FLAG_DLSS_RR_ENABLED, "#define DLSS_RR_ENABLED\n" },
 	{ SceneShaderRaytracing::RT_FLAG_SER_ENABLED, "#define USE_SER\n" },
 	{ SceneShaderRaytracing::RT_FLAG_RAY_QUERY_SHADOWS_ENABLED, "#define USE_RAY_QUERY_SHADOWS\n" },
+	{ SceneShaderRaytracing::RT_FLAG_NRD_ENABLED, "#define NRD_ENABLED\n" },
 
 };
 
@@ -1291,8 +1292,11 @@ uint32_t SceneShaderRaytracing::compute_rt_flags(RID p_environment) {
 			flags |= RT_FLAG_RAY_QUERY_SHADOWS_ENABLED;
 		}
 
-		if (env_storage->environment_get_pathtracing_denoiser(p_environment) == RSE::PT_DENOISER_DLSS_RAY_RECONSTRUCTION) {
+		const RSE::PathtracingDenoiser denoiser = env_storage->environment_get_pathtracing_denoiser(p_environment);
+		if (denoiser == RSE::PT_DENOISER_DLSS_RAY_RECONSTRUCTION) {
 			flags |= RT_FLAG_DLSS_RR_ENABLED;
+		} else if (denoiser == RSE::PT_DENOISER_NRD_REBLUR) {
+			flags |= RT_FLAG_NRD_ENABLED;
 		}
 	}
 
@@ -1539,7 +1543,7 @@ SceneShaderRaytracing *SceneShaderRaytracing::get_singleton_if_initialized() {
 static LocalVector<uint32_t> _bake_rt_flags(bool p_simple_shadows, bool p_ser) {
 	LocalVector<uint32_t> flags;
 	const uint32_t shadows = p_simple_shadows ? SceneShaderRaytracing::RT_FLAG_RAY_QUERY_SHADOWS_ENABLED : 0;
-	for (const uint32_t rr : { uint32_t(0), uint32_t(SceneShaderRaytracing::RT_FLAG_DLSS_RR_ENABLED) }) {
+	for (const uint32_t rr : { uint32_t(0), uint32_t(SceneShaderRaytracing::RT_FLAG_DLSS_RR_ENABLED), uint32_t(SceneShaderRaytracing::RT_FLAG_NRD_ENABLED) }) {
 		// The hardware decides at run time (compute_rt_flags()): both when the project asks for it.
 		for (const uint32_t set : { uint32_t(0), uint32_t(p_ser ? SceneShaderRaytracing::RT_FLAG_SER_ENABLED : 0) }) {
 			const uint32_t f = shadows | rr | set;

@@ -124,6 +124,13 @@ void RenderRaytracing::initialize(RenderForwardClustered *p_owner) {
 	output_copy_shader.version = output_copy_shader.shader.version_create();
 	output_copy_shader.version_shader = output_copy_shader.shader.version_get_shader(output_copy_shader.version, 0);
 	output_copy_shader.pipeline = RD::get_singleton()->compute_pipeline_create(output_copy_shader.version_shader);
+
+	Vector<String> nrd_composite_modes;
+	nrd_composite_modes.push_back("\n");
+	nrd_composite_shader.shader.initialize(nrd_composite_modes);
+	nrd_composite_shader.version = nrd_composite_shader.shader.version_create();
+	nrd_composite_shader.version_shader = nrd_composite_shader.shader.version_get_shader(nrd_composite_shader.version, 0);
+	nrd_composite_shader.pipeline = RD::get_singleton()->compute_pipeline_create(nrd_composite_shader.version_shader);
 }
 
 RenderRaytracing::~RenderRaytracing() {
@@ -179,6 +186,7 @@ RenderRaytracing::~RenderRaytracing() {
 	sky_guide_shader.shader.version_free(sky_guide_shader.version);
 	sky_sampling_shader.shader.version_free(sky_sampling_shader.version);
 	output_copy_shader.shader.version_free(output_copy_shader.version);
+	nrd_composite_shader.shader.version_free(nrd_composite_shader.version);
 }
 
 // ---------------------------------------------------------------------------
@@ -378,6 +386,67 @@ RID RenderRaytracing::dlss_rr_get_specular_hit_dist(RenderSceneBuffersRD *p_rend
 RID RenderRaytracing::dlss_rr_get_depth(RenderSceneBuffersRD *p_render_buffers) const {
 	ERR_FAIL_NULL_V(p_render_buffers, RID());
 	return p_render_buffers->get_texture(RB_SCOPE_DLSS_RR, RB_TEX_DLSS_RR_DEPTH);
+}
+
+void RenderRaytracing::nrd_ensure_buffers(RenderSceneBuffersRD *p_render_buffers) {
+	ERR_FAIL_NULL(p_render_buffers);
+
+	if (p_render_buffers->has_texture(RB_SCOPE_NRD, RB_TEX_NRD_DIFFUSE)) {
+		return;
+	}
+
+	const uint32_t usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT;
+	// RGBA16F, as NRD's IN_DIFF_RADIANCE_HITDIST / IN_SPEC_RADIANCE_HITDIST ("RGBA16f+"): the lobe's light over its albedo, and
+	// the hit distance of the bounce that took it.
+	p_render_buffers->create_texture(RB_SCOPE_NRD, RB_TEX_NRD_DIFFUSE, RD::DATA_FORMAT_R16G16B16A16_SFLOAT, usage_bits, RD::TEXTURE_SAMPLES_1);
+	p_render_buffers->create_texture(RB_SCOPE_NRD, RB_TEX_NRD_SPECULAR, RD::DATA_FORMAT_R16G16B16A16_SFLOAT, usage_bits, RD::TEXTURE_SAMPLES_1);
+	// The guides the raygen writes for Ray Reconstruction (dlss_rr_ensure_buffers()), in the same formats.
+	p_render_buffers->create_texture(RB_SCOPE_NRD, RB_TEX_NRD_DIFFUSE_ALBEDO, RD::DATA_FORMAT_R16G16B16A16_SFLOAT, usage_bits, RD::TEXTURE_SAMPLES_1);
+	p_render_buffers->create_texture(RB_SCOPE_NRD, RB_TEX_NRD_SPECULAR_ALBEDO, RD::DATA_FORMAT_R16G16B16A16_SFLOAT, usage_bits, RD::TEXTURE_SAMPLES_1);
+	p_render_buffers->create_texture(RB_SCOPE_NRD, RB_TEX_NRD_NORMAL_ROUGHNESS, RD::DATA_FORMAT_R16G16B16A16_SFLOAT, usage_bits, RD::TEXTURE_SAMPLES_1);
+	// NRD's IN_VIEWZ ("R16f+"): R32F, the view depth of far surfaces needs it.
+	p_render_buffers->create_texture(RB_SCOPE_NRD, RB_TEX_NRD_VIEW_Z, RD::DATA_FORMAT_R32_SFLOAT, usage_bits, RD::TEXTURE_SAMPLES_1);
+}
+
+void RenderRaytracing::nrd_free_buffers(RenderSceneBuffersRD *p_render_buffers) {
+	ERR_FAIL_NULL(p_render_buffers);
+	p_render_buffers->clear_context(RB_SCOPE_NRD);
+}
+
+bool RenderRaytracing::nrd_has_buffers(RenderSceneBuffersRD *p_render_buffers) const {
+	return p_render_buffers && p_render_buffers->has_texture(RB_SCOPE_NRD, RB_TEX_NRD_DIFFUSE);
+}
+
+RID RenderRaytracing::nrd_get_texture(RenderSceneBuffersRD *p_render_buffers, const StringName &p_name) const {
+	ERR_FAIL_NULL_V(p_render_buffers, RID());
+	return p_render_buffers->get_texture(RB_SCOPE_NRD, p_name);
+}
+
+void RenderRaytracing::nrd_composite(RenderSceneBuffersRD *p_render_buffers, RID p_diffuse, RID p_specular) {
+	ERR_FAIL_NULL(p_render_buffers);
+	if (!nrd_has_buffers(p_render_buffers) || !rt_has_texture(p_render_buffers) || !rt_has_depth_texture(p_render_buffers)) {
+		return;
+	}
+
+	NRDCompositeShader::PushConstant push_constant = {};
+	const Size2i size = p_render_buffers->get_internal_size();
+	push_constant.size[0] = size.width;
+	push_constant.size[1] = size.height;
+
+	RD::Uniform diffuse(RD::UNIFORM_TYPE_TEXTURE, 0, p_diffuse);
+	RD::Uniform specular(RD::UNIFORM_TYPE_TEXTURE, 1, p_specular);
+	RD::Uniform diffuse_albedo(RD::UNIFORM_TYPE_TEXTURE, 2, nrd_get_texture(p_render_buffers, RB_TEX_NRD_DIFFUSE_ALBEDO));
+	RD::Uniform specular_albedo(RD::UNIFORM_TYPE_TEXTURE, 3, nrd_get_texture(p_render_buffers, RB_TEX_NRD_SPECULAR_ALBEDO));
+	RD::Uniform depth(RD::UNIFORM_TYPE_IMAGE, 4, rt_get_depth_texture(p_render_buffers));
+	RD::Uniform output(RD::UNIFORM_TYPE_IMAGE, 5, rt_get_texture(p_render_buffers));
+
+	RD *rd = RD::get_singleton();
+	RD::ComputeListID compute_list = rd->compute_list_begin();
+	rd->compute_list_bind_compute_pipeline(compute_list, nrd_composite_shader.pipeline);
+	rd->compute_list_bind_uniform_set(compute_list, UniformSetCacheRD::get_singleton()->get_cache(nrd_composite_shader.version_shader, 0, diffuse, specular, diffuse_albedo, specular_albedo, depth, output), 0);
+	rd->compute_list_set_push_constant(compute_list, &push_constant, sizeof(NRDCompositeShader::PushConstant));
+	rd->compute_list_dispatch_threads(compute_list, size.width, size.height, 1);
+	rd->compute_list_end();
 }
 
 // ---------------------------------------------------------------------------
@@ -6210,6 +6279,15 @@ RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderD
 
 		// Binding 39: DLSS RR Depth (the raygen writes it, see dlss_rr_get_depth()).
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 39, dlss_rr_get_depth(rb)));
+	} else if ((p_rt_flags & SceneShaderRaytracing::RT_FLAG_NRD_ENABLED) && nrd_has_buffers(rb)) {
+		// Bindings 9-11: the same guides for NRD, and 41 / 43 the light of each lobe (nrd_ensure_buffers()).
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 9, nrd_get_texture(rb, RB_TEX_NRD_DIFFUSE_ALBEDO)));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 10, nrd_get_texture(rb, RB_TEX_NRD_SPECULAR_ALBEDO)));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 11, nrd_get_texture(rb, RB_TEX_NRD_NORMAL_ROUGHNESS)));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 41, nrd_get_texture(rb, RB_TEX_NRD_DIFFUSE)));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 43, nrd_get_texture(rb, RB_TEX_NRD_SPECULAR)));
+		// Binding 39, Ray Reconstruction's depth guide in its variant: NRD's view depth.
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 39, nrd_get_texture(rb, RB_TEX_NRD_VIEW_Z)));
 	}
 
 	// Binding 13: Light buffer (SSBO).
