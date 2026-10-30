@@ -570,7 +570,15 @@ String ShadowWatch::_copy_verdict(const LightSample &p_sample, const WatchedLigh
 		return "Its copy left no record (more than 16 copies in the view): no verdict.";
 	}
 	if (p_sample.stale[p_half]) {
-		return vformat("The copy of half %d left no record in this frame: it did not run, or ran without writing.", p_half);
+		String stale = vformat("The copy of half %d left no record in this frame: it did not run, or ran with another record offset or stamp than it was given.", p_half);
+		if (p_sample.driver_seen[p_half]) {
+			float driver_z_far;
+			memcpy(&driver_z_far, &p_sample.driver_z_far[p_half], sizeof(float));
+			stale += vformat(" Yet the D3D12 driver WAS handed its constants with that record offset and stamp (z_far %.4f, given %.4f), the root signature it last bound %s, and set them: the draw was submitted with them, so after our driver handed them to Direct3D 12 the copy either did not run or ran with other constants.", driver_z_far, p_light.copy_z_far, p_sample.driver_root_signature_bound[p_half] ? "being the copy shader's" : "NOT being the copy shader's");
+		} else {
+			stale += " The D3D12 driver never reported receiving its constants either: they were lost before our driver.";
+		}
+		return stale;
 	}
 	const uint32_t points = 1024;
 	String text;
