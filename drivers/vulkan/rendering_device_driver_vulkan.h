@@ -30,6 +30,7 @@
 
 #pragma once
 
+#include "core/os/rw_lock.h"
 #include "core/templates/hash_map.h"
 #include "core/templates/paged_allocator.h"
 #include "core/templates/rb_map.h"
@@ -643,11 +644,37 @@ private:
 		uint8_t driver_abi = 0;
 	};
 
+	// Intel workaround (INTEL-VK-PIPELINE-CACHE-WA.md): Intel's driver crashed in vkGetPipelineCacheData while other
+	// threads created pipelines with the cache.
+	enum PipelineCacheWorkaround {
+		PIPELINE_CACHE_WORKAROUND_NONE,
+		PIPELINE_CACHE_WORKAROUND_LOCK, // vkGetPipelineCacheData never runs while a pipeline is created with the cache.
+		PIPELINE_CACHE_WORKAROUND_NO_SAVE, // vkGetPipelineCacheData is never called once the cache is in use.
+	};
+
 	struct PipelineCache {
 		String file_path;
 		size_t current_size = 0;
 		Vector<uint8_t> buffer; // Header then data.
 		VkPipelineCache vk_cache = VK_NULL_HANDLE;
+		PipelineCacheWorkaround workaround = PIPELINE_CACHE_WORKAROUND_NONE;
+		RWLock lock; // PIPELINE_CACHE_WORKAROUND_LOCK: shared by pipeline creations, exclusive for vkGetPipelineCacheData.
+	};
+
+	// Held around every pipeline creation that uses the pipeline cache.
+	struct PipelineCacheUse {
+		const PipelineCache &cache;
+		PipelineCacheUse(const PipelineCache &p_cache) :
+				cache(p_cache) {
+			if (cache.workaround == PIPELINE_CACHE_WORKAROUND_LOCK) {
+				cache.lock.read_lock();
+			}
+		}
+		~PipelineCacheUse() {
+			if (cache.workaround == PIPELINE_CACHE_WORKAROUND_LOCK) {
+				cache.lock.read_unlock();
+			}
+		}
 	};
 
 	static int caching_instance_count;

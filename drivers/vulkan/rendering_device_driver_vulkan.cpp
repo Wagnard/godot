@@ -1685,6 +1685,26 @@ Error RenderingDeviceDriverVulkan::_initialize_device(const LocalVector<VkDevice
 			use_deferred_pipelines = false;
 			print_verbose("Vulkan: ray tracing pipelines compiled without deferred host operations on Intel (a driver defect, INTEL-VK-DEFERRED-RT-PIPELINES-WA); GODOT_VK_DEFERRED_PIPELINES=1 uses them.");
 		}
+
+		// Intel: a driver defect (INTEL-VK-PIPELINE-CACHE-WA.md): Intel's Vulkan driver (igvk64.dll, Arc B580) crashed at
+		// igvk64+0x79ddf3 in vkGetPipelineCacheData (RenderingDevice::_save_pipeline_cache, 5 minidumps) while other threads
+		// created pipelines with the cache, during a first load with its own shader cache empty. The cache is internally
+		// synchronized (no VK_PIPELINE_CACHE_CREATE_EXTERNALLY_SYNCHRONIZED_BIT), so this use is valid Vulkan.
+		// Cold godot3d runs on an Arc B580: without a workaround 2/2 crashed, with lock 3/3 and with nosave 3/3 held.
+		// GODOT_VK_PIPELINE_CACHE_WA=lock|nosave|0 chooses the workaround on any GPU (default: lock on Intel).
+		const String cache_workaround = OS::get_singleton()->get_environment("GODOT_VK_PIPELINE_CACHE_WA");
+		if (cache_workaround == "lock" || (cache_workaround.is_empty() && physical_device_properties.vendorID == RenderingContextDriver::Vendor::VENDOR_INTEL)) {
+			pipelines_cache.workaround = PIPELINE_CACHE_WORKAROUND_LOCK;
+			print_verbose("Vulkan: the pipeline cache is never read back while a pipeline is created with it (INTEL-VK-PIPELINE-CACHE-WA).");
+		} else if (cache_workaround == "nosave") {
+			pipelines_cache.workaround = PIPELINE_CACHE_WORKAROUND_NO_SAVE;
+			print_verbose("Vulkan: the pipeline cache is never saved (INTEL-VK-PIPELINE-CACHE-WA).");
+		}
+		if (use_deferred_pipelines && pipelines_cache.workaround == PIPELINE_CACHE_WORKAROUND_LOCK) {
+			// A deferred operation's thread holds the shared lock while it joins, and a join may run other tasks.
+			use_deferred_pipelines = false;
+			print_verbose("Vulkan: ray tracing pipelines compiled without deferred host operations (the pipeline cache lock of INTEL-VK-PIPELINE-CACHE-WA).");
+		}
 		if (enabled_device_extension_names.has(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME) && use_deferred_pipelines) {
 			device_functions.CreateDeferredOperationKHR = PFN_vkCreateDeferredOperationKHR(functions.GetDeviceProcAddr(vk_device, "vkCreateDeferredOperationKHR"));
 			device_functions.DestroyDeferredOperationKHR = PFN_vkDestroyDeferredOperationKHR(functions.GetDeviceProcAddr(vk_device, "vkDestroyDeferredOperationKHR"));
@@ -5909,7 +5929,17 @@ size_t RenderingDeviceDriverVulkan::pipeline_cache_query_size() {
 	// FIXME:
 	// We're letting the cache grow unboundedly. We may want to set at limit and see if implementations use LRU or the like.
 	// If we do, we won't be able to assume any longer that the cache is dirty if, and only if, it has grown.
+
+	// INTEL-VK-PIPELINE-CACHE-WA: once measured, an unchanged size while a pipeline is created with the cache (always
+	// with NO_SAVE), so that RenderingDevice does not save it then.
+	const bool locked = pipelines_cache.workaround != PIPELINE_CACHE_WORKAROUND_NONE && pipelines_cache.current_size;
+	if (locked && (pipelines_cache.workaround == PIPELINE_CACHE_WORKAROUND_NO_SAVE || !pipelines_cache.lock.write_try_lock())) {
+		return pipelines_cache.current_size;
+	}
 	VkResult err = vkGetPipelineCacheData(vk_device, pipelines_cache.vk_cache, &pipelines_cache.current_size, nullptr);
+	if (locked) {
+		pipelines_cache.lock.write_unlock();
+	}
 	ERR_FAIL_COND_V_MSG(err, 0, vformat("Couldn't get Vulkan pipeline cache data (VkResult error %d).", err));
 
 	return pipelines_cache.current_size;
@@ -5918,9 +5948,23 @@ size_t RenderingDeviceDriverVulkan::pipeline_cache_query_size() {
 Vector<uint8_t> RenderingDeviceDriverVulkan::pipeline_cache_serialize() {
 	DEV_ASSERT(pipelines_cache.vk_cache);
 
+	// INTEL-VK-PIPELINE-CACHE-WA: nothing to save while a pipeline is created with the cache (RenderingDevice saves it
+	// once it has grown by another chunk, or at exit), never with NO_SAVE.
+	if (pipelines_cache.workaround == PIPELINE_CACHE_WORKAROUND_NO_SAVE) {
+		return Vector<uint8_t>();
+	}
+	const bool locked = pipelines_cache.workaround == PIPELINE_CACHE_WORKAROUND_LOCK;
+	if (locked && !pipelines_cache.lock.write_try_lock()) {
+		print_verbose("Vulkan: pipeline cache not saved, pipelines are being created with it (INTEL-VK-PIPELINE-CACHE-WA).");
+		return Vector<uint8_t>();
+	}
+
 	pipelines_cache.buffer.resize(pipelines_cache.current_size + sizeof(PipelineCacheHeader));
 
 	VkResult err = vkGetPipelineCacheData(vk_device, pipelines_cache.vk_cache, &pipelines_cache.current_size, pipelines_cache.buffer.ptrw() + sizeof(PipelineCacheHeader));
+	if (locked) {
+		pipelines_cache.lock.write_unlock();
+	}
 	// Incomplete is OK because the cache may have grown since the size was queried (unless when exiting).
 	ERR_FAIL_COND_V_MSG(err != VK_SUCCESS && err != VK_INCOMPLETE, Vector<uint8_t>(), vformat("Couldn't get Vulkan pipeline cache data (VkResult error %d).", err));
 
@@ -6799,7 +6843,11 @@ RDD::PipelineID RenderingDeviceDriverVulkan::render_pipeline_create(
 #endif
 
 	VkPipeline vk_pipeline = VK_NULL_HANDLE;
-	VkResult err = vkCreateGraphicsPipelines(vk_device, pipelines_cache.vk_cache, 1, &pipeline_create_info, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_PIPELINE), &vk_pipeline);
+	VkResult err;
+	{
+		PipelineCacheUse cache_use(pipelines_cache);
+		err = vkCreateGraphicsPipelines(vk_device, pipelines_cache.vk_cache, 1, &pipeline_create_info, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_PIPELINE), &vk_pipeline);
+	}
 
 	// Don't print error for VK_ERROR_UNKNOWN on Adreno 660.
 	if (unlikely(err == VK_ERROR_UNKNOWN && driver_workarounds.dont_print_on_render_pipeline_creation_failure)) {
@@ -7376,6 +7424,7 @@ VkResult RenderingDeviceDriverVulkan::_raytracing_pipeline_create_deferred(const
 	// WorkerThreadPool threads as the operation can use join it (Vulkan spec, "Deferred Host Operations"; NVIDIA's ray
 	// tracing best practices). Everything it reads stays alive here until it is complete.
 	const uint64_t start_usec = OS::get_singleton()->get_ticks_usec();
+	PipelineCacheUse cache_use(pipelines_cache); // Never deferred with its lock: no other task runs under it.
 	VkDeferredOperationKHR operation = VK_NULL_HANDLE;
 	WorkerThreadPool *pool = WorkerThreadPool::get_singleton();
 	if (device_functions.CreateDeferredOperationKHR && pool && pool->get_thread_count() > 1) {
@@ -7433,7 +7482,13 @@ VkPipeline RenderingDeviceDriverVulkan::_raytracing_library_create(VectorView<Vk
 	create_info.layout = p_pipeline.vk_layout;
 
 	VkPipeline vk_library = VK_NULL_HANDLE;
-	VkResult err = p_deferred ? _raytracing_pipeline_create_deferred(create_info, &vk_library) : device_functions.CreateRaytracingPipelinesKHR(vk_device, VK_NULL_HANDLE, pipelines_cache.vk_cache, 1, &create_info, nullptr, &vk_library);
+	VkResult err;
+	if (p_deferred) {
+		err = _raytracing_pipeline_create_deferred(create_info, &vk_library);
+	} else {
+		PipelineCacheUse cache_use(pipelines_cache);
+		err = device_functions.CreateRaytracingPipelinesKHR(vk_device, VK_NULL_HANDLE, pipelines_cache.vk_cache, 1, &create_info, nullptr, &vk_library);
+	}
 	ERR_FAIL_COND_V_MSG(err, VK_NULL_HANDLE, vformat("Couldn't create a Vulkan raytracing pipeline library (VkResult error %d).", err));
 	return vk_library;
 }
@@ -7464,7 +7519,11 @@ bool RenderingDeviceDriverVulkan::_raytracing_libraries_link(RaytracingPipelineI
 
 	// Not deferred: the libraries are compiled, a link has nothing to spread over threads (NVIDIA reports a concurrency of
 	// 0), and a deferred link gave a pipeline that crashed vkCmdTraceRaysKHR on NVIDIA (RTX 5070, 2026-10-19).
-	VkResult err = device_functions.CreateRaytracingPipelinesKHR(vk_device, VK_NULL_HANDLE, pipelines_cache.vk_cache, 1, &create_info, nullptr, &p_pipeline.vk_pipeline);
+	VkResult err;
+	{
+		PipelineCacheUse cache_use(pipelines_cache);
+		err = device_functions.CreateRaytracingPipelinesKHR(vk_device, VK_NULL_HANDLE, pipelines_cache.vk_cache, 1, &create_info, nullptr, &p_pipeline.vk_pipeline);
+	}
 	ERR_FAIL_COND_V_MSG(err, false, vformat("Couldn't link Vulkan raytracing pipeline libraries (VkResult error %d).", err));
 	return true;
 }
@@ -7789,7 +7848,11 @@ RDD::PipelineID RenderingDeviceDriverVulkan::compute_pipeline_create(ShaderID p_
 	}
 
 	VkPipeline vk_pipeline = VK_NULL_HANDLE;
-	VkResult err = vkCreateComputePipelines(vk_device, pipelines_cache.vk_cache, 1, &pipeline_create_info, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_PIPELINE), &vk_pipeline);
+	VkResult err;
+	{
+		PipelineCacheUse cache_use(pipelines_cache);
+		err = vkCreateComputePipelines(vk_device, pipelines_cache.vk_cache, 1, &pipeline_create_info, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_PIPELINE), &vk_pipeline);
+	}
 	ERR_FAIL_COND_V_MSG(err, PipelineID(), vformat("Couldn't create Vulkan compute pipelines (VkResult error %d).", err));
 
 	return PipelineID(vk_pipeline);
