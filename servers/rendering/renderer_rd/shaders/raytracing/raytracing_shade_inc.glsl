@@ -386,17 +386,26 @@ bool trace_path_ray(inout PathState ps, inout vec3 ray_origin, inout vec3 ray_di
 	reorderThreadEXT(hitObject, hint, 8);
 
 	hitObjectExecuteShaderEXT(hitObject, 0);
+
+	// Whether the ray hit, and where, come from the hit object, not from the payload fields this shader wrote before the
+	// call (packed_bounces_flags, hit_t): NVIDIA's Vulkan driver gave the raygen those fields back as it had written them,
+	// in most runs, instead of what the closest hit and miss shaders wrote; the rest of the payload, which only they
+	// write, came back right. The haze of PT-VK-SER-PAYLOAD-WA.md: hit_t 0, every bounce left from the camera.
+	const bool missed = !hitObjectIsHitEXT(hitObject);
+	HitRecord r = hit_unpack(payload);
+	r.hit_t = missed ? 0.0 : hitObjectGetRayTMaxEXT(hitObject);
 #else
 	traceRayEXT(tlas, RT_RAY_FLAGS, mask, 0, 0, 0, ray_origin, 0.001, ray_dir, 10000.0, 0);
-#endif
 
+	const bool missed = is_path_terminated(payload.packed_bounces_flags);
 	const HitRecord r = hit_unpack(payload);
+#endif
 	r_hit_t = r.hit_t;
 #ifdef RT_DEBUG_ENABLED
 	{
 		const int vis_mode = int(get_rt_param(RT_PARAM_VIS_MODE));
 		if (vis_mode == 1 || vis_mode == 13) {
-			return debug_reflection_view(vis_mode, ps, r, is_path_terminated(payload.packed_bounces_flags), ray_origin, ray_dir);
+			return debug_reflection_view(vis_mode, ps, r, missed, ray_origin, ray_dir);
 		}
 	}
 #endif
@@ -404,7 +413,7 @@ bool trace_path_ray(inout PathState ps, inout vec3 ray_origin, inout vec3 ray_di
 		ps.radiance = r.emissive;
 		return false;
 	}
-	if (is_path_terminated(payload.packed_bounces_flags)) {
+	if (missed) {
 		// A miss: the light the Environment brings along this ray.
 		ps.radiance += ps.throughput * r.emissive;
 		return false;
