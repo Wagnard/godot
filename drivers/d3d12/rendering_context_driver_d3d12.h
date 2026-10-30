@@ -51,9 +51,11 @@ class RenderingContextDriverD3D12 : public RenderingContextDriver {
 	TightLocalVector<Device> driver_devices;
 	bool tearing_supported = false;
 	bool debug_layer_enabled = false;
+	bool dred_enabled = false;
 
 	Error _init_device_factory();
 	Error _initialize_debug_layers();
+	void _initialize_dred();
 	Error _create_dxgi_factory();
 	Error _initialize_devices();
 
@@ -126,6 +128,9 @@ public:
 	Error shutdown_streamline();
 	bool get_tearing_supported() const;
 	bool use_validation_layers() const;
+	// GODOT_D3D12_DRED=1: devices record DRED auto-breadcrumbs, their markers' strings and page faults
+	// (RenderingDeviceDriverD3D12::_report_device_removed() prints them).
+	bool is_dred_enabled() const { return dred_enabled; }
 
 	RenderingContextDriverD3D12();
 	virtual ~RenderingContextDriverD3D12() override;

@@ -471,6 +471,7 @@ private:
 	// loss is first observed, so it precedes the cascade of errors in the log.
 	bool device_removed_reported = false;
 	void _report_device_removed(const char *p_where);
+	void _print_dred_report();
 	static const char *_device_removed_reason_name(HRESULT p_reason);
 
 public:

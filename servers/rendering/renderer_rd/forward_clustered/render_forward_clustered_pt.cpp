@@ -239,7 +239,9 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 	// A probe at the center of each rasterized instance, the nearest first: traced after the camera rays (a dispatch of its
 	// own), reduced, and read back to light the instance in the next frames.
 	uint32_t probe_dispatch_count = 0;
-	if (pt_probes) {
+	// GODOT_PT_PROBES=0 (diagnostic): no probe is traced; the rasterized instances keep the Environment's ambient light.
+	static const bool probes_off = OS::get_singleton()->get_environment("GODOT_PT_PROBES") == "0";
+	if (pt_probes && !probes_off) {
 		thread_local LocalVector<RendererRD::PTProbes::Request> probe_requests;
 		thread_local HashSet<GeometryInstanceForwardClustered *> probe_instances;
 		probe_requests.clear();

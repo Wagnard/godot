@@ -2926,6 +2926,139 @@ void RenderingDeviceDriverD3D12::_report_device_removed(const char *p_where) {
 	device_removed_reported = true;
 	ERR_PRINT(vformat("D3D12: device removed, first observed in %s. GetDeviceRemovedReason() = 0x%08ux: %s. Every D3D12 error printed after this line is a consequence, not a cause.",
 			p_where, (uint64_t)reason, _device_removed_reason_name(reason)));
+	if (context_driver->is_dred_enabled()) {
+		_print_dred_report();
+	}
+}
+
+static const char *_dred_op_name(D3D12_AUTO_BREADCRUMB_OP p_op) {
+	static const char *names[] = { "SetMarker", "BeginEvent", "EndEvent", "DrawInstanced", "DrawIndexedInstanced", "ExecuteIndirect",
+		"Dispatch", "CopyBufferRegion", "CopyTextureRegion", "CopyResource", "CopyTiles", "ResolveSubresource", "ClearRenderTargetView",
+		"ClearUnorderedAccessView", "ClearDepthStencilView", "ResourceBarrier", "ExecuteBundle", "Present", "ResolveQueryData",
+		"BeginSubmission", "EndSubmission", "DecodeFrame", "ProcessFrames", "AtomicCopyBufferUINT", "AtomicCopyBufferUINT64",
+		"ResolveSubresourceRegion", "WriteBufferImmediate", "DecodeFrame1", "SetProtectedResourceSession", "DecodeFrame2",
+		"ProcessFrames1", "BuildRaytracingAccelerationStructure", "EmitRaytracingAccelerationStructurePostbuildInfo",
+		"CopyRaytracingAccelerationStructure", "DispatchRays", "InitializeMetaCommand", "ExecuteMetaCommand", "EstimateMotion",
+		"ResolveMotionVectorHeap", "SetPipelineState1", "InitializeExtensionCommand", "ExecuteExtensionCommand", "DispatchMesh",
+		"EncodeFrame", "ResolveEncoderOutputMetadata", "Barrier", "BeginCommandList", "DispatchGraph", "SetProgram" };
+	static_assert(std_size(names) == D3D12_AUTO_BREADCRUMB_OP_SETPROGRAM + 1);
+	return (uint32_t)p_op < std_size(names) ? names[p_op] : "(unknown operation)";
+}
+
+static String _dred_name(const wchar_t *p_name_w, const char *p_name_a) {
+	if (p_name_w) {
+		return String::utf16((const char16_t *)p_name_w);
+	}
+	return p_name_a ? String(p_name_a) : String("unnamed");
+}
+
+void RenderingDeviceDriverD3D12::_print_dred_report() {
+	// Microsoft's DRED documentation ("Use DRED to diagnose GPU faults"): each command list's auto-breadcrumbs count the
+	// operations the GPU completed; the first operation not counted, in a list the GPU started, is where it stopped.
+	ComPtr<ID3D12DeviceRemovedExtendedData1> dred;
+	if (!SUCCEEDED(device.As(&dred))) {
+		ERR_PRINT("D3D12 DRED: the device has no ID3D12DeviceRemovedExtendedData1.");
+		return;
+	}
+	ComPtr<ID3D12DeviceRemovedExtendedData2> dred2;
+	device.As(&dred2);
+	if (dred2) {
+		print_line(vformat("D3D12 DRED: device state %d (3: hung, 6: fault, 7: page fault, 0: unknown).", (int)dred2->GetDeviceState()));
+	}
+
+	D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT1 breadcrumbs = {};
+	HRESULT res = dred->GetAutoBreadcrumbsOutput1(&breadcrumbs);
+	if (!SUCCEEDED(res)) {
+		print_line(vformat("D3D12 DRED: no auto-breadcrumbs (0x%08ux).", (uint64_t)res));
+	} else {
+		constexpr uint32_t MAX_DETAILED_LISTS = 12;
+		uint32_t list_count = 0;
+		uint32_t completed_count = 0;
+		uint32_t detailed_count = 0;
+		for (const D3D12_AUTO_BREADCRUMB_NODE1 *node = breadcrumbs.pHeadAutoBreadcrumbNode; node; node = node->pNext) {
+			list_count++;
+			const uint32_t count = node->BreadcrumbCount;
+			const uint32_t last = node->pLastBreadcrumbValue ? *node->pLastBreadcrumbValue : 0;
+			if (last >= count) {
+				completed_count++;
+				continue;
+			}
+			const String list_name = _dred_name(node->pCommandListDebugNameW, node->pCommandListDebugNameA);
+			const String queue_name = _dred_name(node->pCommandQueueDebugNameW, node->pCommandQueueDebugNameA);
+			if (last == 0) {
+				print_line(vformat("D3D12 DRED: command list %s (queue %s, %x): not started, %d operations.", list_name, queue_name, (uint64_t)node->pCommandList, count));
+				continue;
+			}
+			if (detailed_count++ >= MAX_DETAILED_LISTS) {
+				print_line(vformat("D3D12 DRED: command list %s (queue %s, %x): %d of %d operations completed.", list_name, queue_name, (uint64_t)node->pCommandList, last, count));
+				continue;
+			}
+
+			HashMap<uint32_t, String> contexts;
+			for (uint32_t i = 0; i < node->BreadcrumbContextsCount; i++) {
+				const D3D12_DRED_BREADCRUMB_CONTEXT &context = node->pBreadcrumbContexts[i];
+				if (context.pContextString) {
+					contexts[context.BreadcrumbIndex] = String::utf16((const char16_t *)context.pContextString);
+				}
+			}
+			// The markers still open at the first operation the GPU did not complete.
+			LocalVector<String> open_events;
+			for (uint32_t i = 0; i < last; i++) {
+				if (node->pCommandHistory[i] == D3D12_AUTO_BREADCRUMB_OP_BEGINEVENT) {
+					open_events.push_back(contexts.has(i) ? contexts[i] : String("?"));
+				} else if (node->pCommandHistory[i] == D3D12_AUTO_BREADCRUMB_OP_ENDEVENT && !open_events.is_empty()) {
+					open_events.remove_at(open_events.size() - 1);
+				}
+			}
+			String inside;
+			for (const String &event : open_events) {
+				inside += (inside.is_empty() ? "" : " > ") + event;
+			}
+			print_line(vformat("D3D12 DRED: command list %s (queue %s, %x): %d of %d operations completed, stopped inside [%s]:", list_name, queue_name, (uint64_t)node->pCommandList, last, count, inside));
+			const uint32_t from = last > 16 ? last - 16 : 0;
+			const uint32_t to = MIN(count, last + 8);
+			for (uint32_t i = from; i < to; i++) {
+				const D3D12_AUTO_BREADCRUMB_OP op = node->pCommandHistory[i];
+				print_line(vformat("D3D12 DRED:   %s[%d] %s%s", i == last ? "-> " : "   ", i, _dred_op_name(op), contexts.has(i) ? " \"" + contexts[i] + "\"" : String()));
+			}
+		}
+		print_line(vformat("D3D12 DRED: %d command lists recorded, %d of them completed.", list_count, completed_count));
+	}
+
+	D3D12_GPU_VIRTUAL_ADDRESS fault_va = 0;
+	const D3D12_DRED_ALLOCATION_NODE1 *existing = nullptr;
+	const D3D12_DRED_ALLOCATION_NODE1 *freed = nullptr;
+	if (dred2) {
+		D3D12_DRED_PAGE_FAULT_OUTPUT2 page_fault = {};
+		res = dred2->GetPageFaultAllocationOutput2(&page_fault);
+		fault_va = page_fault.PageFaultVA;
+		existing = page_fault.pHeadExistingAllocationNode;
+		freed = page_fault.pHeadRecentFreedAllocationNode;
+	} else {
+		D3D12_DRED_PAGE_FAULT_OUTPUT1 page_fault = {};
+		res = dred->GetPageFaultAllocationOutput1(&page_fault);
+		fault_va = page_fault.PageFaultVA;
+		existing = page_fault.pHeadExistingAllocationNode;
+		freed = page_fault.pHeadRecentFreedAllocationNode;
+	}
+	if (!SUCCEEDED(res)) {
+		print_line(vformat("D3D12 DRED: no page fault output (0x%08ux).", (uint64_t)res));
+		return;
+	}
+	if (fault_va == 0) {
+		print_line("D3D12 DRED: no page fault recorded.");
+		return;
+	}
+	print_line(vformat("D3D12 DRED: page fault at GPU virtual address 0x%x.", (uint64_t)fault_va));
+	for (int pass = 0; pass < 2; pass++) {
+		uint32_t shown = 0;
+		for (const D3D12_DRED_ALLOCATION_NODE1 *alloc = pass == 0 ? existing : freed; alloc && shown < 32; alloc = alloc->pNext, shown++) {
+			print_line(vformat("D3D12 DRED:   %s allocation at that address: %s (type %d).", pass == 0 ? "live" : "recently freed", _dred_name(alloc->ObjectNameW, alloc->ObjectNameA), (int)alloc->AllocationType));
+		}
+		if (shown == 0) {
+			print_line(vformat("D3D12 DRED:   no %s allocation at that address.", pass == 0 ? "live" : "recently freed"));
+		}
+	}
 }
 
 Error RenderingDeviceDriverD3D12::fence_wait(FenceID p_fence) {

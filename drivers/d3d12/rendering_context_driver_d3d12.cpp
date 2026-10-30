@@ -59,6 +59,7 @@ using Microsoft::WRL::ComPtr;
 // GUID values from https://github.com/microsoft/DirectX-Headers/blob/7a9f4d06911d30eecb56a4956dab29dcca2709ed/include/directx/d3d12.idl#L5877-L5881
 const GUID CLSID_D3D12DebugGodot = { 0xf2352aeb, 0xdd84, 0x49fe, { 0xb9, 0x7b, 0xa9, 0xdc, 0xfd, 0xcc, 0x1b, 0x4f } };
 const GUID CLSID_D3D12SDKConfigurationGodot = { 0x7cda6aca, 0xa03e, 0x49c8, { 0x94, 0x58, 0x03, 0x34, 0xd2, 0x0e, 0x07, 0xce } };
+const GUID CLSID_D3D12DeviceRemovedExtendedDataGodot = { 0x4a75bbc4, 0x9ff4, 0x4ad8, { 0x9f, 0x18, 0xab, 0xae, 0x84, 0xdc, 0x5f, 0xf2 } };
 
 #ifdef PIX_ENABLED
 #if defined(__GNUC__)
@@ -175,6 +176,27 @@ Error RenderingContextDriverD3D12::_initialize_debug_layers() {
 	return OK;
 }
 
+void RenderingContextDriverD3D12::_initialize_dred() {
+	// Microsoft's DRED (Device Removed Extended Data) is part of the runtime, without the debug layer or Graphics Tools. Its
+	// settings apply to the devices created afterwards: by the device factory with the Agility SDK ("D3D12 independent
+	// devices": GetConfigurationInterface(CLSID_D3D12DeviceRemovedExtendedData)), else globally.
+	ComPtr<ID3D12DeviceRemovedExtendedDataSettings1> dred_settings;
+	HRESULT res;
+	if (device_factory) {
+		res = device_factory->GetConfigurationInterface(CLSID_D3D12DeviceRemovedExtendedDataGodot, IID_PPV_ARGS(&dred_settings));
+	} else {
+		PFN_D3D12_GET_DEBUG_INTERFACE d3d_D3D12GetDebugInterface = (PFN_D3D12_GET_DEBUG_INTERFACE)(void *)GetProcAddress(lib_d3d12, "D3D12GetDebugInterface");
+		ERR_FAIL_NULL(d3d_D3D12GetDebugInterface);
+		res = d3d_D3D12GetDebugInterface(IID_PPV_ARGS(&dred_settings));
+	}
+	ERR_FAIL_COND_MSG(!SUCCEEDED(res), vformat("D3D12: DRED is unavailable (0x%08ux).", (uint64_t)res));
+	dred_settings->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+	dred_settings->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+	dred_settings->SetBreadcrumbContextEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+	dred_enabled = true;
+	print_line("D3D12: DRED auto-breadcrumbs, breadcrumb contexts and page fault reporting enabled.");
+}
+
 Error RenderingContextDriverD3D12::_create_dxgi_factory() {
 	const UINT dxgi_factory_flags = use_validation_layers() ? DXGI_CREATE_FACTORY_DEBUG : 0;
 
@@ -268,6 +290,9 @@ Error RenderingContextDriverD3D12::initialize() {
 		if (err != OK) {
 			ERR_PRINT("Direct3D 12: --gpu-validation requested, but running WITHOUT the debug layer.");
 		}
+	}
+	if (OS::get_singleton()->get_environment("GODOT_D3D12_DRED") == "1") {
+		_initialize_dred();
 	}
 
 	err = _initialize_devices();
