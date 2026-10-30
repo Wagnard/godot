@@ -5930,10 +5930,15 @@ size_t RenderingDeviceDriverVulkan::pipeline_cache_query_size() {
 	// We're letting the cache grow unboundedly. We may want to set at limit and see if implementations use LRU or the like.
 	// If we do, we won't be able to assume any longer that the cache is dirty if, and only if, it has grown.
 
-	// INTEL-VK-PIPELINE-CACHE-WA: once measured, an unchanged size while a pipeline is created with the cache (always
-	// with NO_SAVE), so that RenderingDevice does not save it then.
-	const bool locked = pipelines_cache.workaround != PIPELINE_CACHE_WORKAROUND_NONE && pipelines_cache.current_size;
-	if (locked && (pipelines_cache.workaround == PIPELINE_CACHE_WORKAROUND_NO_SAVE || !pipelines_cache.lock.write_try_lock())) {
+	// INTEL-VK-PIPELINE-CACHE-WA: an unchanged size while a pipeline is created with the cache, so that RenderingDevice
+	// does not save it then. The first query, from RenderingDevice::initialize() right after the cache is created, comes
+	// before any pipeline: it always takes the lock, and gives the non-zero size that RenderingDevice requires afterwards
+	// (update_pipeline_cache() fails on 0). NO_SAVE measures the cache only then.
+	if (pipelines_cache.workaround == PIPELINE_CACHE_WORKAROUND_NO_SAVE && pipelines_cache.current_size) {
+		return pipelines_cache.current_size;
+	}
+	const bool locked = pipelines_cache.workaround == PIPELINE_CACHE_WORKAROUND_LOCK;
+	if (locked && !pipelines_cache.lock.write_try_lock()) {
 		return pipelines_cache.current_size;
 	}
 	VkResult err = vkGetPipelineCacheData(vk_device, pipelines_cache.vk_cache, &pipelines_cache.current_size, nullptr);
