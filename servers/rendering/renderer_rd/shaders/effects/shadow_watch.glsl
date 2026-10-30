@@ -56,7 +56,8 @@ params;
 
 // Per light record, in uints: two halves of 88 (64 block sums, count of 0, count of 1, copy mismatches, copy samples,
 // read differences, write differences, stale record, record present, matches with each candidate, then the copy's
-// header words 1 to 6: the constants it ran with and its first point's position), then six faces of 18 (16 block
+// header words 1 to 7: the constants it ran with, its first point's position, the second copy of its z_far), then six
+// faces of 18 (16 block
 // sums, count of 0, count of 1).
 #define HALF_STRIDE 88u
 #define FACES_BASE 176u
@@ -224,7 +225,7 @@ void main() {
 			for (uint k = 0u; k < MAX_CANDIDATES; k++) {
 				results.data[base + 72u + k] = match_count[k];
 			}
-			for (uint w = 1u; w < 7u; w++) {
+			for (uint w = 1u; w < 8u; w++) {
 				results.data[base + 79u + w] = has_record ? copy_records.data[record + w] : 0u;
 			}
 		}

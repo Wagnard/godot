@@ -1154,7 +1154,9 @@ void CopyEffects::copy_cubemap_to_dp(RID p_source_rd_texture, RID p_dst_framebuf
 	push_constant.texel_size[0] *= p_dp_flip ? -1.0f : 1.0f; // Encode dp flip as x size sign
 	push_constant.watch_offset = p_watch_offset;
 	push_constant.watch_stamp = p_watch_stamp;
-	push_constant.pad[0] = 0;
+	// A second copy of z_far, at the end of the constants: ShadowWatch tells from it whether a wrong z_far was already in
+	// what was recorded, or only the first constant changed afterwards.
+	memcpy(&push_constant.pad[0], &push_constant.z_far, sizeof(float));
 	push_constant.pad[1] = 0;
 
 	const bool watch = p_watch_record.is_valid() && cube_to_dp.shader.is_variant_enabled(CUBE_TO_DP_WATCH);

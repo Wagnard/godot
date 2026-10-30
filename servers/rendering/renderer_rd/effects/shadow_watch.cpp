@@ -550,11 +550,21 @@ String ShadowWatch::_copy_verdict(const LightSample &p_sample, const WatchedLigh
 	String text;
 	float expected[6];
 	_expected_copy_header(p_light, p_half, expected);
-	float got[6];
+	float got[7];
 	memcpy(got, p_sample.header[p_half], sizeof(got));
 	if (!_copy_params_as_given(p_sample, p_light, p_half)) {
 		text = vformat("The copy of half %d RAN WITH OTHER CONSTANTS than it was given: z_far %.4f (given %.4f), z_near %.4f (given %.4f), texel size (%.6f, %.6f) (given (%.6f, %.6f)), first point at (%.1f, %.1f) (expected (%.1f, %.1f)).",
 				p_half, got[0], expected[0], got[1], expected[1], got[2], got[3], expected[2], expected[3], got[4], got[5], expected[4], expected[5]);
+		// The second copy of z_far, at the end of the same constants, written by the same CPU code.
+		if (got[0] != expected[0]) {
+			if (got[6] == expected[0]) {
+				text += vformat(" Its second copy of z_far, at the end of the same constants, is right (%.4f): only the FIRST constant changed after the CPU recorded them, on the way to the GPU (driver or GPU side).", got[6]);
+			} else if (got[6] == got[0]) {
+				text += vformat(" Its second copy of z_far is wrong the same way (%.4f): the constants were RECORDED with that z_far, on the CPU side.", got[6]);
+			} else {
+				text += vformat(" Its second copy of z_far is %.4f, neither.", got[6]);
+			}
+		}
 		String owners;
 		for (const CopyParams &params : p_render.copy_params) {
 			if (params.z_far == got[0] && params.z_near == got[1] && !params.world_position.is_equal_approx(p_light.world_position)) {
@@ -627,7 +637,7 @@ void ShadowWatch::_analyze(const WatchedRender &p_render, uint64_t p_serial, con
 			for (uint32_t k = 0; k < MAX_CANDIDATES; k++) {
 				s->matches[h][k] = half[72 + k];
 			}
-			for (uint32_t w = 0; w < 6; w++) {
+			for (uint32_t w = 0; w < 7; w++) {
 				s->header[h][w] = half[80 + w];
 			}
 		}

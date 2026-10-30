@@ -69,7 +69,7 @@ private:
 	static constexpr uint32_t LIGHT_RECORD = 320;
 	// Per half: 64 block sums, count of 0, count of 1, copy mismatches, copy samples, read differences, write
 	// differences, stale record, record present, the matches with each candidate copy, then the copy's header words 1
-	// to 6 (at 80).
+	// to 7 (at 80).
 	static constexpr uint32_t HALF_STRIDE = 88;
 	static constexpr uint32_t FACES_BASE = 176;
 	static constexpr uint32_t FACE_STRIDE = 18;
@@ -190,7 +190,8 @@ private:
 		uint32_t read_diff[2] = {};
 		uint32_t write_diff[2] = {};
 		uint32_t matches[2][MAX_CANDIDATES] = {};
-		uint32_t header[2][6] = {}; // What each copy ran with: z_far, z_near, texel size x and y, first point x and y.
+		// What each copy ran with: z_far, z_near, texel size x and y, first point x and y, the second copy of z_far.
+		uint32_t header[2][7] = {};
 		uint32_t face_casters[6] = {};
 		bool screen = false;
 		uint8_t vis[GRID_POINTS] = {};

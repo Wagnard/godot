@@ -123,6 +123,7 @@ void main() {
 			watch_record.data[params.watch_offset + 4u] = floatBitsToUint(params.texel_size.y);
 			watch_record.data[params.watch_offset + 5u] = floatBitsToUint(gl_FragCoord.x);
 			watch_record.data[params.watch_offset + 6u] = floatBitsToUint(gl_FragCoord.y);
+			watch_record.data[params.watch_offset + 7u] = params.pad0; // The copy of z_far at the end of the constants.
 		}
 	}
 #endif
