@@ -989,6 +989,17 @@ bool RenderForwardClusteredPT::setup_raytracing_for_shader_baker() {
 	if (_transparent_pass_traces_shadows()) {
 		scene_shader.enable_rt_shadows_shader_group();
 	}
+	// The effects made at their first use under the path tracer: their ShaderRD versions exist only once made, and the
+	// baker bakes the versions that exist. NRD's passes are SPIR-V of its own, not ShaderRD.
+	if (!pt_probes) {
+		pt_probes = memnew(RendererRD::PTProbes);
+	}
+	if (!rasterized_guides) {
+		rasterized_guides = memnew(RendererRD::PTRasterizedGuides);
+	}
+	if (!finite_layer) {
+		finite_layer = memnew(RendererRD::FiniteLayer);
+	}
 	return true;
 }
 

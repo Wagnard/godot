@@ -82,9 +82,9 @@ public:
 	virtual bool environment_pathtracing_replaces_shadow_maps(RID p_env) const override;
 	virtual void update() override;
 	virtual uint32_t pathtracing_get_pending_hit_group_count() const override;
-	// Sets up what the first path traced frame would (the path tracer's shaders, the transparent pass' ray traced
-	// shadow variants), for the shader baker in an editor that has traced nothing. False when the device cannot path
-	// trace.
+	// Sets up what the first path traced frames would (the path tracer's shaders, the transparent pass' ray traced
+	// shadow variants, the effects made at their first use), for the shader baker in an editor that has traced nothing.
+	// False when the device cannot path trace.
 	bool setup_raytracing_for_shader_baker();
 
 	RenderForwardClusteredPT();
