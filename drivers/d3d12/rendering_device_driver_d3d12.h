@@ -578,6 +578,8 @@ private:
 
 		uint32_t nir_graphics_runtime_data_root_param_idx = UINT32_MAX;
 		uint32_t nir_compute_runtime_data_root_param_idx = UINT32_MAX;
+		// Size of the first viewport, which the vertex stage's NIR runtime data passes on.
+		Size2 viewport_size;
 
 		DynParams dyn_params;
 		bool pending_dyn_params = true;
@@ -905,6 +907,7 @@ public:
 
 private:
 	void _bind_vertex_buffers(CommandBufferInfo *p_cmd_buf_info);
+	void _set_graphics_runtime_data(CommandBufferInfo *p_cmd_buf_info, bool p_is_indexed_draw);
 
 public:
 	// Dynamic state.

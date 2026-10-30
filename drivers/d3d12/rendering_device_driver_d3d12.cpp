@@ -5549,7 +5549,7 @@ void RenderingDeviceDriverD3D12::_render_pass_begin_subpass(CommandBufferID p_cm
 }
 
 void RenderingDeviceDriverD3D12::command_render_set_viewport(CommandBufferID p_cmd_buffer, VectorView<Rect2i> p_viewports) {
-	const CommandBufferInfo *cmd_buf_info = (const CommandBufferInfo *)p_cmd_buffer.id;
+	CommandBufferInfo *cmd_buf_info = (CommandBufferInfo *)p_cmd_buffer.id;
 
 	D3D12_VIEWPORT *d3d12_viewports = ALLOCA_ARRAY(D3D12_VIEWPORT, p_viewports.size());
 	for (uint32_t i = 0; i < p_viewports.size(); i++) {
@@ -5561,6 +5561,9 @@ void RenderingDeviceDriverD3D12::command_render_set_viewport(CommandBufferID p_c
 	}
 
 	cmd_buf_info->cmd_list->RSSetViewports(p_viewports.size(), d3d12_viewports);
+	if (p_viewports.size()) {
+		cmd_buf_info->viewport_size = p_viewports[0].size;
+	}
 }
 
 void RenderingDeviceDriverD3D12::command_render_set_scissor(CommandBufferID p_cmd_buffer, VectorView<Rect2i> p_scissors) {
@@ -5726,18 +5729,21 @@ void RenderingDeviceDriverD3D12::command_bind_render_uniform_sets(CommandBufferI
 void RenderingDeviceDriverD3D12::command_render_draw(CommandBufferID p_cmd_buffer, uint32_t p_vertex_count, uint32_t p_instance_count, uint32_t p_base_vertex, uint32_t p_first_instance) {
 	CommandBufferInfo *cmd_buf_info = (CommandBufferInfo *)p_cmd_buffer.id;
 	_bind_vertex_buffers(cmd_buf_info);
+	_set_graphics_runtime_data(cmd_buf_info, false);
 	cmd_buf_info->cmd_list->DrawInstanced(p_vertex_count, p_instance_count, p_base_vertex, p_first_instance);
 }
 
 void RenderingDeviceDriverD3D12::command_render_draw_indexed(CommandBufferID p_cmd_buffer, uint32_t p_index_count, uint32_t p_instance_count, uint32_t p_first_index, int32_t p_vertex_offset, uint32_t p_first_instance) {
 	CommandBufferInfo *cmd_buf_info = (CommandBufferInfo *)p_cmd_buffer.id;
 	_bind_vertex_buffers(cmd_buf_info);
+	_set_graphics_runtime_data(cmd_buf_info, true);
 	cmd_buf_info->cmd_list->DrawIndexedInstanced(p_index_count, p_instance_count, p_first_index, p_vertex_offset, p_first_instance);
 }
 
 void RenderingDeviceDriverD3D12::command_render_draw_indexed_indirect(CommandBufferID p_cmd_buffer, BufferID p_indirect_buffer, uint64_t p_offset, uint32_t p_draw_count, uint32_t p_stride) {
 	CommandBufferInfo *cmd_buf_info = (CommandBufferInfo *)p_cmd_buffer.id;
 	_bind_vertex_buffers(cmd_buf_info);
+	_set_graphics_runtime_data(cmd_buf_info, true);
 	BufferInfo *indirect_buf_info = (BufferInfo *)p_indirect_buffer.id;
 	if (!barrier_capabilities.enhanced_barriers_supported) {
 		_resource_transition_batch(cmd_buf_info, indirect_buf_info, 0, 1, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
@@ -5750,6 +5756,7 @@ void RenderingDeviceDriverD3D12::command_render_draw_indexed_indirect(CommandBuf
 void RenderingDeviceDriverD3D12::command_render_draw_indexed_indirect_count(CommandBufferID p_cmd_buffer, BufferID p_indirect_buffer, uint64_t p_offset, BufferID p_count_buffer, uint64_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride) {
 	CommandBufferInfo *cmd_buf_info = (CommandBufferInfo *)p_cmd_buffer.id;
 	_bind_vertex_buffers(cmd_buf_info);
+	_set_graphics_runtime_data(cmd_buf_info, true);
 	BufferInfo *indirect_buf_info = (BufferInfo *)p_indirect_buffer.id;
 	BufferInfo *count_buf_info = (BufferInfo *)p_count_buffer.id;
 	if (!barrier_capabilities.enhanced_barriers_supported) {
@@ -5764,6 +5771,7 @@ void RenderingDeviceDriverD3D12::command_render_draw_indexed_indirect_count(Comm
 void RenderingDeviceDriverD3D12::command_render_draw_indirect(CommandBufferID p_cmd_buffer, BufferID p_indirect_buffer, uint64_t p_offset, uint32_t p_draw_count, uint32_t p_stride) {
 	CommandBufferInfo *cmd_buf_info = (CommandBufferInfo *)p_cmd_buffer.id;
 	_bind_vertex_buffers(cmd_buf_info);
+	_set_graphics_runtime_data(cmd_buf_info, false);
 	BufferInfo *indirect_buf_info = (BufferInfo *)p_indirect_buffer.id;
 	if (!barrier_capabilities.enhanced_barriers_supported) {
 		_resource_transition_batch(cmd_buf_info, indirect_buf_info, 0, 1, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
@@ -5776,6 +5784,7 @@ void RenderingDeviceDriverD3D12::command_render_draw_indirect(CommandBufferID p_
 void RenderingDeviceDriverD3D12::command_render_draw_indirect_count(CommandBufferID p_cmd_buffer, BufferID p_indirect_buffer, uint64_t p_offset, BufferID p_count_buffer, uint64_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride) {
 	CommandBufferInfo *cmd_buf_info = (CommandBufferInfo *)p_cmd_buffer.id;
 	_bind_vertex_buffers(cmd_buf_info);
+	_set_graphics_runtime_data(cmd_buf_info, false);
 	BufferInfo *indirect_buf_info = (BufferInfo *)p_indirect_buffer.id;
 	BufferInfo *count_buf_info = (BufferInfo *)p_count_buffer.id;
 	if (!barrier_capabilities.enhanced_barriers_supported) {
@@ -5848,6 +5857,23 @@ void RenderingDeviceDriverD3D12::_bind_vertex_buffers(CommandBufferInfo *p_cmd_b
 		p_cmd_buf_info->cmd_list->IASetVertexBuffers(0, render_pass_state.vertex_buffer_count, render_pass_state.vertex_buffer_views);
 		render_pass_state.vertex_buffer_count = 0;
 	}
+}
+
+void RenderingDeviceDriverD3D12::_set_graphics_runtime_data(CommandBufferInfo *p_cmd_buf_info, bool p_is_indexed_draw) {
+	if (p_cmd_buf_info->nir_graphics_runtime_data_root_param_idx == UINT32_MAX) {
+		return;
+	}
+
+	// A draw must find every root argument of its root signature set ("Using a Root Signature", Microsoft Learn). Mesa
+	// gives the vertex stage this one when it lowers what DXIL has no system value for, chiefly gl_PointCoord, which needs
+	// the viewport size. As Mesa's Vulkan driver (Dozen) does, it gets the first viewport's. First vertex and base instance
+	// are lowered to zero (DXIL_SPIRV_SYSVAL_TYPE_ZERO); the draw ID stays zero, which no Godot shader reads.
+	dxil_spirv_vertex_runtime_data runtime_data;
+	memset(&runtime_data, 0, sizeof(runtime_data)); // The shader reads is_indexed_draw as 32 bits, padding included.
+	runtime_data.is_indexed_draw = p_is_indexed_draw;
+	runtime_data.viewport_width = p_cmd_buf_info->viewport_size.width;
+	runtime_data.viewport_height = p_cmd_buf_info->viewport_size.height;
+	p_cmd_buf_info->cmd_list->SetGraphicsRoot32BitConstants(p_cmd_buf_info->nir_graphics_runtime_data_root_param_idx, sizeof(dxil_spirv_vertex_runtime_data) / sizeof(uint32_t), &runtime_data, 0);
 }
 
 void RenderingDeviceDriverD3D12::command_render_set_blend_constants(CommandBufferID p_cmd_buffer, const Color &p_constants) {
