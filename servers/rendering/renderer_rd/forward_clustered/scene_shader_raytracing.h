@@ -83,6 +83,9 @@ public:
 		RT_FLAG_NRD_ENABLED = (1 << 2),
 		RT_FLAG_SER_ENABLED = (1 << 3),
 		RT_FLAG_RAY_QUERY_SHADOWS_ENABLED = (1 << 4),
+		// The device has opacity micromaps: rays and ray queries are allowed to meet them (RT_OPACITY_MICROMAPS). A flag,
+		// not a define of every program, so the shader baker bakes both (an editor's device is not the player's).
+		RT_FLAG_OPACITY_MICROMAPS = (1 << 5),
 	};
 
 	// RT pipeline limits (must match GLSL payload/hit attribute struct sizes).

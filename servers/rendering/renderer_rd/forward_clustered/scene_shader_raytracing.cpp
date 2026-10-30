@@ -76,6 +76,8 @@ static constexpr RaygenShaderOption RAYGEN_SHADER_OPTIONS[] = {
 	{ SceneShaderRaytracing::RT_FLAG_SER_ENABLED, "#define USE_SER\n" },
 	{ SceneShaderRaytracing::RT_FLAG_RAY_QUERY_SHADOWS_ENABLED, "#define USE_RAY_QUERY_SHADOWS\n" },
 	{ SceneShaderRaytracing::RT_FLAG_NRD_ENABLED, "#define NRD_ENABLED\n" },
+	// The ray queries may meet opacity micromaps (D3D12 then allocates them with AllocateRayQuery2).
+	{ SceneShaderRaytracing::RT_FLAG_OPACITY_MICROMAPS, "#define RT_OPACITY_MICROMAPS\n" },
 
 };
 
@@ -1306,6 +1308,11 @@ uint32_t SceneShaderRaytracing::compute_rt_flags(RID p_environment) {
 		flags |= RT_FLAG_SER_ENABLED;
 	}
 
+	static const bool use_opacity_micromaps = RD::get_singleton()->has_feature(RD::SUPPORTS_OPACITY_MICROMAP);
+	if (use_opacity_micromaps) {
+		flags |= RT_FLAG_OPACITY_MICROMAPS;
+	}
+
 	return flags;
 }
 
@@ -1546,9 +1553,12 @@ static LocalVector<uint32_t> _bake_rt_flags(bool p_simple_shadows, bool p_ser) {
 	for (const uint32_t rr : { uint32_t(0), uint32_t(SceneShaderRaytracing::RT_FLAG_DLSS_RR_ENABLED), uint32_t(SceneShaderRaytracing::RT_FLAG_NRD_ENABLED) }) {
 		// The hardware decides at run time (compute_rt_flags()): both when the project asks for it.
 		for (const uint32_t set : { uint32_t(0), uint32_t(p_ser ? SceneShaderRaytracing::RT_FLAG_SER_ENABLED : 0) }) {
-			const uint32_t f = shadows | rr | set;
-			if (!flags.has(f)) {
-				flags.push_back(f);
+			// Opacity micromaps likewise, whatever the project: the player's device has them or not.
+			for (const uint32_t omm : { uint32_t(0), uint32_t(SceneShaderRaytracing::RT_FLAG_OPACITY_MICROMAPS) }) {
+				const uint32_t f = shadows | rr | set | omm;
+				if (!flags.has(f)) {
+					flags.push_back(f);
+				}
 			}
 		}
 	}

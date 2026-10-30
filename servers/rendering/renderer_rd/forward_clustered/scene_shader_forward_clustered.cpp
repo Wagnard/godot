@@ -436,6 +436,9 @@ uint16_t SceneShaderForwardClustered::ShaderData::_get_shader_version(PipelineVe
 
 			if (p_color_pass_flags & PIPELINE_COLOR_PASS_FLAG_RT_SHADOWS) {
 				shader_flags |= SHADER_COLOR_PASS_FLAG_RT_SHADOWS;
+				if (SceneShaderForwardClustered::singleton->rt_shadows_opacity_micromaps) {
+					shader_flags |= SHADER_COLOR_PASS_FLAG_RT_OPACITY_MICROMAPS;
+				}
 			}
 
 			return ShaderVersion::SHADER_VERSION_COLOR_PASS * 2 + shader_flags;
@@ -771,6 +774,7 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 	RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
 
 	emulate_point_size = !RD::get_singleton()->has_feature(RD::SUPPORTS_POINT_SIZE);
+	rt_shadows_opacity_micromaps = RD::get_singleton()->has_feature(RD::SUPPORTS_OPACITY_MICROMAP);
 
 	{
 		Vector<ShaderRD::VariantDefine> shader_versions;
@@ -794,9 +798,11 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 			"\n#define USE_LIGHTMAP\n", // SHADER_COLOR_PASS_FLAG_LIGHTMAP
 			"\n#define USE_MULTIVIEW\n", // SHADER_COLOR_PASS_FLAG_MULTIVIEW
 			"\n#define MOTION_VECTORS\n", // SHADER_COLOR_PASS_FLAG_MOTION_VECTORS
-			// Its ray queries may meet opacity micromaps where the device has them (D3D12 then allocates them with
-			// AllocateRayQuery2).
-			RD::get_singleton()->has_feature(RD::SUPPORTS_OPACITY_MICROMAP) ? "\n#define USE_RT_SHADOWS\n#define RT_OPACITY_MICROMAPS\n" : "\n#define USE_RT_SHADOWS\n", // SHADER_COLOR_PASS_FLAG_RT_SHADOWS
+			"\n#define USE_RT_SHADOWS\n", // SHADER_COLOR_PASS_FLAG_RT_SHADOWS
+			// Its ray queries may meet opacity micromaps (D3D12 then allocates them with AllocateRayQuery2): a variant of
+			// its own rather than a define chosen by the device, which made the group's cache key differ between an editor
+			// with opacity micromaps and a player without (every baked shader of the group missed on AMD).
+			"\n#define RT_OPACITY_MICROMAPS\n", // SHADER_COLOR_PASS_FLAG_RT_OPACITY_MICROMAPS
 		};
 
 		for (int i = 0; i < SHADER_COLOR_PASS_FLAG_COUNT; i++) {
@@ -818,7 +824,9 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 			} else if (multiview_group) {
 				group = SHADER_GROUP_MULTIVIEW;
 			}
-			if (i & SHADER_COLOR_PASS_FLAG_RT_SHADOWS) {
+			if (i & SHADER_COLOR_PASS_FLAG_RT_OPACITY_MICROMAPS) {
+				group = SHADER_GROUP_RT_SHADOWS_OPACITY_MICROMAPS;
+			} else if (i & SHADER_COLOR_PASS_FLAG_RT_SHADOWS) {
 				group = SHADER_GROUP_RT_SHADOWS;
 			}
 
@@ -835,7 +843,8 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 		// cards' (pathtracing_rasterized), drawn first.
 		const uint32_t rt_shadows_unused = SHADER_COLOR_PASS_FLAG_SEPARATE_SPECULAR | SHADER_COLOR_PASS_FLAG_MULTIVIEW;
 		for (int i = 0; i < SHADER_COLOR_PASS_FLAG_COUNT; i++) {
-			if ((i & SHADER_COLOR_PASS_FLAG_RT_SHADOWS) && (i & rt_shadows_unused)) {
+			const bool rt_shadows = i & SHADER_COLOR_PASS_FLAG_RT_SHADOWS;
+			if ((rt_shadows && (i & rt_shadows_unused)) || (!rt_shadows && (i & SHADER_COLOR_PASS_FLAG_RT_OPACITY_MICROMAPS))) {
 				shader.set_variant_enabled(ShaderVersion::SHADER_VERSION_COLOR_PASS * 2 + i, false);
 			}
 		}
@@ -1207,11 +1216,19 @@ bool SceneShaderForwardClustered::is_advanced_shader_group_enabled(bool p_multiv
 	}
 }
 
-void SceneShaderForwardClustered::enable_rt_shadows_shader_group() {
-	if (shader.is_group_enabled(SHADER_GROUP_RT_SHADOWS) || !RD::get_singleton()->has_feature(RD::SUPPORTS_RAY_QUERY)) {
+void SceneShaderForwardClustered::enable_rt_shadows_shader_group(bool p_for_baking) {
+	if (!RD::get_singleton()->has_feature(RD::SUPPORTS_RAY_QUERY)) {
 		return;
 	}
-	shader.enable_group(SHADER_GROUP_RT_SHADOWS);
+	// The device's group, and for the baker the other one too: a player's device may have opacity micromaps or not.
+	const ShaderGroup group = rt_shadows_opacity_micromaps ? SHADER_GROUP_RT_SHADOWS_OPACITY_MICROMAPS : SHADER_GROUP_RT_SHADOWS;
+	if (p_for_baking) {
+		shader.enable_group(rt_shadows_opacity_micromaps ? SHADER_GROUP_RT_SHADOWS : SHADER_GROUP_RT_SHADOWS_OPACITY_MICROMAPS);
+	}
+	if (shader.is_group_enabled(group)) {
+		return;
+	}
+	shader.enable_group(group);
 	default_shader_rt_shadows_rd = default_material_shader_ptr->get_shader_variant(PIPELINE_VERSION_COLOR_PASS, PIPELINE_COLOR_PASS_FLAG_RT_SHADOWS, false);
 }
 

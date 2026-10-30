@@ -967,10 +967,9 @@ bool RenderForwardClusteredPT::_setup_rt() {
 		if (is_using_radiance_octmap_array()) {
 			rt_defines += "\n#define USE_RADIANCE_OCTMAP_ARRAY \n";
 		}
-		if (RD::get_singleton()->has_feature(RD::SUPPORTS_OPACITY_MICROMAP)) {
-			// The ray queries may meet opacity micromaps (D3D12 then allocates them with AllocateRayQuery2).
-			rt_defines += "\n#define RT_OPACITY_MICROMAPS\n";
-		}
+		// Opacity micromaps are a variant flag (SceneShaderRaytracing::RT_FLAG_OPACITY_MICROMAPS), not a define here:
+		// these defines are in every ray tracing program's cache key, which must not depend on the device for the
+		// shader baker's binaries to be found on a player's.
 		raytracing->shader->init(rt_defines);
 		if (!raytracing->shader->is_usable()) {
 			// Nothing else of the path tracer is compiled or run: a driver whose shader translation cannot handle its
@@ -987,7 +986,7 @@ bool RenderForwardClusteredPT::setup_raytracing_for_shader_baker() {
 		return false;
 	}
 	if (_transparent_pass_traces_shadows()) {
-		scene_shader.enable_rt_shadows_shader_group();
+		scene_shader.enable_rt_shadows_shader_group(true);
 	}
 	// The effects made at their first use under the path tracer: their ShaderRD versions exist only once made, and the
 	// baker bakes the versions that exist. NRD's passes are SPIR-V of its own, not ShaderRD: the baker takes them from

@@ -50,6 +50,10 @@ public:
 		SHADER_GROUP_ADVANCED_MULTIVIEW,
 		SHADER_GROUP_CUBE_LAYERED, // Cube shadows in one pass, when the device lets the vertex shader choose the layer.
 		SHADER_GROUP_RT_SHADOWS, // The path tracer's transparent pass: shadows from rays through its TLAS.
+		// The same where the device has opacity micromaps: its ray queries are allowed to meet them (D3D12 Shader Model
+		// 6.9, VK_EXT_opacity_micromap). A group of its own, so the other's cache keys do not depend on the device and
+		// the shader baker bakes both, as for Forward Mobile's FP16 and FP32 groups.
+		SHADER_GROUP_RT_SHADOWS_OPACITY_MICROMAPS,
 	};
 
 	// Not an enum because these values are constants that are processed as numbers
@@ -75,7 +79,8 @@ public:
 		SHADER_COLOR_PASS_FLAG_MULTIVIEW = 1 << 3,
 		SHADER_COLOR_PASS_FLAG_MOTION_VECTORS = 1 << 4,
 		SHADER_COLOR_PASS_FLAG_RT_SHADOWS = 1 << 5,
-		SHADER_COLOR_PASS_FLAG_COUNT = 1 << 6
+		SHADER_COLOR_PASS_FLAG_RT_OPACITY_MICROMAPS = 1 << 6, // With RT_SHADOWS only.
+		SHADER_COLOR_PASS_FLAG_COUNT = 1 << 7
 	};
 
 	enum PipelineVersion {
@@ -412,6 +417,8 @@ public:
 	SceneForwardClusteredShaderRD shader;
 	ShaderCompiler compiler;
 	bool emulate_point_size = false;
+	// The device has opacity micromaps: the transparent pass' ray queries use SHADER_GROUP_RT_SHADOWS_OPACITY_MICROMAPS.
+	bool rt_shadows_opacity_micromaps = false;
 
 	RID default_shader;
 	RID default_material;
@@ -452,7 +459,8 @@ public:
 	bool is_cube_layered_shader_group_enabled() const;
 	bool is_advanced_shader_group_enabled(bool p_multiview) const;
 	// The transparent pass of the path tracer, once a view traces: compiled for every material then. Needs ray queries.
-	void enable_rt_shadows_shader_group();
+	// p_for_baking: the shader baker's, both groups (with and without opacity micromaps), whatever this device has.
+	void enable_rt_shadows_shader_group(bool p_for_baking = false);
 	bool is_rt_shadows_shader_group_enabled() const;
 	uint32_t get_pipeline_compilations(RSE::PipelineSource p_source);
 };
