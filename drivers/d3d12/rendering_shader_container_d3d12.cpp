@@ -956,7 +956,7 @@ void RenderingShaderContainerD3D12::_assign_dxil_slots() {
 	const uint32_t uniform_count = reflection_binding_set_uniforms_data.size();
 	dxil_binding_slots.resize(uniform_count);
 	dxil_binding_spaces.resize(uniform_count);
-	uint32_t next_slot = 0;
+	uint32_t next_slot = FIRST_RESOURCE_SLOT;
 	uint32_t next_unbounded_space = UNBOUNDED_ARRAY_SPACE_BASE;
 	// First the dynamic buffers (root descriptors: GPU-based validation's cost grows with their register), then the rest.
 	for (uint32_t pass = 0; pass < 2; pass++) {

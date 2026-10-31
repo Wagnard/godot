@@ -82,11 +82,15 @@ class RenderingShaderContainerD3D12 : public RenderingShaderContainer {
 
 public:
 	static constexpr uint32_t REQUIRED_SHADER_MODEL = 0x62; // D3D_SHADER_MODEL_6_2
-	// Root constants (push constants, NIR runtime data) live in register space 1, and resources in space 0 at compact
-	// slots (see _assign_dxil_slots()): GPU-based validation reserves memory in proportion to root parameter registers.
-	static constexpr uint32_t ROOT_CONSTANT_SPACE = 1;
+	// Root constants (push constants, NIR runtime data) are b0 and b1 of space 0, where HLSL puts them by default. Resources
+	// are in space 0 too, at compact slots from FIRST_RESOURCE_SLOT (see _assign_dxil_slots()): GPU-based validation
+	// reserves memory in proportion to root parameter registers. Slot 0 (registers 0 to GODOT_NIR_BINDING_MULTIPLIER - 1)
+	// is left to the root constants, so that no resource register collides with them.
+	static constexpr uint32_t ROOT_CONSTANT_SPACE = 0;
 	static constexpr uint32_t ROOT_CONSTANT_REGISTER = 0;
 	static constexpr uint32_t RUNTIME_DATA_REGISTER = 1;
+	static constexpr uint32_t FIRST_RESOURCE_SLOT = 1;
+	static_assert(RUNTIME_DATA_REGISTER < FIRST_RESOURCE_SLOT * GODOT_NIR_BINDING_MULTIPLIER);
 	// An unbounded (runtime-sized) array has a register space of its own, from this one up (Mesa keeps 5 bits of space),
 	// at register 0, declared with this many elements; its root signature range has no bound. It keeps a slot in space 0
 	// only so that no other uniform shares its slot number.
