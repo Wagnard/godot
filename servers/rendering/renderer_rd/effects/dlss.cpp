@@ -116,7 +116,8 @@ static bool dlssg_is_provider() {
 	const StreamlineContext &sl = StreamlineContext::get();
 	bool provider = sl.is_game && sl.streamline_capabilities.dlss_g_available;
 #ifdef D3D12_ENABLED
-	provider = provider && !FSRFrameGenerationD3D12::is_requested();
+	// FSR frame generation exists on D3D12 only: on Vulkan, DLSS-G stays the provider.
+	provider = provider && !(sl.is_d3d12 && FSRFrameGenerationD3D12::is_requested());
 #endif
 	return provider;
 }

@@ -325,7 +325,11 @@ void Streamline::set_parameter(StreamlineParameterType p_parameter_type, const V
 		}
 		case StreamlineParameterType::STREAMLINE_PARAM_FRAME_GENERATION_PROVIDER: {
 #ifdef D3D12_ENABLED
-			FSRFrameGenerationD3D12::set_requested(int(p_value) == 1);
+			// FSR frame generation exists on D3D12 only (STREAMLINE_CAPABILITY_FSR_FRAME_GENERATION): elsewhere a switch
+			// would only recreate the swap chain.
+			if (OS::get_singleton()->get_current_rendering_driver_name() == "d3d12") {
+				FSRFrameGenerationD3D12::set_requested(int(p_value) == 1);
+			}
 #endif
 			break;
 		}
