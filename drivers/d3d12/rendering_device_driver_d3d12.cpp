@@ -7713,6 +7713,18 @@ String RenderingDeviceDriverD3D12::get_api_name() const {
 	return "D3D12";
 }
 
+RDD::DriverWorkarounds RenderingDeviceDriverD3D12::get_driver_workarounds() const {
+	DriverWorkarounds workarounds;
+	// Intel's D3D12 driver (Arc B580): an inline ray query in a draw recorded in a command list of its own, one of the
+	// parallel recording's, page faults near address 0 (DXGI_ERROR_DEVICE_HUNG, DRED page fault); the same draws in one
+	// command list never do. Ray queries are allowed in any shader of any command list (DXR 1.1, "Inline raytracing"), and
+	// the debug layer and NVIDIA find nothing to fault: INTEL-D3D12-PARALLEL-RAY-QUERY-WA.md. Such frames are recorded in
+	// one command list. GODOT_D3D12_INTEL_SERIAL_RAY_QUERIES=0 turns it off.
+	workarounds.avoid_parallel_ray_queries = context_device.vendor == RenderingContextDriver::Vendor::VENDOR_INTEL &&
+			OS::get_singleton()->get_environment("GODOT_D3D12_INTEL_SERIAL_RAY_QUERIES") != "0";
+	return workarounds;
+}
+
 String RenderingDeviceDriverD3D12::get_api_version() const {
 	return vformat("%d_%d", feature_level / 10, feature_level % 10);
 }

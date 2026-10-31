@@ -1092,6 +1092,8 @@ public:
 		bool avoid_compute_after_draw = false;
 		bool dont_print_on_render_pipeline_creation_failure = false;
 		bool disable_ubershaders = false;
+		// A frame with ray queries in draw or compute lists is recorded in one command list, not in parallel ones.
+		bool avoid_parallel_ray_queries = false;
 	};
 
 	////////////////////////////////////////////

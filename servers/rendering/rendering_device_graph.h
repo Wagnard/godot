@@ -935,6 +935,8 @@ private:
 	int32_t command_synchronization_index = -1;
 	bool command_synchronization_pending = false;
 	int32_t command_tlas_build_index = -1;
+	// A draw or compute list of this frame reads a TLAS (ray queries): see DriverWorkarounds::avoid_parallel_ray_queries.
+	bool command_ray_query_found = false;
 	BarrierGroup barrier_group;
 	bool driver_honors_barriers : 1;
 	bool driver_clears_with_copy_engine : 1;

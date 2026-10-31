@@ -418,6 +418,13 @@ void RenderingDeviceGraph::_add_command_to_graph(ResourceTracker **p_resource_tr
 		command_tlas_build_index = p_command_index;
 	}
 
+	// An acceleration structure read by a draw or compute list is a TLAS its shaders query.
+	if (driver_workarounds.avoid_parallel_ray_queries && !command_ray_query_found && (r_command->type == RecordedCommand::TYPE_DRAW_LIST || r_command->type == RecordedCommand::TYPE_COMPUTE_LIST)) {
+		for (uint32_t i = 0; i < p_resource_count && !command_ray_query_found; i++) {
+			command_ray_query_found = p_resource_usages[i] == RESOURCE_USAGE_ACCELERATION_STRUCTURE_READ;
+		}
+	}
+
 	for (uint32_t i = 0; i < p_resource_count; i++) {
 		ResourceTracker *resource_tracker = p_resource_trackers[i];
 		DEV_ASSERT(resource_tracker != nullptr);
@@ -2394,6 +2401,7 @@ void RenderingDeviceGraph::begin() {
 	command_synchronization_index = -1;
 	command_synchronization_pending = false;
 	command_tlas_build_index = -1;
+	command_ray_query_found = false;
 	command_label_index = -1;
 	frames[frame].secondary_command_buffers_used = 0;
 	draw_instruction_list.index = 0;
@@ -3526,7 +3534,8 @@ void RenderingDeviceGraph::end(bool p_reorder_commands, bool p_full_barriers, RD
 			print_line(vformat("Recording %d commands", command_count));
 #endif
 
-			if (parallel_slice_count > 1 && command_label_count == 0) {
+			// DriverWorkarounds::avoid_parallel_ray_queries: a frame with ray queries in draw or compute lists in one command list.
+			if (parallel_slice_count > 1 && command_label_count == 0 && !(driver_workarounds.avoid_parallel_ray_queries && command_ray_query_found)) {
 				// Boost the priorities of every level first. A level's boost only depends on the levels before it, so
 				// this gives the order the serial loop records in.
 				uint32_t boosted_priority = 0;
