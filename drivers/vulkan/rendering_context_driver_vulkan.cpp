@@ -564,37 +564,11 @@ Error RenderingContextDriverVulkan::_find_validation_layers(TightLocalVector<con
 }
 
 VKAPI_ATTR VkBool32 VKAPI_CALL RenderingContextDriverVulkan::_debug_messenger_callback(VkDebugUtilsMessageSeverityFlagBitsEXT p_message_severity, VkDebugUtilsMessageTypeFlagsEXT p_message_type, const VkDebugUtilsMessengerCallbackDataEXT *p_callback_data, void *p_user_data) {
-	// This error needs to be ignored because the AMD allocator will mix up memory types on IGP processors.
-	if (strstr(p_callback_data->pMessage, "Mapping an image with layout") != nullptr && strstr(p_callback_data->pMessage, "can result in undefined behavior if this memory is used by the device") != nullptr) {
-		return VK_FALSE;
-	}
-	// This needs to be ignored because Validator is wrong here.
-	if (strstr(p_callback_data->pMessage, "Invalid SPIR-V binary version 1.3") != nullptr) {
-		return VK_FALSE;
-	}
-	// This needs to be ignored because Validator is wrong here.
-	if (strstr(p_callback_data->pMessage, "Shader requires flag") != nullptr) {
-		return VK_FALSE;
-	}
-
-	// This needs to be ignored because Validator is wrong here.
-	if (strstr(p_callback_data->pMessage, "SPIR-V module not valid: Pointer operand") != nullptr && strstr(p_callback_data->pMessage, "must be a memory object") != nullptr) {
-		return VK_FALSE;
-	}
-
-	// Suppress warning about incompatible drivers (-9), even though this should arguably be the loader's responsibility.
-	// This was generating noise on Linux when Mesa Dozen is provided.
+	// Not a validation message: the loader reports that another installed driver refused the instance with
+	// VK_ERROR_INCOMPATIBLE_DRIVER (-9), as a driver that cannot support the requested API version must (Vulkan-Loader
+	// LoaderDriverInterface.md, LDP_DRIVER_9), and that it skips that driver. Nothing in this application's use of Vulkan.
+	// Noise on Linux when Mesa's Dozen is installed.
 	if (strstr(p_callback_data->pMessage, "Received return code -9 from call to vkCreateInstance in ICD") != nullptr && strstr(p_callback_data->pMessage, "Skipping this driver") != nullptr) {
-		return VK_FALSE;
-	}
-
-	if (p_callback_data->pMessageIdName && strstr(p_callback_data->pMessageIdName, "UNASSIGNED-CoreValidation-DrawState-ClearCmdBeforeDraw") != nullptr) {
-		return VK_FALSE;
-	}
-
-	// glslang emits DebugGlobalVariable referencing gl_WorkGroupSize as OpSpecConstantComposite, which is invalid per
-	// the NonSemantic.Shader.DebugInfo.100 spec. Nothing we can do about it from the shader side.
-	if (strstr(p_callback_data->pMessage, "DebugGlobalVariable: expected operand Variable must be a result id of OpVariable or OpConstant or DebugInfoNone") != nullptr) {
 		return VK_FALSE;
 	}
 

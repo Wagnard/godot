@@ -1614,9 +1614,19 @@ RDD::TextureID RenderingDeviceDriverD3D12::texture_create(const TextureFormat &p
 	ID3D12Resource *texture = nullptr;
 	ComPtr<ID3D12Resource> main_texture;
 	ComPtr<D3D12MA::Allocation> allocation;
+	// The optimized clear value is "the value with which the clear operation will most commonly be called" for a render target
+	// or a depth-stencil texture (ID3D12Device::CreateCommittedResource, pOptimizedClearValue). Depth: 0.0 and stencil 0,
+	// what Godot's reverse-Z passes clear to.
 	static const FLOAT black[4] = {};
-	D3D12_CLEAR_VALUE clear_value = CD3DX12_CLEAR_VALUE(RD_TO_D3D12_FORMAT[p_format.format].general_format, black);
-	D3D12_CLEAR_VALUE *clear_value_ptr = (resource_desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) ? &clear_value : nullptr;
+	D3D12_CLEAR_VALUE clear_value = {};
+	D3D12_CLEAR_VALUE *clear_value_ptr = nullptr;
+	if ((resource_desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)) {
+		clear_value = CD3DX12_CLEAR_VALUE(RD_TO_D3D12_FORMAT[p_format.format].general_format, black);
+		clear_value_ptr = &clear_value;
+	} else if ((resource_desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)) {
+		clear_value = CD3DX12_CLEAR_VALUE(RD_TO_D3D12_FORMAT[p_format.format].dsv_format, 0.0f, 0);
+		clear_value_ptr = &clear_value;
+	}
 	{
 		HRESULT res = E_FAIL;
 		if (barrier_capabilities.enhanced_barriers_supported || (cross_family_sharing && relaxed_casting_available)) {
@@ -7883,17 +7893,23 @@ Error RenderingDeviceDriverD3D12::_initialize_device() {
 			}
 		}
 
+		// Object creation and destruction notices (CREATE_* / DESTROY_*): every INFO message the layer stores for us.
 		D3D12_MESSAGE_SEVERITY severities_to_mute[] = {
 			D3D12_MESSAGE_SEVERITY_INFO,
 		};
 
 		D3D12_MESSAGE_ID messages_to_mute[] = {
+			// Performance hints only: a clear whose value differs from the resource's optimized clear value "is typically
+			// slower ... but will still clear to the desired value" (the messages), as ID3D12Device::CreateCommittedResource
+			// documents (pOptimizedClearValue: other values "won't be as efficient"). A render target's clear color (a
+			// scene's background) is unknown when the texture is created, as for depth cleared to 1.0 (2D light shadows);
+			// texture_create() passes the most common values. Dawn denies both for the same reason (crbug.com/dawn/418).
 			D3D12_MESSAGE_ID_CLEARRENDERTARGETVIEW_MISMATCHINGCLEARVALUE,
 			D3D12_MESSAGE_ID_CLEARDEPTHSTENCILVIEW_MISMATCHINGCLEARVALUE,
-			// These happen due to how D3D12MA manages buffers; seems benign.
-			D3D12_MESSAGE_ID_HEAP_ADDRESS_RANGE_HAS_NO_RESOURCE,
-			D3D12_MESSAGE_ID_HEAP_ADDRESS_RANGE_INTERSECTS_MULTIPLE_BUFFERS,
-			// Seemingly a false positive.
+			// Reported when the Forward+ cluster builder's state uniform buffer, read only through a graphics table, is
+			// updated between the faces of a reflection probe while the previous face's table is still set, at the cluster
+			// store's compute dispatch, which reads no graphics table; the next draw list binds a new table before any draw
+			// (D3D12-CONVENTIONAL-ROOT-SIGNATURE-FIXES.md).
 			D3D12_MESSAGE_ID_DATA_STATIC_WHILE_SET_AT_EXECUTE_DESCRIPTOR_INVALID_DATA_CHANGE,
 		};
 
