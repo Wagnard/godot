@@ -466,7 +466,10 @@ void ParticlesStorage::particles_set_trails(RID p_particles, bool p_enable, doub
 void ParticlesStorage::particles_set_trail_bind_poses(RID p_particles, const Vector<Transform3D> &p_bind_poses) {
 	Particles *particles = particles_owner.get_or_null(p_particles);
 	ERR_FAIL_NULL(particles);
-	if (particles->trail_bind_pose_buffer.is_valid() && particles->trail_bind_poses.size() != p_bind_poses.size()) {
+	// With trails, the particle and instance buffers hold one particle per bind pose, and the bind pose buffer one
+	// transform per pose: a different count re-creates them. The bind pose buffer only exists for more than one pose,
+	// so going from none (or one) to several must be caught by the particle buffer.
+	if ((particles->particle_buffer.is_valid() || particles->trail_bind_pose_buffer.is_valid()) && particles->trail_bind_poses.size() != p_bind_poses.size()) {
 		_particles_free_data(particles);
 
 		particles->prev_ticks = 0;
@@ -1416,9 +1419,11 @@ void ParticlesStorage::_particles_update_buffers(Particles *particles) {
 
 		PackedByteArray data;
 		uint32_t particle_instance_buffer_size = total_amount * (xform_size + 1 + 1) * sizeof(float) * 4;
+		// Says whether this buffer has room for the previous frame's instances: update_particles() moves the current
+		// offset to the second half only then.
+		particles->instance_motion_vectors_enabled = uses_motion_vectors;
 		if (uses_motion_vectors) {
 			particle_instance_buffer_size *= 2;
-			particles->instance_motion_vectors_enabled = true;
 		}
 
 		data.resize_initialized(particle_instance_buffer_size);
