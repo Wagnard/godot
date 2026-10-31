@@ -96,6 +96,7 @@ CopyEffects::CopyEffects(BitField<RasterEffects> p_raster_effects) {
 		copy_modes.push_back("\n#define MODE_GAUSSIAN_BLUR\n#define MODE_GLOW\n#define GLOW_USE_AUTO_EXPOSURE\n");
 		copy_modes.push_back("\n#define MODE_SIMPLE_COPY\n");
 		copy_modes.push_back("\n#define MODE_SIMPLE_COPY\n#define DST_IMAGE_8BIT\n");
+		copy_modes.push_back("\n#define MODE_SIMPLE_COPY\n#define DST_IMAGE_RG16F\n");
 		copy_modes.push_back("\n#define MODE_SIMPLE_COPY_DEPTH\n");
 		copy_modes.push_back("\n#define MODE_SET_COLOR\n");
 		copy_modes.push_back("\n#define MODE_SET_COLOR\n#define DST_IMAGE_8BIT\n");
@@ -473,7 +474,14 @@ void CopyEffects::copy_to_rect(RID p_source_rd_texture, RID p_dest_texture, cons
 	RD::Uniform u_source_rd_texture(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ default_sampler, p_source_rd_texture }));
 	RD::Uniform u_dest_texture(RD::UNIFORM_TYPE_IMAGE, 0, p_dest_texture);
 
-	CopyMode mode = p_8_bit_dst ? COPY_MODE_SIMPLY_COPY_8BIT : COPY_MODE_SIMPLY_COPY;
+	// The storage image's format qualifier must match the destination's view format, or every store gives undefined values
+	// (Vulkan, "Image Format Validation"): two-channel destinations, such as TAA's previous velocity, have their own variant.
+	CopyMode mode = COPY_MODE_SIMPLY_COPY;
+	if (p_8_bit_dst) {
+		mode = COPY_MODE_SIMPLY_COPY_8BIT;
+	} else if (RD::get_singleton()->texture_get_format(p_dest_texture).format == RD::DATA_FORMAT_R16G16_SFLOAT) {
+		mode = COPY_MODE_SIMPLY_COPY_RG16F;
+	}
 	RID shader = copy.shader.version_get_shader(copy.shader_version, mode);
 	ERR_FAIL_COND(shader.is_null());
 
