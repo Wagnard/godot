@@ -599,11 +599,18 @@ void RenderingDeviceGraph::_add_command_to_graph(ResourceTracker **p_resource_tr
 
 				_add_texture_barrier_to_command(resource_tracker->texture_driver_id, resource_tracker->usage_access, new_usage_access, resource_tracker->usage, new_resource_usage, resource_tracker->texture_subresources, command_transition_barriers, r_command->transition_barrier_index, r_command->transition_barrier_count);
 			} else if (resource_tracker->buffer_driver_id.id != 0) {
+				// After a read, only an execution dependency is needed: nothing is made available, so the barrier names no
+				// source access (Khronos, Synchronization Examples: a WAR hazard needs no access types in the source access
+				// mask). A read in another usage (vertex input, then a BLAS build) is not ordered after the previous read
+				// either, and its access would name stages this command does not wait for (VUID-vkCmdPipelineBarrier-pBufferMemoryBarriers-02817).
+				// The last write was made available by the barrier before the previous read; this one waits for that write
+				// and makes it visible to the new usage.
+				const BitField<RDD::BarrierAccessBits> src_access = _is_write_usage(resource_tracker->usage) ? resource_tracker->usage_access : BitField<RDD::BarrierAccessBits>();
 #if USE_BUFFER_BARRIERS
-				_add_buffer_barrier_to_command(resource_tracker->buffer_driver_id, resource_tracker->usage_access, new_usage_access, r_command->buffer_barrier_index, r_command->buffer_barrier_count);
+				_add_buffer_barrier_to_command(resource_tracker->buffer_driver_id, src_access, new_usage_access, r_command->buffer_barrier_index, r_command->buffer_barrier_count);
 #endif
 				// Memory barriers are pushed regardless of buffer barriers being used or not.
-				r_command->memory_barrier.src_access = r_command->memory_barrier.src_access | resource_tracker->usage_access;
+				r_command->memory_barrier.src_access = r_command->memory_barrier.src_access | src_access;
 				r_command->memory_barrier.dst_access = r_command->memory_barrier.dst_access | new_usage_access;
 			} else if (resource_tracker->acceleration_structure_driver_id.id != 0) {
 				// Make sure the acceleration structure has been built before accessing it from raytracing shaders.
@@ -1104,7 +1111,7 @@ void RenderingDeviceGraph::_wait_for_secondary_command_buffer_tasks() {
 	}
 }
 
-void RenderingDeviceGraph::_run_render_commands(int32_t p_level, const RecordedCommandSort *p_sorted_commands, uint32_t p_sorted_commands_count, RDD::CommandBufferID &r_command_buffer, CommandBufferPool &r_command_buffer_pool, int32_t &r_current_label_index, int32_t &r_current_label_level) {
+void RenderingDeviceGraph::_run_render_commands(int32_t p_level, const RecordedCommandSort *p_sorted_commands, uint32_t p_sorted_commands_count, RDD::CommandBufferID &r_command_buffer, CommandBufferPool &r_command_buffer_pool, int32_t &r_current_label_index, int32_t &r_current_label_level, bool &r_command_buffer_has_work) {
 	for (uint32_t i = 0; i < p_sorted_commands_count; i++) {
 		const uint32_t command_index = p_sorted_commands[i].index;
 		const uint32_t command_data_offset = command_data_offsets[command_index];
@@ -1195,7 +1202,10 @@ void RenderingDeviceGraph::_run_render_commands(int32_t p_level, const RecordedC
 
 				const RecordedDrawListCommand *draw_list_command = reinterpret_cast<const RecordedDrawListCommand *>(command);
 
-				if (draw_list_command->split_cmd_buffer) {
+				// The swap chain blit gets its own command buffer so that the work before it does not wait for the swap
+				// chain. With no work before it, the buffer would hold only the barriers recorded so far: they stay with the
+				// blit (D3D12 warns about an ExecuteCommandLists with barriers only, message 1356).
+				if (draw_list_command->split_cmd_buffer && r_command_buffer_has_work) {
 					// Create or reuse a command buffer and finish recording the current one.
 					driver->command_buffer_end(r_command_buffer);
 
@@ -1269,6 +1279,8 @@ void RenderingDeviceGraph::_run_render_commands(int32_t p_level, const RecordedC
 				return;
 			}
 		}
+
+		r_command_buffer_has_work = true;
 	}
 }
 
@@ -1952,7 +1964,9 @@ void RenderingDeviceGraph::_run_parallel_slice(ParallelSlice &p_slice) {
 
 		const bool suspended = i == p_slice.end && p_slice.end_offset > 0;
 		if (from == 0 && !suspended) {
-			_run_render_commands(level, &sorted_commands[i], 1, command_buffer, unused_command_buffer_pool, current_label_index, current_label_level);
+			// A slice never holds the swap chain blit (_plan_parallel_slices()): its own flag, unread.
+			bool slice_has_work = true;
+			_run_render_commands(level, &sorted_commands[i], 1, command_buffer, unused_command_buffer_pool, current_label_index, current_label_level, slice_has_work);
 		} else {
 			// Only draw lists are split.
 			const RecordedDrawListCommand *draw_list_command = reinterpret_cast<const RecordedDrawListCommand *>(&command_data[command_data_offsets[sorted_commands[i].index]]);
@@ -2633,6 +2647,10 @@ void RenderingDeviceGraph::add_driver_callback(RDD::DriverCallback p_callback, v
 	uint64_t command_size = sizeof(RecordedDriverCallbackCommand) + textures_count * sizeof(RDD::CallbackTexture);
 	RecordedDriverCallbackCommand *command = static_cast<RecordedDriverCallbackCommand *>(_allocate_command(command_size, command_index));
 	command->type = RecordedCommand::TYPE_DRIVER_CALLBACK;
+	// The callback records work the graph does not see (DLSS, FSR frame generation, MetalFX): every stage. Without stages,
+	// the barriers before it did not wait for it nor it for them, and the next one named its accesses without their
+	// stages (VUID-vkCmdPipelineBarrier-pImageMemoryBarriers-02819).
+	command->self_stages = RDD::PIPELINE_STAGE_ALL_COMMANDS_BIT;
 	command->callback = p_callback;
 	command->userdata = p_userdata;
 	command->textures_count = textures_count;
@@ -3381,6 +3399,9 @@ void RenderingDeviceGraph::end(bool p_reorder_commands, bool p_full_barriers, RD
 		return;
 	}
 
+	// The command buffer recorded by this thread holds a command other than barriers.
+	bool command_buffer_has_work = false;
+
 	const uint64_t stats_begin_usec = parallel_stats ? OS::get_singleton()->get_ticks_usec() : 0;
 	uint64_t stats_prepare_end_usec = 0;
 	uint64_t stats_calling_usec = 0;
@@ -3625,6 +3646,7 @@ void RenderingDeviceGraph::end(bool p_reorder_commands, bool p_full_barriers, RD
 
 					// The serial commands continue the last slice's command buffer, the last one submitted.
 					r_command_buffer = parallel_slices[parallel_slices.size() - 1].command_buffer;
+					command_buffer_has_work = true;
 				}
 
 				// Serial recording: all the commands when the frame is too small to split, otherwise the ones from the
@@ -3641,7 +3663,7 @@ void RenderingDeviceGraph::end(bool p_reorder_commands, bool p_full_barriers, RD
 						_group_barriers_for_render_commands(barrier_group, r_command_buffer, &commands_sorted[i], level_end - i, p_full_barriers);
 					}
 
-					_run_render_commands(level, &commands_sorted[i], level_end - i, r_command_buffer, r_command_buffer_pool, current_label_index, current_label_level);
+					_run_render_commands(level, &commands_sorted[i], level_end - i, r_command_buffer, r_command_buffer_pool, current_label_index, current_label_level, command_buffer_has_work);
 					i = level_end;
 				}
 
@@ -3660,7 +3682,7 @@ void RenderingDeviceGraph::end(bool p_reorder_commands, bool p_full_barriers, RD
 						uint32_t level_command_count = i - current_level_start;
 						_boost_priority_for_render_commands(level_command_ptr, level_command_count, boosted_priority);
 						_group_barriers_for_render_commands(barrier_group, r_command_buffer, level_command_ptr, level_command_count, p_full_barriers);
-						_run_render_commands(current_level, level_command_ptr, level_command_count, r_command_buffer, r_command_buffer_pool, current_label_index, current_label_level);
+						_run_render_commands(current_level, level_command_ptr, level_command_count, r_command_buffer, r_command_buffer_pool, current_label_index, current_label_level, command_buffer_has_work);
 						current_level = commands_sorted[i].level;
 						current_level_start = i;
 					}
@@ -3670,7 +3692,7 @@ void RenderingDeviceGraph::end(bool p_reorder_commands, bool p_full_barriers, RD
 				uint32_t level_command_count = command_count - current_level_start;
 				_boost_priority_for_render_commands(level_command_ptr, level_command_count, boosted_priority);
 				_group_barriers_for_render_commands(barrier_group, r_command_buffer, level_command_ptr, level_command_count, p_full_barriers);
-				_run_render_commands(current_level, level_command_ptr, level_command_count, r_command_buffer, r_command_buffer_pool, current_label_index, current_label_level);
+				_run_render_commands(current_level, level_command_ptr, level_command_count, r_command_buffer, r_command_buffer_pool, current_label_index, current_label_level, command_buffer_has_work);
 
 #if PRINT_RENDER_GRAPH
 				print_line("COMMANDS", command_count, "LEVELS", current_level + 1);
@@ -3683,7 +3705,7 @@ void RenderingDeviceGraph::end(bool p_reorder_commands, bool p_full_barriers, RD
 		} else {
 			for (uint32_t i = 0; i < command_count; i++) {
 				_group_barriers_for_render_commands(barrier_group, r_command_buffer, &commands_sorted[i], 1, p_full_barriers);
-				_run_render_commands(i, &commands_sorted[i], 1, r_command_buffer, r_command_buffer_pool, current_label_index, current_label_level);
+				_run_render_commands(i, &commands_sorted[i], 1, r_command_buffer, r_command_buffer_pool, current_label_index, current_label_level, command_buffer_has_work);
 			}
 		}
 

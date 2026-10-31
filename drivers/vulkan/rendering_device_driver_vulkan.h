@@ -193,6 +193,9 @@ class RenderingDeviceDriverVulkan : public RenderingDeviceDriver {
 	bool buffer_device_address_support = false;
 	bool vulkan_memory_model_support = false;
 	bool vulkan_memory_model_device_scope_support = false;
+	bool shader_output_viewport_index_support = false;
+	bool shader_output_layer_support = false;
+	bool shader_relaxed_extended_instruction_support = false;
 	AccelerationStructureCapabilities acceleration_structure_capabilities;
 	bool ray_query_support = false;
 	bool opacity_micromap_support = false;

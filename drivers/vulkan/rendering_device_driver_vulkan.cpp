@@ -941,6 +941,7 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 		VkPhysicalDeviceSynchronization2FeaturesKHR sync_2_features = {};
 		VkPhysicalDeviceRayTracingValidationFeaturesNV raytracing_validation_features = {};
 		VkPhysicalDeviceOpacityMicromapFeaturesEXT opacity_micromap_features = {};
+		VkPhysicalDeviceShaderRelaxedExtendedInstructionFeaturesKHR relaxed_extended_instruction_features = {};
 
 		const bool use_1_2_features = physical_device_properties.apiVersion >= VK_API_VERSION_1_2;
 		if (use_1_2_features) {
@@ -1049,6 +1050,12 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 			next_features = &sync_2_features;
 		}
 
+		if (enabled_device_extension_names.has(VK_KHR_SHADER_RELAXED_EXTENDED_INSTRUCTION_EXTENSION_NAME)) {
+			relaxed_extended_instruction_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_RELAXED_EXTENDED_INSTRUCTION_FEATURES_KHR;
+			relaxed_extended_instruction_features.pNext = next_features;
+			next_features = &relaxed_extended_instruction_features;
+		}
+
 		VkPhysicalDeviceFeatures2 device_features_2 = {};
 		device_features_2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
 		device_features_2.pNext = next_features;
@@ -1068,6 +1075,11 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 			if (enabled_device_extension_names.has(VK_KHR_VULKAN_MEMORY_MODEL_EXTENSION_NAME)) {
 				vulkan_memory_model_support = device_features_vk_1_2.vulkanMemoryModel;
 				vulkan_memory_model_device_scope_support = device_features_vk_1_2.vulkanMemoryModelDeviceScope;
+			}
+			if (enabled_device_extension_names.has(VK_EXT_SHADER_VIEWPORT_INDEX_LAYER_EXTENSION_NAME)) {
+				// The extension's promoted features, which VkPhysicalDeviceVulkan12Features must enable with it (VUID-VkDeviceCreateInfo-ppEnabledExtensionNames-02835).
+				shader_output_viewport_index_support = device_features_vk_1_2.shaderOutputViewportIndex;
+				shader_output_layer_support = device_features_vk_1_2.shaderOutputLayer;
 			}
 			// Descriptor indexing features (core in Vulkan 1.2).
 			descriptor_indexing_capabilities.shader_sampled_image_array_non_uniform_indexing = device_features_vk_1_2.shaderSampledImageArrayNonUniformIndexing;
@@ -1149,6 +1161,10 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 
 		if (enabled_device_extension_names.has(VK_KHR_RAY_QUERY_EXTENSION_NAME)) {
 			ray_query_support = ray_query_features.rayQuery;
+		}
+
+		if (enabled_device_extension_names.has(VK_KHR_SHADER_RELAXED_EXTENDED_INSTRUCTION_EXTENSION_NAME)) {
+			shader_relaxed_extended_instruction_support = relaxed_extended_instruction_features.shaderRelaxedExtendedInstruction;
 		}
 
 		// The extension depends on synchronization2 (extension or Vulkan 1.3), only for the stage and accesses its
@@ -1409,15 +1425,22 @@ Error RenderingDeviceDriverVulkan::_initialize_device(const LocalVector<VkDevice
 	}
 
 	void *create_info_next = nullptr;
+	const bool enable_1_2_features = physical_device_properties.apiVersion >= VK_API_VERSION_1_2;
+
+	// From Vulkan 1.2 these features are enabled by VkPhysicalDeviceVulkan12Features (below), which must not be chained
+	// with the structures it replaces (VUID-VkDeviceCreateInfo-pNext-02830). Streamline's interposer also merges its own
+	// Vulkan 1.2 features into that structure only when none of the replaced ones is chained.
 	VkPhysicalDeviceShaderFloat16Int8FeaturesKHR shader_features = {};
-	shader_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES_KHR;
-	shader_features.pNext = create_info_next;
-	shader_features.shaderFloat16 = shader_capabilities.shader_float16_is_supported;
-	shader_features.shaderInt8 = shader_capabilities.shader_int8_is_supported;
-	create_info_next = &shader_features;
+	if (!enable_1_2_features) {
+		shader_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES_KHR;
+		shader_features.pNext = create_info_next;
+		shader_features.shaderFloat16 = shader_capabilities.shader_float16_is_supported;
+		shader_features.shaderInt8 = shader_capabilities.shader_int8_is_supported;
+		create_info_next = &shader_features;
+	}
 
 	VkPhysicalDeviceBufferDeviceAddressFeaturesKHR buffer_device_address_features = {};
-	if (buffer_device_address_support) {
+	if (buffer_device_address_support && !enable_1_2_features) {
 		buffer_device_address_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES_KHR;
 		buffer_device_address_features.pNext = create_info_next;
 		buffer_device_address_features.bufferDeviceAddress = buffer_device_address_support;
@@ -1425,7 +1448,7 @@ Error RenderingDeviceDriverVulkan::_initialize_device(const LocalVector<VkDevice
 	}
 
 	VkPhysicalDeviceVulkanMemoryModelFeaturesKHR vulkan_memory_model_features = {};
-	if (vulkan_memory_model_support && vulkan_memory_model_device_scope_support) {
+	if (vulkan_memory_model_support && vulkan_memory_model_device_scope_support && !enable_1_2_features) {
 		vulkan_memory_model_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_MEMORY_MODEL_FEATURES_KHR;
 		vulkan_memory_model_features.pNext = create_info_next;
 		vulkan_memory_model_features.vulkanMemoryModel = vulkan_memory_model_support;
@@ -1529,6 +1552,15 @@ Error RenderingDeviceDriverVulkan::_initialize_device(const LocalVector<VkDevice
 		create_info_next = &opacity_micromap_features;
 	}
 
+	// Shaders compiled with debug information use OpExtInstWithForwardRefsKHR (VUID-RuntimeSpirv-shaderRelaxedExtendedInstruction-10773).
+	VkPhysicalDeviceShaderRelaxedExtendedInstructionFeaturesKHR relaxed_extended_instruction_features = {};
+	if (shader_relaxed_extended_instruction_support) {
+		relaxed_extended_instruction_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_RELAXED_EXTENDED_INSTRUCTION_FEATURES_KHR;
+		relaxed_extended_instruction_features.pNext = create_info_next;
+		relaxed_extended_instruction_features.shaderRelaxedExtendedInstruction = VK_TRUE;
+		create_info_next = &relaxed_extended_instruction_features;
+	}
+
 	VkPhysicalDeviceRayTracingValidationFeaturesNV raytracing_validation_features = {};
 	if (raytracing_capabilities.validation) {
 		raytracing_validation_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_VALIDATION_FEATURES_NV;
@@ -1541,7 +1573,6 @@ Error RenderingDeviceDriverVulkan::_initialize_device(const LocalVector<VkDevice
 	VkPhysicalDeviceVulkan12Features vulkan_1_2_features = {};
 	VkPhysicalDevice16BitStorageFeaturesKHR storage_features = {};
 	VkPhysicalDeviceMultiviewFeatures multiview_features = {};
-	const bool enable_1_2_features = physical_device_properties.apiVersion >= VK_API_VERSION_1_2;
 	if (enable_1_2_features) {
 		// In Vulkan 1.2 and newer we use a newer struct to enable various features.
 		// Enable Vulkan 1.2 features (descriptor indexing, buffer device address, etc.).
@@ -1552,6 +1583,9 @@ Error RenderingDeviceDriverVulkan::_initialize_device(const LocalVector<VkDevice
 		vulkan_1_2_features.vulkanMemoryModelDeviceScope = vulkan_memory_model_device_scope_support;
 		vulkan_1_2_features.shaderFloat16 = shader_capabilities.shader_float16_is_supported;
 		vulkan_1_2_features.shaderInt8 = shader_capabilities.shader_int8_is_supported;
+		// VK_EXT_shader_viewport_index_layer, promoted (VUID-VkDeviceCreateInfo-ppEnabledExtensionNames-02835).
+		vulkan_1_2_features.shaderOutputViewportIndex = shader_output_viewport_index_support;
+		vulkan_1_2_features.shaderOutputLayer = shader_output_layer_support;
 		// Descriptor indexing features for bindless textures.
 		vulkan_1_2_features.shaderSampledImageArrayNonUniformIndexing = descriptor_indexing_capabilities.shader_sampled_image_array_non_uniform_indexing;
 		vulkan_1_2_features.descriptorBindingPartiallyBound = descriptor_indexing_capabilities.descriptor_binding_partially_bound;
