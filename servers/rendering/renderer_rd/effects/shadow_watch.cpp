@@ -33,6 +33,7 @@
 #include "core/object/callable_mp.h"
 #include "core/os/os.h"
 #include "servers/rendering/renderer_compositor.h"
+#include "servers/rendering/renderer_rd/effects/copy_effects.h"
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
@@ -107,6 +108,11 @@ float mean_depth(const uint32_t *p_sums, uint32_t p_count, uint32_t p_samples_pe
 	return float(double(total) / (double(p_count) * p_samples_per_block * 65535.0));
 }
 
+// Where the cube copies take their parameters from (CopyEffects::copy_cubemap_to_dp()).
+const char *copy_params_source() {
+	return CopyEffects::is_cube_to_dp_push_constants_enabled() ? "push constants (GODOT_SHADOW_COPY_PUSH_CONSTANTS=1)" : "a uniform buffer (the workaround of Wagnard/godot#1)";
+}
+
 bool lum_differs(float p_a, float p_b) {
 	const float m = MAX(p_a, p_b);
 	return m > 0.02f && Math::abs(p_a - p_b) > 0.25f * m;
@@ -140,7 +146,7 @@ ShadowWatch::ShadowWatch() {
 
 	singleton = this;
 	heartbeat_usec = OS::get_singleton()->get_ticks_usec();
-	print_line("ShadowWatch: watching the omni lights in cube shadow mode (Wagnard/godot#1), as GODOT_SHADOW_WATCH=1 asks.");
+	print_line(vformat("ShadowWatch: watching the omni lights in cube shadow mode (Wagnard/godot#1), as GODOT_SHADOW_WATCH=1 asks. The cube copies take their parameters from %s.", copy_params_source()));
 }
 
 ShadowWatch::~ShadowWatch() {
@@ -553,8 +559,8 @@ String ShadowWatch::_copy_verdict(const LightSample &p_sample, const WatchedLigh
 	float got[7];
 	memcpy(got, p_sample.header[p_half], sizeof(got));
 	if (!_copy_params_as_given(p_sample, p_light, p_half)) {
-		text = vformat("The copy of half %d RAN WITH OTHER PARAMETERS than it was given: z_far %.4f (given %.4f), z_near %.4f (given %.4f), texel size (%.6f, %.6f) (given (%.6f, %.6f)), first point at (%.1f, %.1f) (expected (%.1f, %.1f)).",
-				p_half, got[0], expected[0], got[1], expected[1], got[2], got[3], expected[2], expected[3], got[4], got[5], expected[4], expected[5]);
+		text = vformat("The copy of half %d RAN WITH OTHER PARAMETERS than it was given in %s: z_far %.4f (given %.4f), z_near %.4f (given %.4f), texel size (%.6f, %.6f) (given (%.6f, %.6f)), first point at (%.1f, %.1f) (expected (%.1f, %.1f)).",
+				p_half, CopyEffects::is_cube_to_dp_push_constants_enabled() ? "its push constants" : "its uniform buffer", got[0], expected[0], got[1], expected[1], got[2], got[3], expected[2], expected[3], got[4], got[5], expected[4], expected[5]);
 		// The second copy of z_far, at the end of the same parameters, written by the same CPU code.
 		if (got[0] != expected[0]) {
 			if (got[6] == expected[0]) {
@@ -711,7 +717,7 @@ void ShadowWatch::_analyze(const WatchedRender &p_render, uint64_t p_serial, con
 			const bool params_problem = s->recorded && !s->stale[h] && !_copy_params_as_given(*s, wl, h);
 			if ((cube_mismatch || record_problem || params_problem) && _may_report(REPORT_COPY + uint64_t(h) * 16, wl.light)) {
 				String what = cube_mismatch ? vformat("atlas half %d does not match the cubemap it was copied from at %d of %d samples", h, s->mismatch[h], s->checked[h]) : (record_problem ? vformat("atlas half %d is not what its copy wrote", h) : vformat("the copy of atlas half %d ran with other parameters than it was given", h));
-				print_line(vformat("ShadowWatch: [COPY] %s: %s.\n  => %s%s", _light_name(wl, p_render), what, _copy_verdict(*s, wl, p_render, h), _history(history)));
+				print_line(vformat("ShadowWatch: [COPY] %s: %s (copy parameters in %s).\n  => %s%s", _light_name(wl, p_render), what, copy_params_source(), _copy_verdict(*s, wl, p_render, h), _history(history)));
 			}
 			// Against the view's previous render only: in a render this watch skipped, the light may have been redrawn.
 			if (prev && prev->serial == previous_render && !s->redrawn && prev->half_rect == s->half_rect) {

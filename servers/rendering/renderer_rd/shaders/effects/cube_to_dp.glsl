@@ -4,6 +4,21 @@
 
 #VERSION_DEFINES
 
+#ifdef USE_PUSH_CONSTANTS
+layout(push_constant, std430) uniform Params {
+	float z_far;
+	float z_near;
+	vec2 texel_size;
+#ifdef WATCH
+	uint watch_offset;
+	uint watch_stamp;
+	uint pad0;
+	uint pad1;
+#endif
+}
+params;
+#endif
+
 layout(location = 0) out vec2 uv_interp;
 
 void main() {
@@ -22,6 +37,21 @@ layout(location = 0) in vec2 uv_interp;
 
 layout(set = 0, binding = 0) uniform samplerCube source_cube;
 
+#ifdef USE_PUSH_CONSTANTS
+// The layout before the workaround of Wagnard/godot#1, only to retest it (GODOT_SHADOW_COPY_PUSH_CONSTANTS=1).
+layout(push_constant, std430) uniform Params {
+	float z_far;
+	float z_near;
+	vec2 texel_size;
+#ifdef WATCH
+	uint watch_offset;
+	uint watch_stamp;
+	uint pad0; // z_far again.
+	uint pad1;
+#endif
+}
+params;
+#else
 // In a uniform buffer, not push constants: on D3D12 with NVIDIA, copies were seen running with another value than the
 // one set in their root constants (Wagnard/godot#1, CopyEffects::copy_cubemap_to_dp()).
 layout(set = 0, binding = 2, std140) uniform Params {
@@ -34,6 +64,7 @@ layout(set = 0, binding = 2, std140) uniform Params {
 	uint pad1;
 }
 params;
+#endif
 
 #ifdef WATCH
 // Wagnard/godot#1 (ShadowWatch): on a 32x32 grid of the region, what this copy read from the cubemap and the depth it

@@ -222,7 +222,8 @@ private:
 
 	// Copy to DP
 
-	// A uniform buffer per copy, not push constants (see copy_cubemap_to_dp()).
+	// A uniform buffer per copy, not push constants (see copy_cubemap_to_dp()). With GODOT_SHADOW_COPY_PUSH_CONSTANTS=1,
+	// push constants: the first 4 words, all 8 with the watch.
 	struct CopyToDPParams {
 		float z_far;
 		float z_near;
@@ -236,11 +237,22 @@ private:
 	enum {
 		CUBE_TO_DP_DEFAULT,
 		CUBE_TO_DP_WATCH, // Records what the copy reads and writes for ShadowWatch (Wagnard/godot#1).
+		// GODOT_SHADOW_COPY_PUSH_CONSTANTS=1 only: the parameters in push constants, as before the workaround.
+		CUBE_TO_DP_PUSH_CONSTANTS,
+		CUBE_TO_DP_PUSH_CONSTANTS_WATCH,
+	};
+
+	enum {
+		CUBE_TO_DP_GROUP_DEFAULT,
+		CUBE_TO_DP_GROUP_PUSH_CONSTANTS, // Enabled only by GODOT_SHADOW_COPY_PUSH_CONSTANTS=1.
 	};
 
 	struct CopyToDP {
 		CubeToDpShaderRD shader;
 		RID shader_version;
+		bool push_constants = false;
+		int variant = CUBE_TO_DP_DEFAULT;
+		int watch_variant = CUBE_TO_DP_WATCH;
 		PipelineCacheRD pipeline;
 		PipelineCacheRD watch_pipeline;
 		// One parameter buffer per copy of a frame, so that no copy's buffer is rewritten before it ran.
@@ -413,6 +425,9 @@ public:
 	void set_color(RID p_dest_texture, const Color &p_color, const Rect2i &p_region, bool p_8bit_dst = false);
 	void set_color_raster(RID p_dest_texture, const Color &p_color, const Rect2i &p_region);
 
+	// GODOT_SHADOW_COPY_PUSH_CONSTANTS=1, read once: copy_cubemap_to_dp() takes its parameters in push constants, as
+	// before the workaround of Wagnard/godot#1, to retest that path with new engine versions and GPU drivers.
+	static bool is_cube_to_dp_push_constants_enabled();
 	// With p_watch_record, the copy also records what it reads and writes there (ShadowWatch, Wagnard/godot#1).
 	void copy_cubemap_to_dp(RID p_source_rd_texture, RID p_dst_framebuffer, const Rect2 &p_rect, const Vector2 &p_dst_size, float p_z_near, float p_z_far, bool p_dp_flip, RID p_watch_record = RID(), uint32_t p_watch_offset = 0, uint32_t p_watch_stamp = 0);
 	void copy_cubemap_to_octmap(RID p_source_rd_texture, RID p_dst_framebuffer, float p_border_size);

@@ -157,23 +157,33 @@ CopyEffects::CopyEffects(BitField<RasterEffects> p_raster_effects) {
 
 	{
 		// Initialize copier
-		Vector<String> copy_modes;
-		copy_modes.push_back("\n"); // CUBE_TO_DP_DEFAULT
-		copy_modes.push_back("\n#define WATCH\n"); // CUBE_TO_DP_WATCH
+		Vector<ShaderRD::VariantDefine> copy_modes;
+		copy_modes.push_back(ShaderRD::VariantDefine(CUBE_TO_DP_GROUP_DEFAULT, "\n", true)); // CUBE_TO_DP_DEFAULT
+		copy_modes.push_back(ShaderRD::VariantDefine(CUBE_TO_DP_GROUP_DEFAULT, "\n#define WATCH\n", true)); // CUBE_TO_DP_WATCH
+		copy_modes.push_back(ShaderRD::VariantDefine(CUBE_TO_DP_GROUP_PUSH_CONSTANTS, "\n#define USE_PUSH_CONSTANTS\n", false)); // CUBE_TO_DP_PUSH_CONSTANTS
+		copy_modes.push_back(ShaderRD::VariantDefine(CUBE_TO_DP_GROUP_PUSH_CONSTANTS, "\n#define USE_PUSH_CONSTANTS\n#define WATCH\n", false)); // CUBE_TO_DP_PUSH_CONSTANTS_WATCH
 
 		cube_to_dp.shader.initialize(copy_modes);
 		const bool watch = ShadowWatch::is_enabled();
 		cube_to_dp.shader.set_variant_enabled(CUBE_TO_DP_WATCH, watch);
+		cube_to_dp.shader.set_variant_enabled(CUBE_TO_DP_PUSH_CONSTANTS_WATCH, watch);
+		cube_to_dp.push_constants = is_cube_to_dp_push_constants_enabled();
+		if (cube_to_dp.push_constants) {
+			cube_to_dp.shader.enable_group(CUBE_TO_DP_GROUP_PUSH_CONSTANTS);
+			cube_to_dp.variant = CUBE_TO_DP_PUSH_CONSTANTS;
+			cube_to_dp.watch_variant = CUBE_TO_DP_PUSH_CONSTANTS_WATCH;
+			print_line("Cube shadow copies take their parameters from push constants, the path the workaround of Wagnard/godot#1 avoids, as GODOT_SHADOW_COPY_PUSH_CONSTANTS=1 asks.");
+		}
 
 		cube_to_dp.shader_version = cube_to_dp.shader.version_create();
-		RID shader = cube_to_dp.shader.version_get_shader(cube_to_dp.shader_version, CUBE_TO_DP_DEFAULT);
+		RID shader = cube_to_dp.shader.version_get_shader(cube_to_dp.shader_version, cube_to_dp.variant);
 		RD::PipelineDepthStencilState dss;
 		dss.enable_depth_test = true;
 		dss.depth_compare_operator = RD::COMPARE_OP_ALWAYS;
 		dss.enable_depth_write = true;
 		cube_to_dp.pipeline.setup(shader, RD::RENDER_PRIMITIVE_TRIANGLES, RD::PipelineRasterizationState(), RD::PipelineMultisampleState(), dss, RD::PipelineColorBlendState(), 0);
 		if (watch) {
-			cube_to_dp.watch_pipeline.setup(cube_to_dp.shader.version_get_shader(cube_to_dp.shader_version, CUBE_TO_DP_WATCH), RD::RENDER_PRIMITIVE_TRIANGLES, RD::PipelineRasterizationState(), RD::PipelineMultisampleState(), dss, RD::PipelineColorBlendState(), 0);
+			cube_to_dp.watch_pipeline.setup(cube_to_dp.shader.version_get_shader(cube_to_dp.shader_version, cube_to_dp.watch_variant), RD::RENDER_PRIMITIVE_TRIANGLES, RD::PipelineRasterizationState(), RD::PipelineMultisampleState(), dss, RD::PipelineColorBlendState(), 0);
 		}
 	}
 
@@ -1129,6 +1139,11 @@ void CopyEffects::set_color_raster(RID p_dest_texture, const Color &p_color, con
 	RD::get_singleton()->draw_list_end();
 }
 
+bool CopyEffects::is_cube_to_dp_push_constants_enabled() {
+	static const bool enabled = OS::get_singleton()->get_environment("GODOT_SHADOW_COPY_PUSH_CONSTANTS") == "1";
+	return enabled;
+}
+
 void CopyEffects::copy_cubemap_to_dp(RID p_source_rd_texture, RID p_dst_framebuffer, const Rect2 &p_rect, const Vector2 &p_dst_size, float p_z_near, float p_z_far, bool p_dp_flip, RID p_watch_record, uint32_t p_watch_offset, uint32_t p_watch_stamp) {
 	UniformSetCacheRD *uniform_set_cache = UniformSetCacheRD::get_singleton();
 	ERR_FAIL_NULL(uniform_set_cache);
@@ -1163,39 +1178,56 @@ void CopyEffects::copy_cubemap_to_dp(RID p_source_rd_texture, RID p_dst_framebuf
 	// the copies get, in the two words holding z_far, while the words between them held this copy's own values. The
 	// half of the light's shadow it wrote then flickered. Nothing reads a uniform buffer's contents ahead of the draw.
 	// Each copy of a frame gets a buffer of its own: none is rewritten before the copy that reads it ran.
-	const uint64_t frame = RSG::rasterizer->get_frame_number();
-	if (frame != cube_to_dp.params_frame) {
-		cube_to_dp.params_frame = frame;
-		cube_to_dp.params_buffers_used = 0;
+	// GODOT_SHADOW_COPY_PUSH_CONSTANTS=1 goes back to push constants, to retest the original path.
+	RID params_buffer;
+	if (!cube_to_dp.push_constants) {
+		const uint64_t frame = RSG::rasterizer->get_frame_number();
+		if (frame != cube_to_dp.params_frame) {
+			cube_to_dp.params_frame = frame;
+			cube_to_dp.params_buffers_used = 0;
+		}
+		if (cube_to_dp.params_buffers_used == cube_to_dp.params_buffers.size()) {
+			cube_to_dp.params_buffers.push_back(RD::get_singleton()->uniform_buffer_create(sizeof(CopyToDPParams)));
+		}
+		params_buffer = cube_to_dp.params_buffers[cube_to_dp.params_buffers_used++];
+		RD::get_singleton()->buffer_update(params_buffer, 0, sizeof(CopyToDPParams), &params);
 	}
-	if (cube_to_dp.params_buffers_used == cube_to_dp.params_buffers.size()) {
-		cube_to_dp.params_buffers.push_back(RD::get_singleton()->uniform_buffer_create(sizeof(CopyToDPParams)));
-	}
-	const RID params_buffer = cube_to_dp.params_buffers[cube_to_dp.params_buffers_used++];
-	RD::get_singleton()->buffer_update(params_buffer, 0, sizeof(CopyToDPParams), &params);
 
-	const bool watch = p_watch_record.is_valid() && cube_to_dp.shader.is_variant_enabled(CUBE_TO_DP_WATCH);
+	const bool watch = p_watch_record.is_valid() && cube_to_dp.shader.is_variant_enabled(cube_to_dp.watch_variant);
 
 	// setup our uniforms
 	RID default_sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
 
 	RD::Uniform u_source_rd_texture(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ default_sampler, p_source_rd_texture }));
-	RD::Uniform u_params(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 2, params_buffer);
 
-	RID shader = cube_to_dp.shader.version_get_shader(cube_to_dp.shader_version, watch ? CUBE_TO_DP_WATCH : CUBE_TO_DP_DEFAULT);
+	RID shader = cube_to_dp.shader.version_get_shader(cube_to_dp.shader_version, watch ? cube_to_dp.watch_variant : cube_to_dp.variant);
 	ERR_FAIL_COND(shader.is_null());
 	PipelineCacheRD &pipeline = watch ? cube_to_dp.watch_pipeline : cube_to_dp.pipeline;
 
 	RD::DrawListID draw_list = RD::get_singleton()->draw_list_begin(p_dst_framebuffer, RD::DRAW_DEFAULT_ALL,Vector<Color>(), 1.0f, 0, screen_rect);
 	RD::get_singleton()->draw_list_bind_render_pipeline(draw_list, pipeline.get_render_pipeline(RD::INVALID_ID, RD::get_singleton()->framebuffer_get_format(p_dst_framebuffer)));
-	if (watch) {
-		RD::Uniform u_watch_record(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, p_watch_record);
-		RD::get_singleton()->draw_list_bind_uniform_set(draw_list, uniform_set_cache->get_cache(shader, 0, u_source_rd_texture, u_watch_record, u_params), 0);
+	if (cube_to_dp.push_constants) {
+		if (watch) {
+			RD::Uniform u_watch_record(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, p_watch_record);
+			RD::get_singleton()->draw_list_bind_uniform_set(draw_list, uniform_set_cache->get_cache(shader, 0, u_source_rd_texture, u_watch_record), 0);
+		} else {
+			RD::get_singleton()->draw_list_bind_uniform_set(draw_list, uniform_set_cache->get_cache(shader, 0, u_source_rd_texture), 0);
+		}
 	} else {
-		RD::get_singleton()->draw_list_bind_uniform_set(draw_list, uniform_set_cache->get_cache(shader, 0, u_source_rd_texture, u_params), 0);
+		RD::Uniform u_params(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 2, params_buffer);
+		if (watch) {
+			RD::Uniform u_watch_record(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, p_watch_record);
+			RD::get_singleton()->draw_list_bind_uniform_set(draw_list, uniform_set_cache->get_cache(shader, 0, u_source_rd_texture, u_watch_record, u_params), 0);
+		} else {
+			RD::get_singleton()->draw_list_bind_uniform_set(draw_list, uniform_set_cache->get_cache(shader, 0, u_source_rd_texture, u_params), 0);
+		}
 	}
 	RD::get_singleton()->draw_list_bind_index_array(draw_list, material_storage->get_quad_index_array());
 
+	if (cube_to_dp.push_constants) {
+		// Without the watch, the shader's push constants stop before the watch fields.
+		RD::get_singleton()->draw_list_set_push_constant(draw_list, &params, watch ? sizeof(CopyToDPParams) : offsetof(CopyToDPParams, watch_offset));
+	}
 	RD::get_singleton()->draw_list_draw(draw_list, true);
 	RD::get_singleton()->draw_list_end();
 }
