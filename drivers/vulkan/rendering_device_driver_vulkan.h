@@ -489,6 +489,11 @@ private:
 		RenderPassID render_pass;
 		int pre_transform_rotation_degrees = 0;
 		uint32_t image_index = 0;
+#ifdef STREAMLINE_ENABLED
+		// Streamline::get_swap_chain_serial() at creation: a different serial means the
+		// frame generation composition changed and the swap chain is recreated.
+		uint32_t frame_generation_serial = 0;
+#endif
 #ifdef ANDROID_ENABLED
 		uint64_t refresh_duration = 0;
 #endif

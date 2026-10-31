@@ -4220,6 +4220,14 @@ Error RenderingDeviceDriverVulkan::swap_chain_resize(CommandQueueID p_cmd_queue,
 	swap_create_info.compositeAlpha = composite_alpha;
 	swap_create_info.presentMode = present_mode;
 	swap_create_info.clipped = true;
+
+#ifdef STREAMLINE_ENABLED
+	// Streamline loads or unloads DLSS-G for this swap chain. The previous one is destroyed and
+	// RenderingDevice has stalled: nothing uses the device meanwhile (slSetFeatureLoaded()).
+	swap_chain->frame_generation_serial = Streamline::get_singleton()->get_swap_chain_serial();
+	Streamline::get_singleton()->emit_marker(STREAMLINE_MARKER_BEFORE_SWAPCHAIN_CREATION);
+#endif
+
 	err = device_functions.CreateSwapchainKHR(vk_device, &swap_create_info, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_SWAPCHAIN_KHR), &swap_chain->vk_swapchain);
 	ERR_FAIL_COND_V_MSG(err != VK_SUCCESS, ERR_CANT_CREATE, vformat("Couldn't create Vulkan swapchain (VkResult error %d).", err));
 
@@ -4382,6 +4390,15 @@ RDD::FramebufferID RenderingDeviceDriverVulkan::swap_chain_acquire_framebuffer(C
 		r_resize_required = true;
 		return FramebufferID();
 	}
+
+#ifdef STREAMLINE_ENABLED
+	if (swap_chain->frame_generation_serial != Streamline::get_singleton()->get_swap_chain_serial()) {
+		// Frame generation needs another kind of swap chain (DLSS-G loaded or unloaded): recreated
+		// by swap_chain_resize(), after RenderingDevice's stall.
+		r_resize_required = true;
+		return FramebufferID();
+	}
+#endif
 
 	VkResult err;
 	VkSemaphore semaphore = VK_NULL_HANDLE;

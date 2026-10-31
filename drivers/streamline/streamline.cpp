@@ -182,11 +182,15 @@ void Streamline::emit_marker(StreamlineMarkerType marker) {
 			// load initial project settings
 			update_project_settings();
 			return;
-		case StreamlineMarkerType::STREAMLINE_MARKER_BEFORE_SWAPCHAIN_CREATION:
+		case StreamlineMarkerType::STREAMLINE_MARKER_BEFORE_SWAPCHAIN_CREATION: {
+			// FSR frame generation exists on D3D12 only.
+			bool fsr = false;
 #ifdef D3D12_ENABLED
-			sl_context.apply_frame_generation_features(FSRFrameGenerationD3D12::is_requested());
+			fsr = sl_context.is_d3d12 && FSRFrameGenerationD3D12::is_requested();
 #endif
+			sl_context.apply_frame_generation_features(fsr);
 			return;
+		}
 		case StreamlineMarkerType::STREAMLINE_MARKER_MODIFY_SWAPCHAIN:
 			sl_context.dlssg_disable();
 			return;
@@ -197,8 +201,8 @@ void Streamline::emit_marker(StreamlineMarkerType marker) {
 			break;
 	}
 
-	// D3D12: sl.dlss_g's deferred unload counts real presents, with or without Reflex.
-	if (marker == StreamlineMarkerType::STREAMLINE_MARKER_END_PRESENT && sl_context.is_game && sl_context.is_d3d12) {
+	// sl.dlss_g's deferred unload counts real presents, with or without Reflex.
+	if (marker == StreamlineMarkerType::STREAMLINE_MARKER_END_PRESENT && sl_context.is_game) {
 		sl_context.dlssg_unload_present_tick();
 	}
 

@@ -113,12 +113,13 @@ public:
 
 	void dlssg_disable();
 
-	// D3D12, right before a swap chain is created: loads or unloads DLSS-G, Reflex and PCL for it.
+	// Right before a swap chain is created: loads or unloads DLSS-G, Reflex and PCL for it.
 	// DLSS-G is loaded while frame generation is on, and unloaded once it has been off for a while
-	// (dlssg_unload_schedule()) or for FSR frame generation, whose proxy swap chain cannot coexist with it.
+	// (dlssg_unload_schedule()) or for FSR frame generation (D3D12), whose proxy swap chain cannot
+	// coexist with it.
 	void apply_frame_generation_features(bool p_fsr);
 
-	// D3D12: sl.dlss_g is unloaded (DLSS-G guide, section 18) only once DLSS_G_UNLOAD_DELAY_USEC and
+	// sl.dlss_g is unloaded (DLSS-G guide, section 18) only once DLSS_G_UNLOAD_DELAY_USEC and
 	// DLSS_G_UNLOAD_DELAY_PRESENTS have both passed since DLSS-G's eOff. Unloading it right after eOff
 	// leaves the frame rate capped at the display limit divided by the generation factor until quit
 	// (Streamline/driver bug, see DLSSG-DEFERRED-UNLOAD-FIXES.md).
@@ -173,7 +174,7 @@ public:
 	bool dlssg_ui_recomposition = false;
 	// Frames DLSS-G's enabling has waited for the HUD-less color and UI alpha to be tagged.
 	int dlssg_hudless_wait = 0;
-	// D3D12: DLSS-G loaded for the current swap chain, and wanted for the next one (set when frame
+	// DLSS-G loaded for the current swap chain, and wanted for the next one (set when frame
 	// generation is turned on, cleared by the deferred unload).
 	bool dlssg_loaded = true;
 	std::atomic<bool> dlssg_wanted{ false };

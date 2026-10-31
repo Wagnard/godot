@@ -296,7 +296,7 @@ void StreamlineContext::init_device_d3d12(void *d3d12_device) {
 
 void StreamlineContext::apply_frame_generation_features(bool p_fsr) {
 	STREAMLINE_GAME_ONLY;
-	if (!is_d3d12 || !slSetFeatureLoaded) {
+	if (!slSetFeatureLoaded) {
 		return;
 	}
 	const bool want_dlssg = !p_fsr && dlssg_wanted && streamline_capabilities.dlss_g_available;
@@ -304,16 +304,24 @@ void StreamlineContext::apply_frame_generation_features(bool p_fsr) {
 	if (want_dlssg == dlssg_loaded && want_reflex == reflex_loaded) {
 		return;
 	}
-	// slSetFeatureLoaded() requires an idle pipeline and no concurrent DXGI/D3D calls. Unloaded
-	// features are unhooked, so the function pointers are fetched again below.
+	// slSetFeatureLoaded() requires an idle pipeline and no concurrent DXGI/D3D/Vulkan calls
+	// (ProgrammingGuide.md, 2.14): it rebuilds the interposer's hook lists. Unloaded features are
+	// unhooked, so the function pointers are fetched again below.
 	if (want_dlssg != dlssg_loaded) {
 		if (!want_dlssg && (uint32_t)dlssg_viewport != UINT_MAX) {
 			dlssg_disable();
 		}
-		slSetFeatureLoaded(sl::kFeatureDLSS_G, want_dlssg);
+		if (is_d3d12) {
+			slSetFeatureLoaded(sl::kFeatureDLSS_G, want_dlssg);
+		} else {
+			// Vulkan: the latency sleep, markers and Reflex calls of other threads wait meanwhile.
+			MutexLock lock(Streamline::get_swap_chain_mutex());
+			slSetFeatureLoaded(sl::kFeatureDLSS_G, want_dlssg);
+		}
 		dlssg_loaded = want_dlssg;
 	}
 	if (want_reflex != reflex_loaded) {
+		// D3D12 only: p_fsr is never set on Vulkan.
 		slSetFeatureLoaded(sl::kFeatureReflex, want_reflex);
 		slSetFeatureLoaded(sl::kFeaturePCL, want_reflex);
 		reflex_loaded = want_reflex;

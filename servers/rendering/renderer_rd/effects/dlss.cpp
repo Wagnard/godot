@@ -869,14 +869,13 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, DLSSCallbackPaylo
 		}
 	}
 
-#ifdef D3D12_ENABLED
-	// When DLSS-G is switched on, the swap chain is recreated with sl.dlss_g loaded. The D3D12 driver
-	// does it before its next Present. Switching it off is eOff (without eRetainResourcesWhenOff, it
-	// frees DLSS-G's resources, guide section 6.4), then sl.dlss_g is unloaded with another swap chain
-	// recreation (section 18), but only a while after eOff: unloading it right away left the frame rate
-	// capped at the display limit divided by the generation factor until quit. Switched on again
-	// before that, sl.dlss_g simply stays.
-	if (context->is_d3d12 && dlssg_is_provider()) {
+	// When DLSS-G is switched on, the swap chain is recreated with sl.dlss_g loaded. The D3D12 and
+	// Vulkan drivers do it before the next frame. Switching it off is eOff (without
+	// eRetainResourcesWhenOff, it frees DLSS-G's resources, guide section 6.4), then sl.dlss_g is
+	// unloaded with another swap chain recreation (section 18), but only a while after eOff: unloading
+	// it right away left the frame rate capped at the display limit divided by the generation factor
+	// until quit. Switched on again before that, sl.dlss_g simply stays.
+	if (dlssg_is_provider()) {
 		StreamlineContext &sl = StreamlineContext::get();
 		if (sl.dlssg_requested(p_params.dlss_g)) {
 			sl.dlssg_unload_cancel();
@@ -888,7 +887,6 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, DLSSCallbackPaylo
 			sl.dlssg_unload_schedule();
 		}
 	}
-#endif
 
 	dlss_callback_lap(DLSS_SECTION_FRAME_GENERATION);
 
