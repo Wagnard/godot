@@ -599,18 +599,22 @@ void RenderingDeviceGraph::_add_command_to_graph(ResourceTracker **p_resource_tr
 
 				_add_texture_barrier_to_command(resource_tracker->texture_driver_id, resource_tracker->usage_access, new_usage_access, resource_tracker->usage, new_resource_usage, resource_tracker->texture_subresources, command_transition_barriers, r_command->transition_barrier_index, r_command->transition_barrier_count);
 			} else if (resource_tracker->buffer_driver_id.id != 0) {
-				// After a read, only an execution dependency is needed: nothing is made available, so the barrier names no
-				// source access (Khronos, Synchronization Examples: a WAR hazard needs no access types in the source access
-				// mask). A read in another usage (vertex input, then a BLAS build) is not ordered after the previous read
-				// either, and its access would name stages this command does not wait for (VUID-vkCmdPipelineBarrier-pBufferMemoryBarriers-02817).
-				// The last write was made available by the barrier before the previous read; this one waits for that write
-				// and makes it visible to the new usage.
-				const BitField<RDD::BarrierAccessBits> src_access = _is_write_usage(resource_tracker->usage) ? resource_tracker->usage_access : BitField<RDD::BarrierAccessBits>();
+				// The source access is the previous usage's, a read included: D3D12 requires AccessBefore to name the access
+				// "corresponding with resource usage since the preceding barrier", D3D12_BARRIER_ACCESS_NO_ACCESS states the
+				// data is not accessed or no longer needed, and a transition makes memory visible to its AccessAfter only, not
+				// to other access types (Enhanced Barriers spec). An empty source access let a buffer written, read one way and
+				// then read another way keep stale data in the second reader's cache on D3D12 (SDFGI lit walls white near
+				// the camera). Vulkan requires the source stages to cover the source access
+				// (VUID-vkCmdPipelineBarrier-pBufferMemoryBarriers-02817, -srcAccessMask-02815): a read is not a dependency of
+				// this command, so the stages of this frame's earlier uses of the buffer are added.
+				if (!_is_write_usage(resource_tracker->usage)) {
+					r_command->previous_stages = r_command->previous_stages | search_tracker->current_frame_stages;
+				}
 #if USE_BUFFER_BARRIERS
-				_add_buffer_barrier_to_command(resource_tracker->buffer_driver_id, src_access, new_usage_access, r_command->buffer_barrier_index, r_command->buffer_barrier_count);
+				_add_buffer_barrier_to_command(resource_tracker->buffer_driver_id, resource_tracker->usage_access, new_usage_access, r_command->buffer_barrier_index, r_command->buffer_barrier_count);
 #endif
 				// Memory barriers are pushed regardless of buffer barriers being used or not.
-				r_command->memory_barrier.src_access = r_command->memory_barrier.src_access | src_access;
+				r_command->memory_barrier.src_access = r_command->memory_barrier.src_access | resource_tracker->usage_access;
 				r_command->memory_barrier.dst_access = r_command->memory_barrier.dst_access | new_usage_access;
 			} else if (resource_tracker->acceleration_structure_driver_id.id != 0) {
 				// Make sure the acceleration structure has been built before accessing it from raytracing shaders.
