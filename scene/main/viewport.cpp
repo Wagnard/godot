@@ -5417,7 +5417,7 @@ void Viewport::_bind_methods() {
 #if defined(MACOS_ENABLED) || defined(IOS_ENABLED)
 		const char *scaling_3d_hint = "Nearest (Fastest):5,Bilinear (Fastest):0,FSR 1.0 (Fast):1,FSR 2.2 (Slow):2,MetalFX (Spatial - Fast):3,MetalFX (Temporal - Slow):4";
 #else
-		const char *scaling_3d_hint = "Nearest (Fastest):5,Bilinear (Fastest):0,FSR 1.0 (Fast):1,FSR 2.2 (Slow):2,NVIDIA DLSS (Temporal):6";
+		const char *scaling_3d_hint = "Nearest (Fastest):5,Bilinear (Fastest):0,FSR 1.0 (Fast):1,FSR 2.2 (Slow):2,NVIDIA DLSS (Temporal):6,AMD FSR 3.1 (Temporal):7";
 #endif
 		ADD_PROPERTY(PropertyInfo(Variant::INT, "scaling_3d_mode", PROPERTY_HINT_ENUM, scaling_3d_hint), "set_scaling_3d_mode", "get_scaling_3d_mode");
 	}
@@ -5487,6 +5487,7 @@ void Viewport::_bind_methods() {
 	BIND_ENUM_CONSTANT(SCALING_3D_MODE_METALFX_TEMPORAL);
 	BIND_ENUM_CONSTANT(SCALING_3D_MODE_NEAREST);
 	BIND_ENUM_CONSTANT(SCALING_3D_MODE_DLSS);
+	BIND_ENUM_CONSTANT(SCALING_3D_MODE_FSR3);
 	BIND_ENUM_CONSTANT(SCALING_3D_MODE_MAX);
 
 	BIND_ENUM_CONSTANT(MSAA_DISABLED);

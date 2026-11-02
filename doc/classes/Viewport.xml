@@ -588,7 +588,11 @@
 		<constant name="SCALING_3D_MODE_DLSS" value="6" enum="Scaling3DMode">
 			Use NVIDIA DLSS upscaling for the viewport's 3D buffer. The amount of scaling can be set using [member Viewport.scaling_3d_scale]. Values less than [code]1.0[/code] will result in the viewport being upscaled using DLSS Super Resolution or DLSS Ray Regeneration, depending on raytracing mode ON/OFF. Values greater than [code]1.0[/code] are not supported and bilinear downsampling will be used instead. Scaling values: 0.5 - Performance, 0.58 - Balanced, 0.66 - Quality, 1.0 - DLAA
 		</constant>
-		<constant name="SCALING_3D_MODE_MAX" value="7" enum="Scaling3DMode">
+		<constant name="SCALING_3D_MODE_FSR3" value="7" enum="Scaling3DMode">
+			Use AMD FSR 3.1 upscaling for the viewport's 3D buffer, through AMD's signed FidelityFX DLLs ([code]amd_fidelityfx_loader_dx12.dll[/code] and [code]amd_fidelityfx_upscaler_dx12.dll[/code] next to the executable). The DLL picks the newest upscaler the GPU supports: FSR 3.1 on any GPU, FSR 4 on GPUs that support it. The amount of scaling can be set using [member Viewport.scaling_3d_scale]. Values less than [code]1.0[/code] will result in the viewport being upscaled. Values greater than [code]1.0[/code] are not supported and bilinear downsampling will be used instead. A value of [code]1.0[/code] will use FSR at native resolution as a TAA solution (Native AA). Textures are sampled with the mipmap bias AMD documents, [code]log2(scale) - 1.0[/code] (other temporal modes use [code]log2(scale) - 0.5[/code]), plus [member texture_mipmap_bias].
+			[b]Note:[/b] Only supported with the Forward+ renderer and the D3D12 rendering driver, for a single view. Elsewhere, or without the DLLs, [constant SCALING_3D_MODE_FSR2] is used instead.
+		</constant>
+		<constant name="SCALING_3D_MODE_MAX" value="8" enum="Scaling3DMode">
 			Represents the size of the [enum Scaling3DMode] enum.
 		</constant>
 		<constant name="MSAA_DISABLED" value="0" enum="MSAA">

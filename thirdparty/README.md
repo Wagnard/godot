@@ -23,11 +23,13 @@ Files extracted from upstream source:
 - Version: 2.3.0 (2026)
 - License: MIT
 
-Files extracted from upstream source (headers only; the signed loader and frame generation DLLs are loaded at run time):
+Files extracted from upstream source (headers only; the signed loader, frame generation and upscaler DLLs are
+loaded at run time):
 
 - `api/include`: `ffx_api.h`, `ffx_api_loader.h`, `ffx_api_types.h`, `dx12/ffx_api_dx12.h`
 - `framegeneration/include`: `ffx_framegeneration.h`, `ffx_framegeneration_api_types.h`,
   `dx12/ffx_api_framegeneration_dx12.h`
+- `upscalers/include`: `ffx_upscale.h`
 - `LICENSE.txt`
 
 

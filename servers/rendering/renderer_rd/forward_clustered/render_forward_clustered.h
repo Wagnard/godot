@@ -36,6 +36,7 @@
 #include "servers/rendering/renderer_rd/cluster_builder_rd.h"
 #include "servers/rendering/renderer_rd/effects/dlss.h"
 #include "servers/rendering/renderer_rd/effects/fsr2.h"
+#include "servers/rendering/renderer_rd/effects/fsr3_upscaler.h"
 #include "servers/rendering/renderer_rd/effects/fsr_frame_generation.h"
 #include "servers/rendering/renderer_rd/effects/motion_vectors_store.h"
 #include "servers/rendering/renderer_rd/effects/pt_probes.h"
@@ -105,6 +106,7 @@ public:
 	private:
 		RenderSceneBuffersRD *render_buffers = nullptr;
 		RendererRD::FSR2Context *fsr2_context = nullptr;
+		RendererRD::FSR3UpscalerContext *fsr3_context = nullptr;
 		RendererRD::DLSSContext *dlss_context = nullptr;
 #ifdef METAL_MFXTEMPORAL_ENABLED
 		RendererRD::MFXTemporalContext *mfx_temporal_context = nullptr;
@@ -154,6 +156,10 @@ public:
 
 		void ensure_fsr2(RendererRD::FSR2Effect *effect);
 		RendererRD::FSR2Context *get_fsr2_context() const { return fsr2_context; }
+
+		// False when AMD's context could not be created: the frame is then not upscaled.
+		bool ensure_fsr3(RendererRD::FSR3UpscalerEffect *effect);
+		RendererRD::FSR3UpscalerContext *get_fsr3_context() const { return fsr3_context; }
 
 		void ensure_dlss(RendererRD::DLSSEffect *effect, bool p_alpha_upscaling);
 		RendererRD::DLSSContext *get_dlss_context() const { return dlss_context; }
@@ -1330,6 +1336,7 @@ protected:
 
 	RendererRD::TAA *taa = nullptr;
 	RendererRD::FSR2Effect *fsr2_effect = nullptr;
+	RendererRD::FSR3UpscalerEffect *fsr3_upscaler_effect = nullptr;
 	RendererRD::DLSSEffect *dlss_effect = nullptr;
 	RendererRD::FSRFrameGenerationEffect *fsr_frame_generation_effect = nullptr;
 	RendererRD::SSEffects *ss_effects = nullptr;
@@ -1432,6 +1439,7 @@ protected:
 		SCALE_3D_FSR2,
 		SCALE_3D_MFX,
 		SCALE_3D_DLSS,
+		SCALE_3D_FSR3,
 	};
 
 	// Optional DLSS Ray Reconstruction guide buffers. Supplied by the caller so

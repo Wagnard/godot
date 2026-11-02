@@ -97,6 +97,13 @@ void RenderForwardClustered::RenderBufferDataForwardClustered::ensure_fsr2(Rende
 	}
 }
 
+bool RenderForwardClustered::RenderBufferDataForwardClustered::ensure_fsr3(RendererRD::FSR3UpscalerEffect *effect) {
+	if (fsr3_context == nullptr) {
+		fsr3_context = effect->create_context(render_buffers->get_internal_size(), render_buffers->get_target_size());
+	}
+	return fsr3_context != nullptr;
+}
+
 void RenderForwardClustered::RenderBufferDataForwardClustered::ensure_dlss(RendererRD::DLSSEffect *effect, bool p_alpha_upscaling) {
 	if (dlss_context != nullptr && dlss_context->alpha_upscaling != p_alpha_upscaling) {
 		// The viewport's transparency changed: the NGX feature must be created again (see DLSSContext::alpha_upscaling).
@@ -151,6 +158,11 @@ void RenderForwardClustered::RenderBufferDataForwardClustered::free_data() {
 	if (fsr2_context) {
 		memdelete(fsr2_context);
 		fsr2_context = nullptr;
+	}
+
+	if (fsr3_context) {
+		memdelete(fsr3_context);
+		fsr3_context = nullptr;
 	}
 
 #ifdef METAL_MFXTEMPORAL_ENABLED
@@ -2659,6 +2671,8 @@ RenderForwardClustered::Scale3DMode RenderForwardClustered::_resolve_scale_3d_mo
 			return SCALE_3D_FSR2;
 		case RSE::VIEWPORT_SCALING_3D_MODE_DLSS:
 			return SCALE_3D_DLSS;
+		case RSE::VIEWPORT_SCALING_3D_MODE_FSR3:
+			return SCALE_3D_FSR3;
 		case RSE::VIEWPORT_SCALING_3D_MODE_METALFX_TEMPORAL:
 #ifdef METAL_MFXTEMPORAL_ENABLED
 			return SCALE_3D_MFX;
@@ -2725,6 +2739,46 @@ void RenderForwardClustered::_render_3d_upscaling(const RenderDataRD *p_render_d
 		}
 
 		RD::get_singleton()->draw_command_end_label();
+	} else if (p_scale_type == SCALE_3D_FSR3) {
+		// The upscaled target stays unused (internal color shown) if AMD's context cannot be created.
+		const bool ready = rb_data->ensure_fsr3(fsr3_upscaler_effect);
+		rb->set_upscaler_ready(ready);
+		if (ready) {
+			RD::get_singleton()->draw_command_begin_label("FSR3");
+			RENDER_TIMESTAMP("FSR3");
+
+			// One view: RendererViewport falls back to FSR2 for more.
+			real_t fov = p_render_data->scene_data->cam_projection.get_fov();
+			real_t aspect = p_render_data->scene_data->cam_projection.get_aspect();
+			RendererRD::FSR3UpscalerEffect::Parameters params;
+			params.context = rb_data->get_fsr3_context();
+			params.internal_size = rb->get_internal_size();
+			params.target_size = rb->get_target_size();
+			// The viewport's FSR sharpness, mapped as for FSR2: 0 is the sharpest.
+			params.sharpness = CLAMP(1.0f - (rb->get_fsr_sharpness() / 2.0f), 0.0f, 1.0f);
+			params.color = rb->get_internal_texture(0);
+			params.depth = rb->get_depth_texture(0);
+			params.velocity = rb->get_velocity_buffer(false, 0);
+			params.output = rb->get_upscaled_texture(0);
+			params.z_near = p_render_data->scene_data->z_near;
+			params.z_far = p_render_data->scene_data->z_far;
+			params.fovy = p_render_data->scene_data->cam_projection.get_fovy(fov, 1.0 / aspect);
+			params.jitter = p_render_data->scene_data->taa_jitter * Vector2(rb->get_internal_size()) * 0.5f;
+			params.delta_time = float(p_time_step);
+
+			Projection correction;
+			correction.set_depth_correction(true, true, false);
+			const Projection &prev_proj = p_render_data->scene_data->prev_cam_projection;
+			const Projection &cur_proj = p_render_data->scene_data->cam_projection;
+			const Transform3D &prev_transform = p_render_data->scene_data->prev_cam_transform;
+			const Transform3D &cur_transform = p_render_data->scene_data->cam_transform;
+			// Relative camera motion first, see camera_reprojection.h. The motion vector decode pass derives
+			// every static pixel's motion vector from this matrix.
+			params.reprojection = (correction * prev_proj) * Projection(RendererRD::camera_view_delta(prev_transform, cur_transform)) * (correction * cur_proj).inverse();
+
+			fsr3_upscaler_effect->upscale(params);
+			RD::get_singleton()->draw_command_end_label();
+		}
 	} else if (p_scale_type == SCALE_3D_DLSS) {
 		RENDER_TIMESTAMP("DLSS");
 		// A transparent viewport needs the alpha upscaled with the color: 0 where the background was cleared,
@@ -7554,6 +7608,7 @@ RenderForwardClustered::RenderForwardClustered() {
 
 	taa = memnew(RendererRD::TAA);
 	fsr2_effect = memnew(RendererRD::FSR2Effect);
+	fsr3_upscaler_effect = memnew(RendererRD::FSR3UpscalerEffect);
 	dlss_effect = memnew(RendererRD::DLSSEffect);
 	fsr_frame_generation_effect = memnew(RendererRD::FSRFrameGenerationEffect);
 	ss_effects = memnew(RendererRD::SSEffects);
@@ -7596,6 +7651,11 @@ RenderForwardClustered::~RenderForwardClustered() {
 	if (fsr2_effect) {
 		memdelete(fsr2_effect);
 		fsr2_effect = nullptr;
+	}
+
+	if (fsr3_upscaler_effect) {
+		memdelete(fsr3_upscaler_effect);
+		fsr3_upscaler_effect = nullptr;
 	}
 
 	if (motion_vectors_store) {

@@ -55,6 +55,24 @@
 #include "drivers/streamline/streamline_context.h"
 #endif
 
+#ifdef D3D12_ENABLED
+#include "drivers/d3d12/fsr_upscaler_d3d12.h"
+#endif
+
+// AMD FSR 3.1 upscaling (RendererRD::FSR3UpscalerEffect): the D3D12 driver, and AMD's loader reports an upscaling
+// provider for its device.
+static bool _fsr3_upscaler_supported() {
+#ifdef D3D12_ENABLED
+	RenderingDevice *rd = RD::get_singleton();
+	if (!rd || rd->get_device_api_name().to_lower() != "d3d12") {
+		return false;
+	}
+	return FSRUpscalerD3D12::is_available((void *)rd->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_LOGICAL_DEVICE));
+#else
+	return false;
+#endif
+}
+
 static Transform2D _canvas_get_transform(RendererViewport::Viewport *p_viewport, RendererCanvasCull::Canvas *p_canvas, RendererViewport::Viewport::CanvasData *p_canvas_data, const Vector2 &p_vp_size) {
 	Transform2D xf = p_viewport->global_transform;
 
@@ -183,6 +201,13 @@ void RendererViewport::_configure_3d_render_buffers(Viewport *p_viewport) {
 				scaling_type = RSE::scaling_3d_mode_type(scaling_3d_mode);
 			}
 
+			if (scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_FSR3 && (p_viewport->view_count > 1 || !_fsr3_upscaler_supported())) {
+				// AMD's FidelityFX DLLs exist for D3D12 only here, and this path upscales one view.
+				scaling_3d_mode = RSE::VIEWPORT_SCALING_3D_MODE_FSR2;
+				scaling_type = RSE::scaling_3d_mode_type(scaling_3d_mode);
+				WARN_PRINT_ONCE("AMD FSR 3.1 upscaling is not available (it needs the D3D12 driver, amd_fidelityfx_loader_dx12.dll and amd_fidelityfx_upscaler_dx12.dll next to the executable, and a single view). Falling back to FSR 2 scaling.");
+			}
+
 			if (scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_METALFX_SPATIAL && !RD::get_singleton()->has_feature(RD::SUPPORTS_METALFX_SPATIAL)) {
 				scaling_3d_mode = RSE::VIEWPORT_SCALING_3D_MODE_FSR;
 				WARN_PRINT_ONCE("MetalFX spatial upscaling is not supported by the current renderer or hardware. Falling back to FSR scaling.");
@@ -249,6 +274,7 @@ void RendererViewport::_configure_3d_render_buffers(Viewport *p_viewport) {
 				case RSE::VIEWPORT_SCALING_3D_MODE_FSR:
 				case RSE::VIEWPORT_SCALING_3D_MODE_FSR2:
 				case RSE::VIEWPORT_SCALING_3D_MODE_DLSS:
+				case RSE::VIEWPORT_SCALING_3D_MODE_FSR3:
 					target_width = p_viewport->size.width;
 					target_height = p_viewport->size.height;
 					render_width = MAX(ceilf((float)target_width * scaling_3d_scale), 1.0); // target_width / (target_width * scaling)
@@ -1057,6 +1083,10 @@ void RendererViewport::viewport_set_scaling_3d_mode(RID p_viewport, RSE::Viewpor
 		}
 		if (p_mode == RSE::VIEWPORT_SCALING_3D_MODE_DLSS) {
 			WARN_PRINT_ONCE_ED("DLSS 3D scaling is only available when using the Forward+ renderer.");
+			return;
+		}
+		if (p_mode == RSE::VIEWPORT_SCALING_3D_MODE_FSR3) {
+			WARN_PRINT_ONCE_ED("AMD FSR 3.1 3D scaling is only available when using the Forward+ renderer.");
 			return;
 		}
 	}
