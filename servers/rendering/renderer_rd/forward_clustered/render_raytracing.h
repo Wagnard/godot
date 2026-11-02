@@ -168,7 +168,7 @@ struct alignas(16) RT_MaterialData {
 	uint32_t ao_texture_idx; // BaseMaterial3D's ambient occlusion texture (RT_MAT_FLAG_AO_TEXTURE).
 	uint32_t ao_channel; // Its channel, 0-3 (ao_texture_channel).
 	float ao_light_affect; // With RT_MAT_FLAG_AO_TEXTURE or RT_MAT_FLAG_AO_ORM.
-	uint32_t ao_pad;
+	uint32_t metallic_texture_idx; // BaseMaterial3D's metallic texture, or its ORM texture (RT_MAT_METALLIC_CHANNEL_SHIFT).
 };
 static_assert(sizeof(RT_MaterialData) == 144, "RT_MaterialData must be 144 bytes for std430");
 
@@ -303,6 +303,18 @@ enum {
 	RT_MAT_FLAG_AO_TEXTURE = 16384u, // Ambient occlusion from its texture, on UV1.
 	RT_MAT_FLAG_AO_ORM = 32768u, // Ambient occlusion from the ORM texture's red channel.
 };
+
+// The channels BaseMaterial3D reads its roughness (orm_texture_idx) and metallic (metallic_texture_idx) textures in, in
+// the material flags (an RTTextureChannel each, 3 bits): GREEN and BLUE of the ORM texture.
+enum RTTextureChannel : uint32_t {
+	RT_TEXTURE_CHANNEL_RED = 0u,
+	RT_TEXTURE_CHANNEL_GREEN = 1u,
+	RT_TEXTURE_CHANNEL_BLUE = 2u,
+	RT_TEXTURE_CHANNEL_ALPHA = 3u,
+	RT_TEXTURE_CHANNEL_GRAYSCALE = 4u, // The mean of red, green and blue, as BaseMaterial3D's mask (0.333333 each).
+};
+static constexpr uint32_t RT_MAT_ROUGHNESS_CHANNEL_SHIFT = 16u;
+static constexpr uint32_t RT_MAT_METALLIC_CHANNEL_SHIFT = 19u;
 
 // Index format for RT geometry (matches GLSL fetch_indices).
 enum {

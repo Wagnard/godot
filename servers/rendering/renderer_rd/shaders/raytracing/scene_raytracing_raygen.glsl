@@ -802,7 +802,14 @@ void main() {
 		albedo_tex *= material_vertex_color(fetch_color(geom, i0, i1, i2, bary), mat.flags); // HitData skips the color here.
 	}
 	vec3 albedo = albedo_tex.rgb * mat.albedo_color.rgb;
-	vec3 orm = (triplanar ? sample_material_triplanar(mat.orm_texture_idx, triplanar_weights, triplanar_pos, triplanar_ddx, triplanar_ddy, mat.flags) : sample_material_texture_grad(mat.orm_texture_idx, uv, uv_ddx, uv_ddy, mat.flags)).rgb;
+	// Roughness and metallic in the channels BaseMaterial3D reads: the ORM texture's green and blue, or a texture each.
+	vec4 roughness_tex = triplanar ? sample_material_triplanar(mat.orm_texture_idx, triplanar_weights, triplanar_pos, triplanar_ddx, triplanar_ddy, mat.flags) : sample_material_texture_grad(mat.orm_texture_idx, uv, uv_ddx, uv_ddy, mat.flags);
+	vec4 metallic_tex = roughness_tex;
+	if (mat.metallic_texture_idx != mat.orm_texture_idx) {
+		metallic_tex = triplanar ? sample_material_triplanar(mat.metallic_texture_idx, triplanar_weights, triplanar_pos, triplanar_ddx, triplanar_ddy, mat.flags) : sample_material_texture_grad(mat.metallic_texture_idx, uv, uv_ddx, uv_ddy, mat.flags);
+	}
+	// The ORM texture's red channel is its ambient occlusion (MAT_FLAG_AO_ORM).
+	vec3 orm = vec3(roughness_tex.r, material_texture_channel(roughness_tex, (mat.flags >> MAT_ROUGHNESS_CHANNEL_SHIFT) & 7u), material_texture_channel(metallic_tex, (mat.flags >> MAT_METALLIC_CHANNEL_SHIFT) & 7u));
 	float roughness = saturate(orm.g * mat.roughness);
 	float metalness = saturate(orm.b * mat.metallic);
 

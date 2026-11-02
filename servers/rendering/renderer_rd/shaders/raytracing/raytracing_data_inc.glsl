@@ -138,7 +138,7 @@ struct MaterialData {
 	uint ao_texture_idx; // BaseMaterial3D's ambient occlusion texture (MAT_FLAG_AO_TEXTURE).
 	uint ao_channel; // Its channel, 0-3.
 	float ao_light_affect; // With MAT_FLAG_AO_TEXTURE or MAT_FLAG_AO_ORM.
-	uint ao_pad;
+	uint metallic_texture_idx; // BaseMaterial3D's metallic texture, or its ORM texture (material_roughness_metallic()).
 };
 
 #define MAT_FLAG_UV1_TRIPLANAR 8u
@@ -154,6 +154,18 @@ struct MaterialData {
 #define MAT_FLAG_ANISOTROPIC_FILTER 8192u
 #define MAT_FLAG_AO_TEXTURE 16384u
 #define MAT_FLAG_AO_ORM 32768u
+// The channels of the roughness (orm_texture_idx) and metallic (metallic_texture_idx) textures, 3 bits each:
+// 0-3 red to alpha, 4 the mean of red, green and blue (RTTextureChannel).
+#define MAT_ROUGHNESS_CHANNEL_SHIFT 16u
+#define MAT_METALLIC_CHANNEL_SHIFT 19u
+
+/// A texel's channel, as BaseMaterial3D's dot(texel, channel mask) reads it.
+float material_texture_channel(vec4 p_texel, uint p_channel) {
+	if (p_channel == 4u) {
+		return dot(p_texel.rgb, vec3(0.333333));
+	}
+	return p_channel == 0u ? p_texel.r : (p_channel == 1u ? p_texel.g : (p_channel == 2u ? p_texel.b : p_texel.a));
+}
 
 /// BaseMaterial3D's vertex color, as its albedo_tex *= COLOR reads it.
 vec4 material_vertex_color(vec4 p_color, uint p_flags) {

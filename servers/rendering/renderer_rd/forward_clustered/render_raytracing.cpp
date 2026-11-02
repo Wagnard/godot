@@ -2938,7 +2938,7 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 	mat.ao_texture_idx = 0;
 	mat.ao_channel = 0;
 	mat.ao_light_affect = 0.0f;
-	mat.ao_pad = 0;
+	mat.metallic_texture_idx = 0;
 
 	RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
 	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
@@ -2974,14 +2974,54 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 		}
 	}
 
+	// Roughness and metallic as BaseMaterial3D reads them: the ORM texture's green and blue channels, or the roughness
+	// and metallic textures, each in the channel the material picks (white where a texture is not set, as the defaults
+	// of their hints). orm_texture_idx holds the roughness texture then.
 	RID orm_rd = get_material_texture("texture_orm");
 	if (orm_rd.is_valid()) {
 		mat.orm_texture_idx = bindless_block->add_texture(orm_rd);
+		mat.metallic_texture_idx = mat.orm_texture_idx;
+		mat.flags |= (RT_TEXTURE_CHANNEL_GREEN << RT_MAT_ROUGHNESS_CHANNEL_SHIFT) | (RT_TEXTURE_CHANNEL_BLUE << RT_MAT_METALLIC_CHANNEL_SHIFT);
 	} else {
 		RID roughness_rd = get_material_texture("texture_roughness");
 		if (roughness_rd.is_valid()) {
 			mat.orm_texture_idx = bindless_block->add_texture(roughness_rd);
 		}
+		RID metallic_rd = get_material_texture("texture_metallic");
+		if (metallic_rd.is_valid()) {
+			mat.metallic_texture_idx = bindless_block->add_texture(metallic_rd);
+		}
+		// The roughness channel is a constant of the generated code, the metallic one a parameter (a channel mask).
+		uint32_t roughness_channel = RT_TEXTURE_CHANNEL_RED;
+		const String code = material_storage->material_get_shader_code_rt(p_material_rid);
+		if (code.contains("vec4 roughness_texture_channel = vec4(0.0, 1.0, 0.0, 0.0);")) {
+			roughness_channel = RT_TEXTURE_CHANNEL_GREEN;
+		} else if (code.contains("vec4 roughness_texture_channel = vec4(0.0, 0.0, 1.0, 0.0);")) {
+			roughness_channel = RT_TEXTURE_CHANNEL_BLUE;
+		} else if (code.contains("vec4 roughness_texture_channel = vec4(0.0, 0.0, 0.0, 1.0);")) {
+			roughness_channel = RT_TEXTURE_CHANNEL_ALPHA;
+		} else if (code.contains("vec4 roughness_texture_channel = vec4(0.333333, 0.333333, 0.333333, 0.0);")) {
+			roughness_channel = RT_TEXTURE_CHANNEL_GRAYSCALE;
+		}
+		uint32_t metallic_channel = RT_TEXTURE_CHANNEL_RED;
+		const Variant metallic_channel_var = material_storage->material_get_param(p_material_rid, "metallic_texture_channel");
+		Vector4 metallic_mask(1, 0, 0, 0);
+		if (metallic_channel_var.get_type() == Variant::VECTOR4) {
+			metallic_mask = metallic_channel_var;
+		} else if (metallic_channel_var.get_type() == Variant::PLANE) {
+			const Plane p = metallic_channel_var;
+			metallic_mask = Vector4(p.normal.x, p.normal.y, p.normal.z, p.d);
+		}
+		if (metallic_mask.x > 0.0f && metallic_mask.x < 0.5f) {
+			metallic_channel = RT_TEXTURE_CHANNEL_GRAYSCALE;
+		} else if (metallic_mask.y > 0.5f) {
+			metallic_channel = RT_TEXTURE_CHANNEL_GREEN;
+		} else if (metallic_mask.z > 0.5f) {
+			metallic_channel = RT_TEXTURE_CHANNEL_BLUE;
+		} else if (metallic_mask.w > 0.5f) {
+			metallic_channel = RT_TEXTURE_CHANNEL_ALPHA;
+		}
+		mat.flags |= (roughness_channel << RT_MAT_ROUGHNESS_CHANNEL_SHIFT) | (metallic_channel << RT_MAT_METALLIC_CHANNEL_SHIFT);
 	}
 
 	// Emission is a color texture - needs sRGB->linear conversion
