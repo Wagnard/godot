@@ -1099,6 +1099,12 @@ RTSurfaceData *RenderRaytracing::process_deformed_surface(
 	bool data_changed = layout_changed ||
 			entry.cached_change_stamp != p_source.change_stamp ||
 			entry.cached_buffer_id != buffer_id;
+	// The BLAS is built over the mesh's own index buffer: RenderingDevice frees it with that buffer (a surface of the mesh
+	// replaced, or freed with its mesh). A dead BLAS is neither refit nor traced, nor freed again, but built again.
+	if (entry.ptr && entry.ptr->blas.is_valid() && !rd->acceleration_structure_is_valid(entry.ptr->blas)) {
+		entry.ptr->blas = RID();
+		entry.blas_built_once = false;
+	}
 	// Out of view and far: the BLAS keeps the positions it has (and the hit shaders the vertices they match) until the
 	// surface's turn. Only a refit waits: a new or resized surface is built now.
 	const bool defer_update = p_source.defer_update && data_changed && !layout_changed && !p_source.force_rebuild && entry.ptr && entry.blas_built_once && entry.prev_pos_seeded &&
