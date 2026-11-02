@@ -163,7 +163,9 @@ float lights_get_attenuation(LightSample ls, float inv_max_range, float decay) {
 	}
 
 	float distance = sqrt(ls.distance_sq);
-	float atten = min(pow(max(distance, 0.0001), -decay), 1.0);
+	// Not clamped to 1, as raster's get_omni_attenuation() (scene_forward_lights_inc.glsl): nearer than 1 m, a light is
+	// brighter than at 1 m.
+	float atten = pow(max(distance, 0.0001), -decay);
 
 	// Windowed falloff if range is finite (inv_max_range >= 0).
 	if (inv_max_range >= 0.0) {
