@@ -53,6 +53,14 @@ class RendererSceneCull : public RenderingMethod {
 public:
 	RendererSceneRender *scene_render = nullptr;
 
+	// Geometry counterpart of RendererLightStorage::is_shadow_drawn_by().
+	_FORCE_INLINE_ static bool is_shadow_cast_by(RSE::ShadowCastingSetting p_setting, BitField<RSE::ShadowRenderer> p_renderers, RSE::ShadowRenderer p_renderer) {
+		if (p_setting == RSE::SHADOW_CASTING_SETTING_OFF || (p_setting == RSE::SHADOW_CASTING_SETTING_SELF_SHADOWING && p_renderer != RSE::SHADOW_RENDERER_PATH_TRACER)) {
+			return false;
+		}
+		return p_renderers.has_flag(p_renderer);
+	}
+
 	enum {
 		SDFGI_MAX_CASCADES = 8,
 		SDFGI_MAX_REGIONS_PER_CASCADE = 3,
@@ -425,6 +433,10 @@ public:
 		Vector<RID> materials;
 
 		RSE::ShadowCastingSetting cast_shadows;
+		BitField<RSE::ShadowRenderer> shadow_renderers = RSE::SHADOW_RENDERER_ALL;
+		RSE::RTBlasUpdate rt_blas_update = RSE::RT_BLAS_UPDATE_AUTO;
+
+		bool casts_shadow_in(RSE::ShadowRenderer p_renderer) const { return is_shadow_cast_by(cast_shadows, shadow_renderers, p_renderer); }
 
 		uint32_t layer_mask;
 		// Fit in 32 bits.
@@ -902,7 +914,7 @@ public:
 		// Threaded cull: visible particles whose view axis is set once the cull is done (_render_scene()).
 		PagedArray<RID> view_axis_particles;
 
-		// RT-extra: instances/lights inside the camera AABB but outside the view frustum.
+		// RT-extra: instances/lights/decals inside the camera AABB but outside the view frustum.
 		// Used for path tracing TLAS and light gathering only (not rasterized).
 		PagedArray<RenderGeometryInstance *> rt_geometry_instances;
 		PagedArray<RID> rt_light_instances;
@@ -1090,6 +1102,9 @@ public:
 
 	virtual void instance_geometry_set_flag(RID p_instance, RSE::InstanceFlags p_flags, bool p_enabled);
 	virtual void instance_geometry_set_cast_shadows_setting(RID p_instance, RSE::ShadowCastingSetting p_shadow_casting_setting);
+	virtual void instance_geometry_set_shadow_renderers(RID p_instance, BitField<RSE::ShadowRenderer> p_renderers);
+	void _instance_update_shadow_casting(Instance *p_instance);
+	virtual void instance_geometry_set_rt_blas_update(RID p_instance, RSE::RTBlasUpdate p_update);
 	virtual void instance_geometry_set_material_override(RID p_instance, RID p_material);
 	virtual void instance_geometry_set_material_overlay(RID p_instance, RID p_material);
 
@@ -1106,6 +1121,7 @@ public:
 	virtual void mesh_generate_pipelines(RID p_mesh, bool p_background_compilation);
 	virtual uint32_t get_pipeline_compilations(RSE::PipelineSource p_source);
 	virtual uint32_t pathtracing_get_pending_hit_group_count() const;
+	virtual BitField<RSE::RenderingNotReadyReason> get_not_ready_reasons();
 
 	_FORCE_INLINE_ void _update_instance(Instance *p_instance) const;
 	_FORCE_INLINE_ void _update_instance_aabb(Instance *p_instance) const;
@@ -1212,6 +1228,8 @@ public:
 	void _scene_cull(CullData &cull_data, InstanceCullResult &cull_result, uint64_t p_from, uint64_t p_to);
 	static void _scene_particles_set_view_axis(RID p_particles, const Vector3 &p_axis, const Vector3 &p_up_axis);
 	static void _scene_particles_set_view_axis_list(const Array &p_particles, const Vector3 &p_axis, const Vector3 &p_up_axis);
+	// Requests simulation and view sorting for a visible particle system. Returns false when it is inactive.
+	bool _scene_particles_request_process(CullData &p_cull_data, InstanceCullResult &r_cull_result, RID p_particles);
 	_FORCE_INLINE_ bool _visibility_parent_check(const CullData &p_cull_data, const InstanceData &p_instance_data);
 
 	bool _render_reflection_probe_step(Instance *p_instance, int p_step);
@@ -1325,6 +1343,7 @@ public:
 
 	PASS2(environment_set_volumetric_fog_volume_size, int, int)
 	PASS1(environment_set_volumetric_fog_filter_active, bool)
+	PASS1(environment_set_volumetric_fog_sampling, RSE::EnvironmentVolumetricFogSampling)
 
 	// Depth Fog
 	PASS4(environment_set_fog_depth, RID, float, float, float)
@@ -1425,9 +1444,10 @@ public:
 	PASS1(environment_set_sdfgi_frames_to_update_light, RSE::EnvironmentSDFGIFramesToUpdateLight)
 
 	// Pathtracing
-	PASS6(environment_set_pathtracing, RID, bool, int, int, int, RSE::PathtracingDenoiser)
+	PASS7(environment_set_pathtracing, RID, bool, int, int, int, RSE::PathtracingDenoiser, bool)
 
 	PASS1RC(bool, environment_get_pathtracing_enabled, RID)
+	PASS1RC(bool, environment_get_pathtracing_sky_shader_enabled, RID)
 	PASS1RC(int, environment_get_pathtracing_debug_mode, RID)
 	PASS1RC(int, environment_get_pathtracing_samples_per_pixel, RID)
 	PASS1RC(int, environment_get_pathtracing_max_bounces, RID)

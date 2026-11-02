@@ -7205,7 +7205,7 @@ void RenderingDeviceDriverD3D12::command_update_blas(CommandBufferID p_cmd_buffe
 	acceleration_structure_info->build_desc.SourceAccelerationStructureData = 0;
 }
 
-void RenderingDeviceDriverD3D12::command_build_tlas(CommandBufferID p_cmd_buffer, AccelerationStructureID p_acceleration_structure, BufferID p_scratch_buffer, BufferID p_instance_buffer, uint32_t p_instance_offset, uint32_t p_instance_count, VectorView<AccelerationStructureID> p_blases) {
+void RenderingDeviceDriverD3D12::command_build_tlas(CommandBufferID p_cmd_buffer, AccelerationStructureID p_acceleration_structure, BufferID p_scratch_buffer, uint64_t p_scratch_offset, BufferID p_instance_buffer, uint32_t p_instance_offset, uint32_t p_instance_count, VectorView<AccelerationStructureID> p_blases) {
 	CommandBufferInfo *cmd_buffer_info = (CommandBufferInfo *)p_cmd_buffer.id;
 
 	AccelerationStructureInfo *acceleration_structure_info = (AccelerationStructureInfo *)p_acceleration_structure.id;
@@ -7214,7 +7214,8 @@ void RenderingDeviceDriverD3D12::command_build_tlas(CommandBufferID p_cmd_buffer
 
 	acceleration_structure_info->build_desc.Inputs.NumDescs = p_instance_count;
 	acceleration_structure_info->build_desc.Inputs.InstanceDescs = instance_buffer_info->gpu_virtual_address + p_instance_offset;
-	acceleration_structure_info->build_desc.ScratchAccelerationStructureData = scratch_buffer_info->gpu_virtual_address;
+	DEV_ASSERT(p_scratch_offset % D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BYTE_ALIGNMENT == 0);
+	acceleration_structure_info->build_desc.ScratchAccelerationStructureData = scratch_buffer_info->gpu_virtual_address + p_scratch_offset;
 
 	if (!barrier_capabilities.enhanced_barriers_supported) {
 		for (uint32_t i = 0; i < p_blases.size(); i++) {

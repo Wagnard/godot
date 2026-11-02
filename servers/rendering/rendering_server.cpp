@@ -2535,6 +2535,7 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("light_set_distance_fade", "decal", "enabled", "begin", "shadow", "length"), &RenderingServer::light_set_distance_fade);
 	ClassDB::bind_method(D_METHOD("light_set_reverse_cull_face_mode", "light", "enabled"), &RenderingServer::light_set_reverse_cull_face_mode);
 	ClassDB::bind_method(D_METHOD("light_set_shadow_caster_mask", "light", "mask"), &RenderingServer::light_set_shadow_caster_mask);
+	ClassDB::bind_method(D_METHOD("light_set_shadow_renderers", "light", "renderers"), &RenderingServer::light_set_shadow_renderers);
 	ClassDB::bind_method(D_METHOD("light_set_bake_mode", "light", "bake_mode"), &RenderingServer::light_set_bake_mode);
 	ClassDB::bind_method(D_METHOD("light_set_max_sdfgi_cascade", "light", "cascade"), &RenderingServer::light_set_max_sdfgi_cascade);
 
@@ -2586,6 +2587,10 @@ void RenderingServer::_bind_methods() {
 	BIND_ENUM_CONSTANT(RSE::LIGHT_PARAM_TRANSMITTANCE_BIAS);
 	BIND_ENUM_CONSTANT(RSE::LIGHT_PARAM_INTENSITY);
 	BIND_ENUM_CONSTANT(RSE::LIGHT_PARAM_MAX);
+
+	BIND_BITFIELD_FLAG(RSE::SHADOW_RENDERER_RASTERIZER);
+	BIND_BITFIELD_FLAG(RSE::SHADOW_RENDERER_PATH_TRACER);
+	BIND_BITFIELD_FLAG(RSE::SHADOW_RENDERER_ALL);
 
 	BIND_ENUM_CONSTANT(RSE::LIGHT_BAKE_DISABLED);
 	BIND_ENUM_CONSTANT(RSE::LIGHT_BAKE_STATIC);
@@ -2908,6 +2913,7 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("viewport_set_use_hdr_2d", "viewport", "enabled"), &RenderingServer::viewport_set_use_hdr_2d);
 	ClassDB::bind_method(D_METHOD("viewport_set_screen_space_aa", "viewport", "mode"), &RenderingServer::viewport_set_screen_space_aa);
 	ClassDB::bind_method(D_METHOD("viewport_set_use_taa", "viewport", "enable"), &RenderingServer::viewport_set_use_taa);
+	ClassDB::bind_method(D_METHOD("viewport_set_use_pathtracing", "viewport", "enable"), &RenderingServer::viewport_set_use_pathtracing);
 	ClassDB::bind_method(D_METHOD("viewport_set_use_debanding", "viewport", "enable"), &RenderingServer::viewport_set_use_debanding);
 	ClassDB::bind_method(D_METHOD("viewport_set_use_occlusion_culling", "viewport", "enable"), &RenderingServer::viewport_set_use_occlusion_culling);
 	ClassDB::bind_method(D_METHOD("viewport_set_occlusion_rays_per_thread", "rays_per_thread"), &RenderingServer::viewport_set_occlusion_rays_per_thread);
@@ -2991,6 +2997,19 @@ void RenderingServer::_bind_methods() {
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_RENDER_INFO_RT_BLAS_REFITS);
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_RENDER_INFO_RT_TRIANGLES_BUILT);
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_RENDER_INFO_RT_TRIANGLES_REFIT);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_RENDER_INFO_RT_DYNAMIC_REBAKES);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_RENDER_INFO_RT_DYNAMIC_REBAKE_VERTICES);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_RENDER_INFO_RT_CAPTURED_MESHES);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_RENDER_INFO_RT_CAPTURED_VERTICES);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_RENDER_INFO_RT_DYNAMIC_UPDATED);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_RENDER_INFO_RT_DYNAMIC_HELD);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_RENDER_INFO_RT_DYNAMIC_BUDGET_LIMITED);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_RENDER_INFO_RT_PENDING_SURFACES);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_RENDER_INFO_RT_SCRATCH_USED_KB);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_RENDER_INFO_RT_SCRATCH_SIZE_KB);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_RENDER_INFO_RT_SCRATCH_ROLLOVERS);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_RENDER_INFO_RT_CAPTURE_ARENA_USED_KB);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_RENDER_INFO_RT_CAPTURE_ARENA_SIZE_KB);
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_RENDER_INFO_MAX);
 
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_RENDER_INFO_TYPE_VISIBLE);
@@ -3101,7 +3120,7 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("environment_set_fog", "env", "enable", "light_color", "light_energy", "sun_scatter", "density", "height", "height_density", "aerial_perspective", "sky_affect", "fog_mode"), &RenderingServer::environment_set_fog, DEFVAL(RSE::ENV_FOG_MODE_EXPONENTIAL));
 	ClassDB::bind_method(D_METHOD("environment_set_fog_depth", "env", "curve", "begin", "end"), &RenderingServer::environment_set_fog_depth);
 	ClassDB::bind_method(D_METHOD("environment_set_sdfgi", "env", "enable", "cascades", "min_cell_size", "y_scale", "use_occlusion", "bounce_feedback", "read_sky", "energy", "normal_bias", "probe_bias"), &RenderingServer::environment_set_sdfgi);
-	ClassDB::bind_method(D_METHOD("environment_set_pathtracing", "env", "enable", "debug_mode", "samples_per_pixel", "max_bounces", "denoiser"), &RenderingServer::environment_set_pathtracing);
+	ClassDB::bind_method(D_METHOD("environment_set_pathtracing", "env", "enable", "debug_mode", "samples_per_pixel", "max_bounces", "denoiser", "sky_shader_enabled"), &RenderingServer::environment_set_pathtracing);
 	ClassDB::bind_method(D_METHOD("environment_set_pathtracing_culling", "env", "enable", "radius", "angle"), &RenderingServer::environment_set_pathtracing_culling);
 	ClassDB::bind_method(D_METHOD("environment_set_pathtracing_sky_sampling", "env", "enable"), &RenderingServer::environment_set_pathtracing_sky_sampling);
 	ClassDB::bind_method(D_METHOD("environment_set_volumetric_fog", "env", "enable", "density", "albedo", "emission", "emission_energy", "anisotropy", "length", "detail_spread", "gi_inject", "temporal_reprojection", "temporal_reprojection_amount", "ambient_inject", "sky_affect"), &RenderingServer::environment_set_volumetric_fog);
@@ -3116,6 +3135,7 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("environment_set_sdfgi_frames_to_update_light", "frames"), &RenderingServer::environment_set_sdfgi_frames_to_update_light);
 	ClassDB::bind_method(D_METHOD("environment_set_volumetric_fog_volume_size", "size", "depth"), &RenderingServer::environment_set_volumetric_fog_volume_size);
 	ClassDB::bind_method(D_METHOD("environment_set_volumetric_fog_filter_active", "active"), &RenderingServer::environment_set_volumetric_fog_filter_active);
+	ClassDB::bind_method(D_METHOD("environment_set_volumetric_fog_sampling", "sampling"), &RenderingServer::environment_set_volumetric_fog_sampling);
 
 	ClassDB::bind_method(D_METHOD("environment_bake_panorama", "environment", "bake_irradiance", "size"), &RenderingServer::environment_bake_panorama);
 
@@ -3148,6 +3168,12 @@ void RenderingServer::_bind_methods() {
 
 	BIND_ENUM_CONSTANT(RSE::ENV_FOG_MODE_EXPONENTIAL);
 	BIND_ENUM_CONSTANT(RSE::ENV_FOG_MODE_DEPTH);
+
+	BIND_ENUM_CONSTANT(RSE::ENV_VOLUMETRIC_FOG_SAMPLING_TRILINEAR);
+	BIND_ENUM_CONSTANT(RSE::ENV_VOLUMETRIC_FOG_SAMPLING_BICUBIC);
+	BIND_ENUM_CONSTANT(RSE::ENV_VOLUMETRIC_FOG_SAMPLING_DITHER);
+	BIND_ENUM_CONSTANT(RSE::ENV_VOLUMETRIC_FOG_SAMPLING_FAST_NOISE);
+	BIND_ENUM_CONSTANT(RSE::ENV_VOLUMETRIC_FOG_SAMPLING_MAX);
 
 	BIND_ENUM_CONSTANT(RSE::ENV_TONE_MAPPER_LINEAR);
 	BIND_ENUM_CONSTANT(RSE::ENV_TONE_MAPPER_REINHARD);
@@ -3266,6 +3292,8 @@ void RenderingServer::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("instance_geometry_set_flag", "instance", "flag", "enabled"), &RenderingServer::instance_geometry_set_flag);
 	ClassDB::bind_method(D_METHOD("instance_geometry_set_cast_shadows_setting", "instance", "shadow_casting_setting"), &RenderingServer::instance_geometry_set_cast_shadows_setting);
+	ClassDB::bind_method(D_METHOD("instance_geometry_set_shadow_renderers", "instance", "renderers"), &RenderingServer::instance_geometry_set_shadow_renderers);
+	ClassDB::bind_method(D_METHOD("instance_geometry_set_rt_blas_update", "instance", "update"), &RenderingServer::instance_geometry_set_rt_blas_update);
 	ClassDB::bind_method(D_METHOD("instance_geometry_set_material_override", "instance", "material"), &RenderingServer::instance_geometry_set_material_override);
 	ClassDB::bind_method(D_METHOD("instance_geometry_set_material_overlay", "instance", "material"), &RenderingServer::instance_geometry_set_material_overlay);
 	ClassDB::bind_method(D_METHOD("instance_geometry_set_visibility_range", "instance", "min", "max", "min_margin", "max_margin", "fade_mode"), &RenderingServer::instance_geometry_set_visibility_range);
@@ -3309,6 +3337,11 @@ void RenderingServer::_bind_methods() {
 	BIND_ENUM_CONSTANT(RSE::SHADOW_CASTING_SETTING_ON);
 	BIND_ENUM_CONSTANT(RSE::SHADOW_CASTING_SETTING_DOUBLE_SIDED);
 	BIND_ENUM_CONSTANT(RSE::SHADOW_CASTING_SETTING_SHADOWS_ONLY);
+	BIND_ENUM_CONSTANT(RSE::SHADOW_CASTING_SETTING_SELF_SHADOWING);
+
+	BIND_ENUM_CONSTANT(RSE::RT_BLAS_UPDATE_AUTO);
+	BIND_ENUM_CONSTANT(RSE::RT_BLAS_UPDATE_REFIT);
+	BIND_ENUM_CONSTANT(RSE::RT_BLAS_UPDATE_REBUILD);
 
 	BIND_ENUM_CONSTANT(RSE::VISIBILITY_RANGE_FADE_DISABLED);
 	BIND_ENUM_CONSTANT(RSE::VISIBILITY_RANGE_FADE_SELF);
@@ -3587,6 +3620,12 @@ void RenderingServer::_bind_methods() {
 	BIND_ENUM_CONSTANT(RSE::RENDERING_INFO_PIPELINE_COMPILATIONS_DRAW);
 	BIND_ENUM_CONSTANT(RSE::RENDERING_INFO_PIPELINE_COMPILATIONS_SPECIALIZATION);
 
+	ClassDB::bind_method(D_METHOD("get_rendering_not_ready_reasons"), &RenderingServer::get_rendering_not_ready_reasons);
+	BIND_BITFIELD_FLAG(RSE::RENDERING_NOT_READY_PIPELINE_COMPILATION);
+	BIND_BITFIELD_FLAG(RSE::RENDERING_NOT_READY_RT_SHADER_COMPILATION);
+	BIND_BITFIELD_FLAG(RSE::RENDERING_NOT_READY_RT_PENDING_SURFACES);
+	BIND_BITFIELD_FLAG(RSE::RENDERING_NOT_READY_RT_STALE_GEOMETRY);
+
 	BIND_ENUM_CONSTANT(RSE::PIPELINE_SOURCE_CANVAS);
 	BIND_ENUM_CONSTANT(RSE::PIPELINE_SOURCE_MESH);
 	BIND_ENUM_CONSTANT(RSE::PIPELINE_SOURCE_SURFACE);
@@ -3746,6 +3785,7 @@ void RenderingServer::init() {
 	GLOBAL_DEF_RST("rendering/shading/overrides/force_vertex_shading", false);
 	GLOBAL_DEF("rendering/shading/overrides/force_lambert_over_burley", false);
 	GLOBAL_DEF("rendering/shading/overrides/force_lambert_over_burley.mobile", true);
+	GLOBAL_DEF_RST("rendering/shading/overrides/preserve_front_facing_when_mirrored", false);
 
 	GLOBAL_DEF_RST("rendering/driver/depth_prepass/enable", true);
 	GLOBAL_DEF_RST("rendering/driver/depth_prepass/disable_for_vendors", "PowerVR,Mali,Adreno,Apple");
@@ -3830,6 +3870,7 @@ void RenderingServer::init() {
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/environment/volumetric_fog/volume_size", PROPERTY_HINT_RANGE, "16,512,1"), 64);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/environment/volumetric_fog/volume_depth", PROPERTY_HINT_RANGE, "16,512,1"), 64);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/environment/volumetric_fog/use_filter", PROPERTY_HINT_ENUM, "No (Faster),Yes (Higher Quality)"), 1);
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/environment/volumetric_fog/sampling", PROPERTY_HINT_ENUM, "Trilinear (Fastest),Bicubic B-Spline (Smoothest),Temporal Dither (Requires TAA or Upscaler),FAST Noise (Requires TAA or Upscaler)"), 0);
 
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/limits/spatial_indexer/update_iterations_per_frame", PROPERTY_HINT_RANGE, "0,1024,1"), 10);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/limits/spatial_indexer/threaded_cull_minimum_instances", PROPERTY_HINT_RANGE, "32,65536,1"), 1000);

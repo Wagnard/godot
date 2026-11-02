@@ -87,6 +87,8 @@ public:
 	float time;
 	float time_step;
 
+	uint32_t frame_number = 0; ///< Monotonic frame counter, unlike taa_frame_count which wraps with the jitter cycle.
+
 	virtual Transform3D get_cam_transform() const override;
 	virtual Projection get_cam_projection() const override;
 
@@ -113,8 +115,14 @@ private:
 		SCENE_DATA_FLAGS_USE_PANCAKE_SHADOWS = 1 << 6,
 		SCENE_DATA_FLAGS_IN_SHADOW_PASS = 1 << 7, // Only used by Forward+ renderer.
 		SCENE_DATA_FLAGS_USE_DEPTH_FOG = 1 << 8,
+		SCENE_DATA_FLAGS_DEBUG_VOLUMETRIC_FOG = 1 << 9,
+		SCENE_DATA_FLAGS_DEBUG_VOLUMETRIC_FOG_TRANSMITTANCE = 1 << 10,
 		SCENE_DATA_FLAGS_MAX
 	};
+
+	// Must match Environment::RT_DEBUG_VOLUMETRIC_FOG(_TRANSMITTANCE), shared with the path tracer.
+	static constexpr int DEBUG_MODE_VOLUMETRIC_FOG = 25;
+	static constexpr int DEBUG_MODE_VOLUMETRIC_FOG_TRANSMITTANCE = 26;
 
 	// This struct is loaded into Set 1 - Binding 0, populated at start of rendering a frame, must match with shader code
 	struct UBO {
@@ -186,7 +194,8 @@ private:
 
 		float fog_sky_affect;
 		float radiance_normalization; // Scales the radiance octmap to the current background brightness.
-		float _pad_std140[2];
+		uint32_t frame_number;
+		float _pad_std140[1];
 	};
 
 	struct UBODATA {

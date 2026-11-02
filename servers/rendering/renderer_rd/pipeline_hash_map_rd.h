@@ -45,6 +45,9 @@
 
 #define PRINT_PIPELINE_COMPILATION_KEYS 0
 
+// Background pipeline compilations of every PipelineHashMapRD that haven't finished yet.
+inline SafeNumeric<uint32_t> pipeline_hash_map_rd_compilations_in_flight;
+
 template <typename Key, typename CreationClass, typename CreationFunction>
 class PipelineHashMapRD {
 private:
@@ -82,6 +85,7 @@ private:
 		_compile_and_finish(p_key, key_hash);
 	}
 
+	// Runs once per submitted pipeline (in its task or inline), so it ends the compilation counted by compile_pipeline().
 	void _compile_and_finish(const Key &p_key, uint32_t p_key_hash) {
 		(creation_object->*creation_function)(p_key);
 		{
@@ -89,6 +93,7 @@ private:
 			running_compilations.erase(p_key_hash);
 		}
 		running_compilations_condition.notify_all();
+		pipeline_hash_map_rd_compilations_in_flight.decrement();
 	}
 
 	// Compiles a submitted pipeline here if its task hasn't started yet, else waits for the running compilation.
@@ -239,6 +244,7 @@ public:
 #endif
 
 		// Queue a background compilation task.
+		pipeline_hash_map_rd_compilations_in_flight.increment();
 		WorkerThreadPool::TaskID task_id = WorkerThreadPool::get_singleton()->add_template_task(this, &PipelineHashMapRD::_compile_task, p_key, p_high_priority, "PipelineCompilation");
 		compilation_tasks.insert(p_key_hash, task_id);
 	}

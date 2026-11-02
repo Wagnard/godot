@@ -395,6 +395,7 @@ DLSSEffect::DLSSEffect() {
 	shaders.mvec_decode_shader.initialize(modes, "");
 	shaders.mvec_decode_version = shaders.mvec_decode_shader.version_create();
 	shaders.mvec_decode_pipeline = RD::get_singleton()->compute_pipeline_create(shaders.mvec_decode_shader.version_get_shader(shaders.mvec_decode_version, 0));
+	RD::get_singleton()->set_resource_name(shaders.mvec_decode_pipeline, "DLSS Motion Vector Decode Pipeline");
 }
 
 DLSSEffect::~DLSSEffect() {
@@ -732,7 +733,11 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, DLSSCallbackPaylo
 		context->constants.orthographicProjection = sl::Boolean::eFalse;
 		context->constants.reset = p_params.reset_accumulation ? sl::Boolean::eTrue : sl::Boolean::eFalse;
 		sl::Result result = StreamlineContext::get().slSetConstants(context->constants, *p_payload.frame_token, context->viewport);
-		if (result != sl::Result::eOk) {
+		if (result == sl::Result::eErrorDuplicatedConstants) {
+			// Each draw normally gets its own token (get_frame_token_for_draw()); should one still be reused,
+			// Streamline keeps the first constants, and this draw is upscaled with them.
+			WARN_PRINT_ONCE("DLSS viewport drawn more than once per frame token; reusing first constants.");
+		} else if (result != sl::Result::eOk) {
 			ERR_FAIL_MSG("Failed to call streamline slSetConstants. Result: " + String(StreamlineContext::result_to_string(result)));
 		}
 	}
@@ -796,6 +801,16 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, DLSSCallbackPaylo
 		bool wantActivateDLSSG = StreamlineContext::get().dlssg_requested(p_params.dlss_g);
 		bool canActivateDLSSG = StreamlineContext::get().dlssg_delay == 0;
 
+		// DLSS-G presents magenta frames unless Reflex is running alongside it, so it needs both
+		// Reflex and PCL (which provides the latency markers Reflex consumes) to be available.
+		if (wantActivateDLSSG && !(StreamlineContext::get().streamline_capabilities.reflex_available && StreamlineContext::get().streamline_capabilities.pcl_available)) {
+			WARN_PRINT_ONCE("DLSS Frame Generation was requested but Reflex is not available on this system. Frame generation requires Reflex and has been disabled.");
+			wantActivateDLSSG = false;
+		}
+
+		// Reflex has to be turned on before frame generation starts, and stays on for as long as it runs.
+		StreamlineContext::get().reflex_set_required_by_dlssg(wantActivateDLSSG);
+
 		// The runtime refuses more generated frames than the device reports, so the count is clamped.
 		uint32_t wantFrames = MAX(1, p_params.dlss_g_frames);
 		// Only queried when applying a value: the query also resets the presented frames counter.
@@ -842,7 +857,12 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, DLSSCallbackPaylo
 			}
 
 			StreamlineContext::get().dlssg_viewport = sl::ViewportHandle(-1);
+			StreamlineContext::get().dlssg_last_status = 0;
 		}
+
+		// Wait for Reflex to be running before starting frame generation, otherwise the first
+		// frames are presented as magenta. This costs at most one frame.
+		canActivateDLSSG = canActivateDLSSG && StreamlineContext::get().reflex_is_running();
 
 		// Enable new DLSS-G context if needed. Wait a few frames for the HUD-less color and UI alpha,
 		// so DLSS-G starts with UI recomposition rather than being restarted for it.
@@ -867,6 +887,11 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, DLSSCallbackPaylo
 			StreamlineContext::get().dlssg_viewport = context->viewport;
 			StreamlineContext::get().dlssg_frames = wantFrames;
 			StreamlineContext::get().dlssg_ui_recomposition = wantUiRecomposition;
+		}
+
+		// Report why frame generation is failing instead of silently presenting magenta frames.
+		if (StreamlineContext::get().dlssg_viewport == context->viewport) {
+			StreamlineContext::get().dlssg_report_status(context->viewport);
 		}
 	}
 

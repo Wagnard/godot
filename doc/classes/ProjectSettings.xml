@@ -3003,6 +3003,10 @@
 			Scales the distance over which samples are taken for subsurface scattering effect. Changing this does not impact performance, but higher values will result in significant artifacts as the samples will become obviously spread out. A lower value results in a smaller spread of scattered light. See also [member rendering/environment/subsurface_scattering/subsurface_scattering_depth_scale].
 			[b]Note:[/b] This property is only read when the project starts. To set the subsurface scattering scale at runtime, call [method RenderingServer.sub_surface_scattering_set_scale] instead.
 		</member>
+		<member name="rendering/environment/volumetric_fog/sampling" type="int" setter="" getter="" default="0">
+			Filter used when the scene, sky and path tracer read the volumetric fog froxel buffer. [b]Trilinear[/b] is the fastest, but bright, low-resolution fog can show blocky creases at froxel borders. [b]Bicubic B-Spline[/b] smooths those creases across the screen at the cost of 4 texture reads per lookup. [b]Temporal Dither[/b] jitters each pixel's lookup by up to half a froxel across the screen and in depth with a 4x4 Bayer pattern, which also hides the banding between depth slices; it needs TAA, FSR2, DLSS or another temporal resolve to average the pattern out. [b]FAST Noise[/b] does the same with filter-adapted spatiotemporal noise, optimized for how temporal resolves blend history, and converges with less residual noise. Both patterns are laid out over render pixels, so every neighborhood the upscaler sees holds the full range, and are shifted along a low-discrepancy sequence that never repeats with the camera jitter, so they average out at any render scale. Both read 2 mirrored taps per lookup, which cancels most of the per-frame noise.
+			[b]Note:[/b] Changes apply on the next frame, including when set at runtime with [method set_setting]. Switching recompiles the scene shaders, which can cause a brief stutter. [method RenderingServer.environment_set_volumetric_fog_sampling] overrides this setting until it changes again.
+		</member>
 		<member name="rendering/environment/volumetric_fog/use_filter" type="int" setter="" getter="" default="1">
 			Enables filtering of the volumetric fog effect prior to integration. This substantially blurs the fog which reduces fine details but also smooths out harsh edges and aliasing artifacts. Disable when more detail is required.
 		</member>
@@ -3334,7 +3338,7 @@
 			If [code]true[/code], enables NVIDIA Shader Execution Reordering in the path tracer. SER reorders ray tracing shader invocations at runtime to improve GPU occupancy and reduce divergence between threads executing different materials. This can significantly improve path tracing performance on NVIDIA Ada Lovelace and later GPUs. Has no effect on hardware that does not support SER, nor where the rendering device cannot use it (Direct3D 12 for now).
 		</member>
 		<member name="rendering/pathtracing/use_simple_shadows" type="bool" setter="" getter="" default="false">
-			If [code]true[/code], shadow rays use Ray Queries instead of fully traced rays. Ray Queries are significantly cheaper but rely on a quick alpha texture fetch, which can produce incorrect shadows on materials with generated/animated alpha textures. Fully traced shadow rays are more accurate but incur a higher GPU cost.
+			If [code]true[/code], shadow rays use Ray Queries instead of fully traced rays. Ray Queries are significantly cheaper but rely on a quick albedo texture fetch. Both paths use stochastic alpha coverage and tint transmitted light with the transparent material's albedo; generated or animated custom material outputs are more accurate with fully traced shadow rays.
 			[b]Note:[/b] Only has an effect when path tracing is enabled on the active [Environment].
 			[b]Note:[/b] A Ray Query cannot run the intersection code of an [RTProceduralInstance3D]: while the scene holds any, the shadow rays that the Ray Query lets through are traced again through the pipeline against procedural geometry only.
 		</member>
@@ -3382,6 +3386,9 @@
 		</member>
 		<member name="rendering/renderer/rendering_method.web" type="String" setter="" getter="" default="&quot;gl_compatibility&quot;">
 			Override for [member rendering/renderer/rendering_method] on web.
+		</member>
+		<member name="rendering/rendering_device/acceleration_structure/max_scratch_buffer_size_mb" type="int" setter="" getter="" default="256">
+			The maximum size in megabytes of the scratch buffer shared by acceleration structures built together in one batch, as the path tracer does. Builds take consecutive ranges of it. The buffer starts small and doubles whenever the rest is too small, until it reaches this size; after that, the next build waits for the previous ones and starts over at the beginning. Larger values let more builds run concurrently. A single build that needs more than this grows the buffer to fit and prints a warning.
 		</member>
 		<member name="rendering/rendering_device/d3d12/agility_sdk_version" type="int" setter="" getter="" default="619">
 			Version code of the [url=https://devblogs.microsoft.com/directx/directx12agility/]Direct3D 12 Agility SDK[/url] to use ([code]D3D12SDKVersion[/code]). This must match the [i]minor[/i] version that is installed next to the editor binary and in the export templates directory for the current editor version. For example, if you have [code]1.618.5[/code] installed, you need to input [code]618[/code] here.
@@ -3456,6 +3463,9 @@
 		<member name="rendering/rendering_device/pipeline_cache/enable" type="bool" setter="" getter="" default="true">
 			Enable the pipeline cache that is saved to disk if the graphics API supports it.
 			[b]Note:[/b] This property is unable to control the pipeline caching the GPU driver itself does. Only turn this off along with deleting the contents of the driver's cache if you wish to simulate the experience a user will get when starting the game for the first time.
+		</member>
+		<member name="rendering/rendering_device/pipeline_cache/max_size_mb" type="int" setter="" getter="" default="1024">
+			Maximum size of the pipeline cache on disk. The cache grows with every new pipeline and is never pruned, so a larger cache file is discarded at startup and rebuilt, and saving stops once the cache grows past this size. Capped below 2 GiB, which the cache format cannot represent.
 		</member>
 		<member name="rendering/rendering_device/pipeline_cache/save_chunk_size_mb" type="float" setter="" getter="" default="3.0">
 			Determines at which interval pipeline cache is saved to disk. The lower the value, the more often it is saved.
@@ -3540,6 +3550,10 @@
 		<member name="rendering/shading/overrides/force_vertex_shading" type="bool" setter="" getter="" default="false">
 			If [code]true[/code], forces vertex shading for all rendering. This can increase performance a lot, but also reduces quality immensely. Can be used to optimize performance on low-end mobile devices.
 		</member>
+		<member name="rendering/shading/overrides/preserve_front_facing_when_mirrored" type="bool" setter="" getter="" default="false">
+			If [code]true[/code], [code]FRONT_FACING[/code] follows the mesh winding on instances with a negative scale (or seen through a mirrored camera), in both the rasterizer and the path tracer. If [code]false[/code], it follows the on-screen winding, which flips the normals of double-sided and front-culled materials on mirrored instances.
+			[b]Note:[/b] This setting is only read on startup. Only supported by the Forward+ renderer.
+		</member>
 		<member name="rendering/streamline/dlss_preset" type="String" setter="" getter="" default="&quot;?&quot;">
 			The default NVIDIA DLSS Super Resolution preset to use.
 		</member>
@@ -3554,6 +3568,7 @@
 		</member>
 		<member name="rendering/streamline/reflex_mode" type="int" setter="" getter="" default="0">
 			If [code]1[/code], enables NVIDIA Reflex, which reduces latency by rendering just before vertical sync. When the value is set to 2, will also enable low latency boost.
+			[b]Note:[/b] Reflex is required by DLSS Frame Generation. When [member Viewport.frame_generation] is enabled and this setting is [code]0[/code], Reflex is automatically turned on in low latency mode.
 		</member>
 		<member name="rendering/streamline/streamline_imgui" type="bool" setter="" getter="" default="false">
 			If [code]1[/code], enables Streamline ImgUI Plugin. Useful for debugging purposes.

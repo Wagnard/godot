@@ -153,6 +153,8 @@ RID BindlessBlock::get_secondary_uniform_set(RID p_shader, uint32_t p_set_index,
 }
 
 RID BindlessBlock::_create_uniform_set(RID p_shader, uint32_t p_set_index) {
+	ERR_FAIL_COND_V_MSG(!is_initialized(), RID(), "BindlessBlock not initialized.");
+
 	if (_scrub_dead_textures()) {
 		textures_version++;
 	}

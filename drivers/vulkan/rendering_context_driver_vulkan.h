@@ -41,6 +41,8 @@
 #define VK_TRACK_DEVICE_MEMORY
 #endif
 
+#include "drivers/vulkan/rt_validation_tracker.h"
+
 #include <drivers/vulkan/godot_vulkan.h>
 
 class RenderingContextDriverVulkan : public RenderingContextDriver {
@@ -113,6 +115,7 @@ private:
 #if defined(USE_VOLK) && defined(STREAMLINE_ENABLED) && defined(_WIN32)
 	PFN_vkGetInstanceProcAddr loader_get_instance_proc_addr = nullptr; // vulkan-1.dll's, under Streamline's interposer.
 #endif
+	RTValidationTracker rt_validation_tracker;
 
 	Error _initialize_vulkan_version();
 	void _register_requested_instance_extension(const CharString &p_extension_name, bool p_required);
@@ -190,6 +193,7 @@ public:
 	// The main device is created without Streamline (RenderingDeviceDriverVulkan::initialize()): volk and functions are
 	// reloaded from the Vulkan loader instead of Streamline's interposer, then Streamline is shut down.
 	void shutdown_streamline();
+	RTValidationTracker &rt_validation_tracker_get();
 
 	static VkAllocationCallbacks *get_allocation_callbacks(VkObjectType p_type);
 

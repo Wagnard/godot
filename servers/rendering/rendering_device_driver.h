@@ -792,6 +792,9 @@ public:
 			uint32_t opacity_micromap_base_triangle;
 			const OpacityMicromapUsage *opacity_micromap_usages;
 			uint32_t opacity_micromap_usage_count;
+			// An optional 3x4 row-major affine transform applied to the vertices (16-byte aligned offset).
+			BufferID transform_buffer;
+			uint32_t transform_offset;
 		};
 
 		// Procedural geometry: each AABB is two float3 (min, max), packed
@@ -829,6 +832,7 @@ public:
 	virtual void acceleration_structure_instance_write(uint8_t *r_driver_instance, const AccelerationStructureInstance &p_instance) = 0;
 	virtual void acceleration_structure_free(AccelerationStructureID p_acceleration_structure) = 0;
 	virtual uint32_t acceleration_structure_get_scratch_size_bytes(AccelerationStructureID p_acceleration_structure) = 0;
+	virtual void acceleration_structure_debug_record_build(AccelerationStructureID p_acceleration_structure, bool p_update, uint64_t p_frame) {}
 
 	// An opacity micromap of the entries p_usages counts, described in p_triangle_buffer (8 bytes each) with their states in
 	// p_data_buffer (buffers made with BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT). Freed with
@@ -867,7 +871,9 @@ public:
 	// In-place refit of a BLAS previously built with ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT.
 	// Geometry topology / counts must be unchanged; only vertex positions may differ.
 	virtual void command_update_blas(CommandBufferID p_cmd_buffer, AccelerationStructureID p_acceleration_structure, BufferID p_scratch_buffer, uint64_t p_scratch_offset) = 0;
-	virtual void command_build_tlas(CommandBufferID p_cmd_buffer, AccelerationStructureID p_acceleration_structure, BufferID p_scratch_buffer, BufferID p_instance_buffer, uint32_t p_instance_offset, uint32_t p_instance_count, VectorView<AccelerationStructureID> p_blases) = 0;
+	// p_blases: the BLASes the instances reference, for drivers that must transition them (legacy D3D12 barriers); may be empty
+	// when the caller orders the builds itself (RenderingDevice::acceleration_structure_build_batch()).
+	virtual void command_build_tlas(CommandBufferID p_cmd_buffer, AccelerationStructureID p_acceleration_structure, BufferID p_scratch_buffer, uint64_t p_scratch_offset, BufferID p_instance_buffer, uint32_t p_instance_offset, uint32_t p_instance_count, VectorView<AccelerationStructureID> p_blases) = 0;
 	virtual void command_build_opacity_micromap(CommandBufferID p_cmd_buffer, AccelerationStructureID p_opacity_micromap, BufferID p_scratch_buffer, uint64_t p_scratch_offset) {}
 	virtual void command_bind_raytracing_pipeline(CommandBufferID p_cmd_buffer, RaytracingPipelineID p_pipeline) = 0;
 	virtual void command_bind_raytracing_uniform_set(CommandBufferID p_cmd_buffer, UniformSetID p_uniform_set, ShaderID p_shader, uint32_t p_set_index) = 0;
@@ -925,7 +931,7 @@ public:
 	/****************/
 	virtual void command_insert_breadcrumb(CommandBufferID p_cmd_buffer, uint32_t p_data) = 0;
 
-	/// Returns the underlying native command buffer handle (e.g. ID3D12GraphicsCommandList* or VkCommandBuffer).
+	// Returns the underlying native command buffer handle (e.g. ID3D12GraphicsCommandList* or VkCommandBuffer).
 	virtual void *command_buffer_get_native_handle(CommandBufferID p_cmd_buffer) { return nullptr; }
 	// A driver callback records on the native command list and may leave its own state bound. A driver that skips
 	// redundant binds must forget what it last bound here.

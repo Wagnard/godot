@@ -64,6 +64,14 @@ static float get_halton_value(int p_index, int p_base) {
 }
 #endif // _3D_DISABLED
 
+static void _geometry_instance_set_shadow_casting(RenderGeometryInstance *p_geometry_instance, const RendererSceneCull::Instance *p_instance) {
+	const RSE::ShadowCastingSetting setting = p_instance->cast_shadows;
+	p_geometry_instance->set_cast_double_sided_shadows(setting == RSE::SHADOW_CASTING_SETTING_DOUBLE_SIDED);
+	p_geometry_instance->set_rt_shadow_caster(p_instance->casts_shadow_in(RSE::SHADOW_RENDERER_PATH_TRACER));
+	p_geometry_instance->set_rt_shadows_only(setting == RSE::SHADOW_CASTING_SETTING_SHADOWS_ONLY);
+	p_geometry_instance->set_rt_self_shadowing(setting == RSE::SHADOW_CASTING_SETTING_SELF_SHADOWING);
+}
+
 /* EVENT QUEUING */
 
 void RendererSceneCull::tick() {
@@ -746,9 +754,10 @@ void RendererSceneCull::instance_set_base(RID p_instance, RID p_base) {
 				geom->geometry_instance->set_use_dynamic_gi(instance->dynamic_gi);
 				geom->geometry_instance->set_use_lightmap(RID(), instance->lightmap_uv_scale, instance->lightmap_slice_index);
 				geom->geometry_instance->set_instance_shader_uniforms_offset(instance->instance_uniforms.location());
-				geom->geometry_instance->set_cast_double_sided_shadows(instance->cast_shadows == RSE::SHADOW_CASTING_SETTING_DOUBLE_SIDED);
+				_geometry_instance_set_shadow_casting(geom->geometry_instance, instance);
 				geom->geometry_instance->set_rt_cast_shadows_setting(instance->cast_shadows);
 				geom->geometry_instance->set_pathtracing_rasterized(instance->pathtracing_rasterized);
+				geom->geometry_instance->set_rt_blas_update(instance->rt_blas_update);
 				if (instance->lightmap_sh.size() == 9) {
 					geom->geometry_instance->set_lightmap_capture(instance->lightmap_sh.ptr());
 				}
@@ -1363,32 +1372,54 @@ void RendererSceneCull::instance_geometry_set_cast_shadows_setting(RID p_instanc
 	ERR_FAIL_NULL(instance);
 
 	instance->cast_shadows = p_shadow_casting_setting;
+	_instance_update_shadow_casting(instance);
+}
 
-	if (instance->scenario && instance->array_index >= 0) {
-		InstanceData &idata = instance->scenario->instance_data[instance->array_index];
+void RendererSceneCull::instance_geometry_set_shadow_renderers(RID p_instance, BitField<RSE::ShadowRenderer> p_renderers) {
+	Instance *instance = instance_owner.get_or_null(p_instance);
+	ERR_FAIL_NULL(instance);
 
-		if (instance->cast_shadows != RSE::SHADOW_CASTING_SETTING_OFF) {
+	instance->shadow_renderers = uint32_t(p_renderers) & RSE::SHADOW_RENDERER_ALL;
+	_instance_update_shadow_casting(instance);
+}
+
+void RendererSceneCull::_instance_update_shadow_casting(Instance *p_instance) {
+	if (p_instance->scenario && p_instance->array_index >= 0) {
+		InstanceData &idata = p_instance->scenario->instance_data[p_instance->array_index];
+
+		if (p_instance->casts_shadow_in(RSE::SHADOW_RENDERER_RASTERIZER)) {
 			idata.flags |= InstanceData::FLAG_CAST_SHADOWS;
 		} else {
 			idata.flags &= ~InstanceData::FLAG_CAST_SHADOWS;
 		}
 
-		if (instance->cast_shadows == RSE::SHADOW_CASTING_SETTING_SHADOWS_ONLY) {
+		if (p_instance->cast_shadows == RSE::SHADOW_CASTING_SETTING_SHADOWS_ONLY) {
 			idata.flags |= InstanceData::FLAG_CAST_SHADOWS_ONLY;
 		} else {
 			idata.flags &= ~InstanceData::FLAG_CAST_SHADOWS_ONLY;
 		}
 	}
 
-	if ((1 << instance->base_type) & RSE::INSTANCE_GEOMETRY_MASK && instance->base_data) {
-		InstanceGeometryData *geom = static_cast<InstanceGeometryData *>(instance->base_data);
+	if ((1 << p_instance->base_type) & RSE::INSTANCE_GEOMETRY_MASK && p_instance->base_data) {
+		InstanceGeometryData *geom = static_cast<InstanceGeometryData *>(p_instance->base_data);
 		ERR_FAIL_NULL(geom->geometry_instance);
 
-		geom->geometry_instance->set_cast_double_sided_shadows(instance->cast_shadows == RSE::SHADOW_CASTING_SETTING_DOUBLE_SIDED);
-		geom->geometry_instance->set_rt_cast_shadows_setting(instance->cast_shadows);
+		_geometry_instance_set_shadow_casting(geom->geometry_instance, p_instance);
+		geom->geometry_instance->set_rt_cast_shadows_setting(p_instance->cast_shadows);
 	}
 
-	_instance_queue_update(instance, false, true);
+	_instance_queue_update(p_instance, false, true);
+}
+
+void RendererSceneCull::instance_geometry_set_rt_blas_update(RID p_instance, RSE::RTBlasUpdate p_update) {
+	Instance *instance = instance_owner.get_or_null(p_instance);
+	ERR_FAIL_NULL(instance);
+	ERR_FAIL_INDEX(p_update, RSE::RT_BLAS_UPDATE_REBUILD + 1);
+
+	instance->rt_blas_update = p_update;
+	if ((1 << instance->base_type) & RSE::INSTANCE_GEOMETRY_MASK && instance->base_data) {
+		static_cast<InstanceGeometryData *>(instance->base_data)->geometry_instance->set_rt_blas_update(p_update);
+	}
 }
 
 void RendererSceneCull::instance_geometry_set_material_override(RID p_instance, RID p_material) {
@@ -1638,6 +1669,10 @@ uint32_t RendererSceneCull::pathtracing_get_pending_hit_group_count() const {
 	return scene_render->pathtracing_get_pending_hit_group_count();
 }
 
+BitField<RSE::RenderingNotReadyReason> RendererSceneCull::get_not_ready_reasons() {
+	return scene_render->get_not_ready_reasons();
+}
+
 void RendererSceneCull::instance_geometry_get_shader_parameter_list(RID p_instance, List<PropertyInfo> *p_parameters) const {
 	ERR_FAIL_NULL(p_parameters);
 	const Instance *instance = instance_owner.get_or_null(p_instance);
@@ -1868,7 +1903,7 @@ void RendererSceneCull::_update_instance(Instance *p_instance) const {
 			//always dirty when added
 			idata.flags |= InstanceData::FLAG_REFLECTION_PROBE_DIRTY;
 		}
-		if (p_instance->cast_shadows != RSE::SHADOW_CASTING_SETTING_OFF) {
+		if (p_instance->casts_shadow_in(RSE::SHADOW_RENDERER_RASTERIZER)) {
 			idata.flags |= InstanceData::FLAG_CAST_SHADOWS;
 		}
 		if (p_instance->cast_shadows == RSE::SHADOW_CASTING_SETTING_SHADOWS_ONLY) {
@@ -3093,25 +3128,7 @@ void RendererSceneCull::_scene_cull(CullData &cull_data, InstanceCullResult &cul
 					if (base_type == RSE::INSTANCE_MESH) {
 						mesh_visible = true;
 					} else if (base_type == RSE::INSTANCE_PARTICLES) {
-						//particles visible? process them
-						if (RSG::particles_storage->particles_is_inactive(idata.base_rid)) {
-							//but if nothing is going on, don't do it.
-							keep = false;
-						} else {
-							cull_data.cull->lock.lock();
-							RSG::particles_storage->particles_request_process(idata.base_rid);
-							cull_data.cull->lock.unlock();
-
-							if (cull_data.threaded) {
-								// Queued by _render_scene() in one command once the cull is done, so the cull threads
-								// do not contend on the command queue's lock.
-								cull_result.view_axis_particles.push_back(idata.base_rid);
-							} else {
-								RS::get_singleton()->call_on_render_thread(callable_mp_static(&RendererSceneCull::_scene_particles_set_view_axis).bind(idata.base_rid, -cull_data.cam_transform.basis.get_column(2).normalized(), cull_data.cam_transform.basis.get_column(1).normalized()));
-							}
-							//particles visible? request redraw
-							RenderingServerDefault::redraw_request();
-						}
+						keep = _scene_particles_request_process(cull_data, cull_result, idata.base_rid);
 					}
 
 					if (idata.parent_array_index != -1) {
@@ -3448,6 +3465,25 @@ void RendererSceneCull::_scene_cull(CullData &cull_data, InstanceCullResult &cul
 	}
 }
 
+bool RendererSceneCull::_scene_particles_request_process(CullData &p_cull_data, InstanceCullResult &r_cull_result, RID p_particles) {
+	if (RSG::particles_storage->particles_is_inactive(p_particles)) {
+		return false;
+	}
+	p_cull_data.cull->lock.lock();
+	RSG::particles_storage->particles_request_process(p_particles);
+	p_cull_data.cull->lock.unlock();
+
+	if (p_cull_data.threaded) {
+		// Queued by _render_scene() in one command once the cull is done, so the cull threads do not contend on the
+		// command queue's lock.
+		r_cull_result.view_axis_particles.push_back(p_particles);
+	} else {
+		RS::get_singleton()->call_on_render_thread(callable_mp_static(&RendererSceneCull::_scene_particles_set_view_axis).bind(p_particles, -p_cull_data.cam_transform.basis.get_column(2).normalized(), p_cull_data.cam_transform.basis.get_column(1).normalized()));
+	}
+	RenderingServerDefault::redraw_request();
+	return true;
+}
+
 void RendererSceneCull::_scene_particles_set_view_axis(RID p_particles, const Vector3 &p_axis, const Vector3 &p_up_axis) {
 	RSG::particles_storage->particles_set_view_axis(p_particles, p_axis, p_up_axis);
 }
@@ -3517,8 +3553,8 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 	cull.frustum = Frustum(planes);
 
 	// RT: build wider AABB cull volume for TLAS and light gathering.
-	cull.rt_enabled = p_environment.is_valid() &&
-			scene_render->environment_get_pathtracing_enabled(p_environment);
+	// The same test as the path tracer's own (RenderForwardClusteredPT::_render_scene()): reflection probes are rasterized.
+	cull.rt_enabled = p_reflection_probe.is_null() && p_environment.is_valid() && scene_render->environment_get_pathtracing_enabled(p_environment);
 	if (cull.rt_enabled) {
 		float z_far = p_camera_data->main_projection.get_z_far();
 		Vector3 cam_origin = p_camera_data->main_transform.origin;
@@ -3709,6 +3745,8 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 		for (uint32_t i = 0; i < (uint32_t)scene_cull_result.lights.size(); i++) {
 			Instance *ins = scene_cull_result.lights[i];
 
+			// Path traced, the shadow maps are still drawn for the volumetric fog and for a transparent pass that does not
+			// trace its shadows; a map left undrawn stays dirty (fog_reads_map below), so raster redraws it later.
 			if (!p_shadow_atlas.is_valid()) {
 				continue;
 			}
@@ -3932,8 +3970,13 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 		prev_camera_data = RSG::viewport->viewport_get_prev_camera_data(p_viewport);
 	}
 
+	RendererSceneRender::RTCullData rt_cull;
+	rt_cull.instances = &scene_cull_result.rt_geometry_instances;
+	rt_cull.lights = &scene_cull_result.rt_light_instances;
+	rt_cull.decals = &scene_cull_result.rt_decal_instances;
+
 	RENDER_TIMESTAMP("Render 3D Scene");
-	scene_render->render_scene(p_render_buffers, p_camera_data, prev_camera_data, scene_cull_result.geometry_instances, scene_cull_result.light_instances, scene_cull_result.reflections, scene_cull_result.voxel_gi_instances, scene_cull_result.decals, scene_cull_result.lightmaps, scene_cull_result.fog_volumes, p_environment, camera_attributes, p_compositor, p_shadow_atlas, occluders_tex, p_reflection_probe.is_valid() ? RID() : scenario->reflection_atlas, p_reflection_probe, p_reflection_probe_pass, p_screen_mesh_lod_threshold, render_shadow_data, max_shadows_used, render_sdfgi_data, cull.sdfgi.region_count, p_window_output_max_value, &sdfgi_update_data, r_render_info, &scene_cull_result.rt_geometry_instances, &scene_cull_result.rt_light_instances, &scene_cull_result.rt_decal_instances);
+	scene_render->render_scene(p_render_buffers, p_camera_data, prev_camera_data, scene_cull_result.geometry_instances, scene_cull_result.light_instances, scene_cull_result.reflections, scene_cull_result.voxel_gi_instances, scene_cull_result.decals, scene_cull_result.lightmaps, scene_cull_result.fog_volumes, p_environment, camera_attributes, p_compositor, p_shadow_atlas, occluders_tex, p_reflection_probe.is_valid() ? RID() : scenario->reflection_atlas, p_reflection_probe, p_reflection_probe_pass, p_screen_mesh_lod_threshold, render_shadow_data, max_shadows_used, render_sdfgi_data, cull.sdfgi.region_count, p_window_output_max_value, &sdfgi_update_data, r_render_info, &rt_cull, p_viewport);
 
 	if (p_viewport.is_valid()) {
 		RSG::viewport->viewport_set_prev_camera_data(p_viewport, p_camera_data);
@@ -4426,7 +4469,7 @@ void RendererSceneCull::_update_dirty_instance(Instance *p_instance) const {
 
 			p_instance->instance_uniforms.materials_start();
 
-			if (p_instance->cast_shadows == RSE::SHADOW_CASTING_SETTING_OFF) {
+			if (!p_instance->casts_shadow_in(RSE::SHADOW_RENDERER_RASTERIZER)) {
 				can_cast_shadows = false;
 			}
 

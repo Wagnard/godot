@@ -47,6 +47,10 @@
 #include "servers/xr/xr_server.h"
 #endif
 
+#ifdef STREAMLINE_ENABLED
+#include "drivers/streamline/streamline_context.h"
+#endif
+
 // careful, these may run in different threads than the rendering server
 
 int RenderingServerDefault::changes = 0;
@@ -347,6 +351,16 @@ uint64_t RenderingServerDefault::get_rendering_info(RSE::RenderingInfo p_info) {
 
 uint32_t RenderingServerDefault::pathtracing_get_pending_hit_group_count() const {
 	return RSG::scene->pathtracing_get_pending_hit_group_count();
+}
+
+BitField<RSE::RenderingNotReadyReason> RenderingServerDefault::get_rendering_not_ready_reasons() {
+	if (Thread::get_caller_id() != server_thread) {
+		BitField<RSE::RenderingNotReadyReason> ret;
+		command_queue.push_and_ret(RSG::scene, &RenderingMethod::get_not_ready_reasons, &ret);
+		return ret;
+	}
+	command_queue.flush_if_pending();
+	return RSG::scene->get_not_ready_reasons();
 }
 
 RenderingDeviceEnums::DeviceType RenderingServerDefault::get_video_adapter_type() const {

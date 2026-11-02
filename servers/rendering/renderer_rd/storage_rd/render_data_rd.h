@@ -72,6 +72,8 @@ public:
 
 	uint32_t directional_light_count = 0;
 	bool directional_light_soft_shadows = false;
+	bool shadows_from_ray_queries = false;
+	RSE::ShadowRenderer shadow_renderer = RSE::SHADOW_RENDERER_RASTERIZER; ///< Whose Light3D shadow toggle the light buffers follow.
 
 	bool lightmap_bicubic_filter = false;
 
@@ -82,6 +84,7 @@ public:
 	/* Viewport data */
 	bool transparent_bg = false;
 	Rect2i render_region;
+	RID viewport;
 
 	/* Shadow data */
 	const RendererSceneRender::RenderShadowData *render_shadows = nullptr;

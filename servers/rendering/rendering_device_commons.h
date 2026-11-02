@@ -1068,6 +1068,8 @@ public:
 		SUPPORTS_RAY_QUERY,
 		SUPPORTS_RAYTRACING_PIPELINE,
 		SUPPORTS_HDR_OUTPUT,
+		SUPPORTS_SHADER_DEVICE_CLOCK,
+		SUPPORTS_VERTEX_PIPELINE_STORES,
 		// A vertex shader may choose the layer of a layered framebuffer it renders to (gl_Layer). Not exposed to scripts.
 		SUPPORTS_SHADER_OUTPUT_LAYER,
 		// Ray tracing shaders may reorder invocations (hit objects; VK_EXT_ray_tracing_invocation_reorder). Not exposed to scripts.

@@ -83,6 +83,13 @@ static bool _fsr3_upscaler_supported() {
 	return false;
 }
 
+// No RenderingDevice exists under the Compatibility renderer.
+static void _set_gpu_label_prefix(const String &p_prefix) {
+	if (RD::get_singleton()) {
+		RD::get_singleton()->draw_command_set_label_prefix(p_prefix);
+	}
+}
+
 static Transform2D _canvas_get_transform(RendererViewport::Viewport *p_viewport, RendererCanvasCull::Canvas *p_canvas, RendererViewport::Viewport::CanvasData *p_canvas_data, const Vector2 &p_vp_size) {
 	Transform2D xf = p_viewport->global_transform;
 
@@ -307,6 +314,15 @@ void RendererViewport::_configure_3d_render_buffers(Viewport *p_viewport) {
 					render_height = target_height;
 					break;
 			}
+
+#ifdef STREAMLINE_ENABLED
+			if (scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_DLSS) {
+				if (StreamlineContext::get().dlss_clamp_render_size(target_width, target_height, render_width, render_height)) {
+					WARN_PRINT_ONCE(vformat("DLSS does not support the requested 3D resolution scale. Clamping the internal resolution to %dx%d.", render_width, render_height));
+					scaling_3d_scale = (float)render_width / (float)target_width;
+				}
+			}
+#endif
 
 			uint32_t jitter_phase_count = 0;
 			if (scaling_type == RSE::VIEWPORT_SCALING_3D_TYPE_TEMPORAL) {
@@ -924,6 +940,7 @@ void RendererViewport::draw_viewports(bool p_swap_buffers) {
 		}
 
 		RENDER_TIMESTAMP("> Render Viewport " + itos(i));
+		_set_gpu_label_prefix(vp->debug_name.is_empty() ? "Viewport " + itos(i) : vp->debug_name);
 
 		RSG::texture_storage->render_target_set_as_unused(vp->render_target);
 #ifndef XR_DISABLED
@@ -1010,6 +1027,7 @@ void RendererViewport::draw_viewports(bool p_swap_buffers) {
 			vp->update_mode = RSE::VIEWPORT_UPDATE_DISABLED;
 		}
 
+		_set_gpu_label_prefix(String());
 		RENDER_TIMESTAMP("< Render Viewport " + itos(i));
 
 		// 3D render info.
@@ -1534,6 +1552,18 @@ void RendererViewport::viewport_set_screen_space_aa(RID p_viewport, RSE::Viewpor
 	_configure_3d_render_buffers(viewport);
 }
 
+void RendererViewport::viewport_set_use_pathtracing(RID p_viewport, bool p_use_pathtracing) {
+	Viewport *viewport = viewport_owner.get_or_null(p_viewport);
+	ERR_FAIL_NULL(viewport);
+	viewport->use_pathtracing = p_use_pathtracing;
+}
+
+bool RendererViewport::viewport_get_use_pathtracing(RID p_viewport) const {
+	const Viewport *viewport = viewport_owner.get_or_null(p_viewport);
+	ERR_FAIL_NULL_V(viewport, true);
+	return viewport->use_pathtracing;
+}
+
 void RendererViewport::viewport_set_use_taa(RID p_viewport, bool p_use_taa) {
 	Viewport *viewport = viewport_owner.get_or_null(p_viewport);
 	ERR_FAIL_NULL(viewport);
@@ -1749,6 +1779,12 @@ void RendererViewport::viewport_set_vrs_texture(RID p_viewport, RID p_texture) {
 
 	RSG::texture_storage->render_target_set_vrs_texture(viewport->render_target, p_texture);
 	_configure_3d_render_buffers(viewport);
+}
+
+void RendererViewport::viewport_set_debug_name(RID p_viewport, const String &p_name) {
+	Viewport *viewport = viewport_owner.get_or_null(p_viewport);
+	ERR_FAIL_NULL(viewport);
+	viewport->debug_name = p_name;
 }
 
 bool RendererViewport::free(RID p_rid) {

@@ -1242,7 +1242,8 @@ String ShaderCompiler::_dump_node_code(const SL::Node *p_node, int p_level, Gene
 						}
 
 						if (is_internal_func) {
-							code += vnode->name;
+							const String *renamed_function = p_actions.function_renames.getptr(vnode->name);
+							code += renamed_function ? *renamed_function : String(vnode->name);
 							is_texture_func = texture_functions.has(vnode->name);
 							texture_func_no_uv = (vnode->name == "textureSize" || vnode->name == "textureQueryLevels");
 							texture_func_returns_data = texture_func_no_uv || vnode->name == "textureQueryLod";
@@ -1525,7 +1526,7 @@ String ShaderCompiler::_dump_node_code(const SL::Node *p_node, int p_level, Gene
 					used_flag_pointers.insert("DISCARD");
 				}
 
-				code = "discard;";
+				code = p_actions.discard_replacement.is_empty() ? "discard;" : p_actions.discard_replacement;
 			} else if (cfnode->flow_op == SL::FLOW_OP_CONTINUE) {
 				code = "continue;";
 			} else if (cfnode->flow_op == SL::FLOW_OP_BREAK) {

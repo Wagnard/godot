@@ -48,12 +48,14 @@ class CrashHandler {
 	bool disabled;
 
 public:
+	// Installs the unhandled exception filter, the abort, pure call and invalid parameter hooks, and the main thread's stack overflow reserve.
 	void initialize();
 
 	void disable();
 	bool is_disabled() const { return disabled; }
 
-	// Writes a minidump of any unhandled exception, on any thread, into p_dir (in every build type).
+	// Writes a minidump of any unhandled exception, on any thread, into p_dir (in every build type). The only
+	// minidump writer: the debug-build handler (CrashHandlerException) prints the backtrace only.
 	void enable_minidumps(const String &p_dir);
 
 	CrashHandler();

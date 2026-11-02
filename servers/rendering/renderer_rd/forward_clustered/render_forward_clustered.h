@@ -43,11 +43,14 @@
 #include "servers/rendering/renderer_rd/effects/shadow_watch.h"
 #include "servers/rendering/renderer_rd/effects/ss_effects.h"
 #include "servers/rendering/renderer_rd/effects/taa.h"
+#include "servers/rendering/renderer_rd/environment/fog.h"
 #include "servers/rendering/renderer_rd/forward_clustered/render_raytracing.h"
 #include "servers/rendering/renderer_rd/forward_clustered/scene_shader_forward_clustered.h"
+#include "servers/rendering/renderer_rd/pipeline_cache_rd.h"
 #include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
 #include "servers/rendering/renderer_rd/shaders/forward_clustered/best_fit_normal.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/forward_clustered/integrate_dfg.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/forward_clustered/oit_resolve.glsl.gen.h"
 
 #ifdef METAL_ENABLED
 #include "servers/rendering/renderer_rd/effects/metal_fx.h"
@@ -61,12 +64,15 @@
 #define RB_TEX_NORMAL_ROUGHNESS_MSAA SNAME("normal_roughness_msaa")
 #define RB_TEX_VOXEL_GI SNAME("voxel_gi")
 #define RB_TEX_VOXEL_GI_MSAA SNAME("voxel_gi_msaa")
+#define RB_TEX_OIT_ACCUM SNAME("oit_accum")
+#define RB_TEX_OIT_REVEAL SNAME("oit_reveal")
 namespace RendererSceneRenderImplementation {
 
 class RenderForwardClustered : public RendererSceneRenderRD {
 	friend SceneShaderForwardClustered;
 	friend SceneShaderRaytracing;
 	friend class RenderRaytracing;
+	friend class RTTlasBuilder;
 
 protected:
 	enum {
@@ -90,6 +96,7 @@ protected:
 		RENDER_LIST_MOTION, //used for opaque objects with motion
 		RENDER_LIST_ALPHA, //used for transparent objects
 		RENDER_LIST_SECONDARY, //used for shadows and other objects
+		RENDER_LIST_OIT, //used for weighted-blended OIT transparents (unsorted)
 		RENDER_LIST_MAX
 	};
 
@@ -147,6 +154,12 @@ public:
 		RID get_normal_roughness(uint32_t p_layer) { return render_buffers->get_texture_slice(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_NORMAL_ROUGHNESS, p_layer, 0); }
 		RID get_normal_roughness_msaa() const { return render_buffers->get_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_NORMAL_ROUGHNESS_MSAA); }
 		RID get_normal_roughness_msaa(uint32_t p_layer) { return render_buffers->get_texture_slice(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_NORMAL_ROUGHNESS_MSAA, p_layer, 0); }
+
+		void ensure_oit();
+		bool has_oit() const { return render_buffers->has_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_OIT_ACCUM); }
+		RID get_oit_accum() const { return render_buffers->get_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_OIT_ACCUM); }
+		RID get_oit_reveal() const { return render_buffers->get_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_OIT_REVEAL); }
+		RID get_oit_fb();
 
 		void ensure_voxelgi();
 		bool has_voxelgi() const { return render_buffers->has_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_VOXEL_GI); }
@@ -219,6 +232,15 @@ protected:
 		RID lut2_texture;
 	} ltc;
 
+	// Fullscreen weighted-blended OIT composite onto the color buffer.
+	struct OITResolve {
+		OitResolveShaderRD shader;
+		RID shader_version;
+		PipelineCacheRD pipeline;
+	} oit_resolve;
+
+	void _composite_oit(Ref<RenderBufferDataForwardClustered> p_rb_data);
+
 	enum PassMode {
 		PASS_MODE_COLOR,
 		PASS_MODE_SHADOW,
@@ -238,6 +260,7 @@ protected:
 		COLOR_PASS_FLAG_MULTIVIEW = 1 << 2,
 		COLOR_PASS_FLAG_MOTION_VECTORS = 1 << 3,
 		COLOR_PASS_FLAG_RT_SHADOWS = 1 << 4, // The path tracer's transparent pass, with rt_shadow_tlas.
+		COLOR_PASS_FLAG_OIT = 1 << 5,
 	};
 
 	struct RenderElementInfo;
@@ -600,8 +623,11 @@ protected:
 		uint32_t max_lightmaps;
 		RID lightmap_buffer;
 
-		MultiUmaBuffer<1u> instance_buffer[RENDER_LIST_MAX] = { MultiUmaBuffer<1u>("RENDER_LIST_OPAQUE"), MultiUmaBuffer<1u>("RENDER_LIST_MOTION"), MultiUmaBuffer<1u>("RENDER_LIST_ALPHA"), MultiUmaBuffer<1u>("RENDER_LIST_SECONDARY") };
+		MultiUmaBuffer<1u> instance_buffer[RENDER_LIST_MAX] = { MultiUmaBuffer<1u>("RENDER_LIST_OPAQUE"), MultiUmaBuffer<1u>("RENDER_LIST_MOTION"), MultiUmaBuffer<1u>("RENDER_LIST_ALPHA"), MultiUmaBuffer<1u>("RENDER_LIST_SECONDARY"), MultiUmaBuffer<1u>("RENDER_LIST_OIT") };
 		ElementData *curr_gpu_ptr[RENDER_LIST_MAX] = {};
+
+		// True when this render can do the WBOIT MRT pass (no MSAA, single view, has buffers).
+		bool oit_pass_available = false;
 
 		LightmapCaptureData *lightmap_captures = nullptr;
 		uint32_t max_lightmap_captures;
@@ -655,6 +681,8 @@ protected:
 	RID rt_shadow_tlas;
 	RID rt_shadow_geometry_buffer;
 	RID rt_shadow_material_buffer;
+
+	bool preserve_front_facing_when_mirrored = false; // rendering/shading/overrides/preserve_front_facing_when_mirrored, read on startup.
 
 	uint32_t _setup_environment(const RenderDataRD *p_render_data, bool p_no_fog, const Size2i &p_screen_size, const Size2 &p_viewport_size, const Color &p_default_bg_color, bool p_opaque_render_buffers = false, bool p_apply_alpha_multiplier = false, bool p_pancake_shadows = false);
 	void _setup_voxelgis(const PagedArray<RID> &p_voxelgis);
@@ -714,6 +742,7 @@ protected:
 		uint32_t to_instance = 0;
 		LocalVector<GeometryInstanceSurfaceDataCache *> elements; // For the list being filled.
 		LocalVector<GeometryInstanceSurfaceDataCache *> alpha_elements;
+		LocalVector<GeometryInstanceSurfaceDataCache *> oit_elements;
 		LocalVector<GeometryInstanceSurfaceDataCache *> motion_elements;
 		LocalVector<GeometryInstanceForwardClustered *> lightmap_captures; // Their index in the frame is set by the merge.
 		uint32_t used = 0;
@@ -788,6 +817,7 @@ protected:
 			FLAG_USES_PARTICLE_TRAILS = 65536,
 			FLAG_USES_MOTION_VECTOR = 131072,
 			FLAG_USES_STENCIL = 262144,
+			FLAG_USES_OIT = 524288,
 		};
 
 		union {
@@ -838,6 +868,11 @@ protected:
 		mutable Transform3D cached_final_transform;
 		mutable bool cached_final_transform_valid = false;
 
+		// Set on the surface's own material pass. next_pass and overlay passes reuse the surface but are not traced.
+		bool rt_base_pass = false;
+		// Material the surface was added with (override, surface or mesh material, or the default).
+		RID rt_material;
+
 		mutable RID rt_deformed_handle;
 
 		uint32_t surface_slot = UINT32_MAX; // Its place in surface_slots.
@@ -857,8 +892,24 @@ protected:
 
 	class GeometryInstanceForwardClustered : public RenderGeometryInstanceBase {
 	public:
-		/// Heap-allocated procedural RT state. Only created when the instance is procedural.
+		enum TransformStatus {
+			NONE,
+			MOVED,
+			TELEPORTED,
+		};
+
+		// RT-hot fields, read together per instance every frame.
+		// Heap-allocated procedural RT state. Only created when the instance is procedural.
 		RTProceduralState *rt_procedural = nullptr;
+		// Dense index unique among live geometry instances; recycled after geometry_instance_free.
+		uint32_t rt_index = UINT32_MAX;
+		// Number of nodes in surface_caches.
+		uint32_t rt_surface_count = 0;
+		// Renewed whenever surface_caches or the procedural state change; never repeats across instances or over time.
+		uint64_t rt_surfaces_version = 0;
+		GeometryInstanceSurfaceDataCache *surface_caches = nullptr;
+		TransformStatus transform_status = TransformStatus::MOVED;
+		Transform3D prev_transform;
 
 		// lightmap
 		RID lightmap_instance;
@@ -890,14 +941,7 @@ protected:
 		uint64_t prev_transform_change_frame = 0xFFFFFFFF;
 		uint64_t last_aged_frame = 0;
 		uint64_t created_frame = 0; // Pending frame of the first set_transform(): no motion history before it.
-		enum TransformStatus {
-			NONE,
-			MOVED,
-			TELEPORTED,
-		} transform_status = TransformStatus::MOVED;
-		Transform3D prev_transform;
 		RID voxel_gi_instances[MAX_VOXEL_GI_INSTANCESS_PER_INSTANCE];
-		GeometryInstanceSurfaceDataCache *surface_caches = nullptr;
 		SelfList<GeometryInstanceForwardClustered> dirty_list_element;
 
 		uint32_t instance_slot = UINT32_MAX; // Its place in instance_slots.
@@ -920,6 +964,7 @@ protected:
 
 		RTProceduralState *_ensure_procedural_state();
 		void _free_procedural_state();
+		void _renew_rt_surfaces_version();
 
 		virtual void set_rt_procedural(bool p_procedural, const AABB &p_aabb) override;
 		virtual void set_rt_procedural_bounds(const Vector<float> &p_aabb_data, bool p_expose_bounds) override;
@@ -1040,6 +1085,9 @@ protected:
 
 	PagedAllocator<GeometryInstanceForwardClustered> geometry_instance_alloc;
 	PagedAllocator<GeometryInstanceSurfaceDataCache> geometry_instance_surface_alloc;
+	LocalVector<uint32_t> geometry_instance_rt_index_free_list;
+	uint32_t geometry_instance_rt_index_count = 0;
+	uint64_t geometry_instance_rt_surfaces_version = 0;
 	PagedAllocator<GeometryInstanceLightmapSH> geometry_instance_lightmap_sh;
 
 	struct SurfacePipelineData {
@@ -1085,7 +1133,7 @@ protected:
 	void _update_global_pipeline_data_requirements_from_project();
 	void _update_global_pipeline_data_requirements_from_light_storage();
 	void _geometry_instance_add_surface_with_material(GeometryInstanceForwardClustered *ginstance, uint32_t p_surface, SceneShaderForwardClustered::MaterialData *p_material, uint32_t p_material_id, uint32_t p_shader_id, RID p_mesh, RID p_material_rid);
-	void _geometry_instance_add_surface_with_material_chain(GeometryInstanceForwardClustered *ginstance, uint32_t p_surface, SceneShaderForwardClustered::MaterialData *p_material, RID p_mat_src, RID p_mesh);
+	void _geometry_instance_add_surface_with_material_chain(GeometryInstanceForwardClustered *ginstance, uint32_t p_surface, SceneShaderForwardClustered::MaterialData *p_material, RID p_mat_src, RID p_mesh, bool p_rt_base_pass);
 	void _geometry_instance_add_surface(GeometryInstanceForwardClustered *ginstance, uint32_t p_surface, RID p_material, RID p_mesh);
 	void _geometry_instance_update(RenderGeometryInstance *p_geometry_instance);
 	void _mesh_compile_pipeline_for_surface(SceneShaderForwardClustered::ShaderData *p_shader, void *p_mesh_surface, bool p_ubershader, bool p_instanced_surface, RSE::PipelineSource p_source, SceneShaderForwardClustered::ShaderData::PipelineKey &r_pipeline_key, Vector<ShaderPipelinePair> *r_pipeline_pairs = nullptr);
@@ -1357,7 +1405,7 @@ protected:
 	/* Volumetric fog */
 	RID shadow_sampler;
 
-	void _update_volumetric_fog(Ref<RenderSceneBuffersRD> p_render_buffers, RID p_environment, const Projection &p_cam_projection, const Transform3D &p_cam_transform, const Transform3D &p_prev_cam_inv_transform, RID p_shadow_atlas, int p_directional_light_count, bool p_use_directional_shadows, int p_positional_light_count, int p_voxel_gi_count, const PagedArray<RID> &p_fog_volumes);
+	void _update_volumetric_fog(Ref<RenderSceneBuffersRD> p_render_buffers, RID p_environment, const Projection &p_cam_projection, const Transform3D &p_cam_transform, const Transform3D &p_prev_cam_inv_transform, RID p_shadow_atlas, int p_directional_light_count, bool p_use_directional_shadows, int p_positional_light_count, int p_voxel_gi_count, const PagedArray<RID> &p_fog_volumes, const RendererRD::Fog::VolumetricFogRayQueryShadows *p_ray_query_shadows = nullptr);
 
 	/* Render shadows */
 
@@ -1400,7 +1448,7 @@ protected:
 	void _process_ssil(Ref<RenderSceneBuffersRD> p_render_buffers, RID p_environment, const RID *p_normal_buffers, const Projection *p_projections, const Transform3D &p_transform);
 	void _process_ssr(Ref<RenderSceneBuffersRD> p_render_buffers, RID p_environment, const RID *p_normal_slices, const Projection *p_projections, const Vector3 *p_eye_offsets, const Transform3D &p_transform);
 	void _copy_framebuffer_to_ss_effects(Ref<RenderSceneBuffersRD> p_render_buffers, bool p_use_ssil, bool p_use_ssr);
-	void _setup_lights_cluster_decals(RenderDataRD *p_render_data, uint32_t &r_directional_light_count, uint32_t &r_positional_light_count);
+	void _setup_lights_cluster_decals(RenderDataRD *p_render_data, uint32_t &r_directional_light_count, uint32_t &r_positional_light_count, bool p_raster_decals = true);
 	void _pre_opaque_render(RenderDataRD *p_render_data, bool p_use_ssao, bool p_use_ssil, bool p_use_ssr, bool p_use_gi, const RID *p_normal_roughness_slices, RID p_voxel_gi_buffer);
 	void _process_sss(Ref<RenderSceneBuffersRD> p_render_buffers, const Projection &p_camera);
 
@@ -1465,6 +1513,8 @@ protected:
 	bool _feeds_fsr_frame_generation(const RenderDataRD *p_render_data) const;
 	void _prepare_fsr_frame_generation(const RenderDataRD *p_render_data, double p_time_step);
 	virtual void _free_rt_viewport_state(RenderSceneBuffersRD *p_render_buffers);
+	// Compiles pipelines a subclass draws the surface with, after the surface cache's own were queued.
+	virtual void _mesh_generate_extra_pipelines_for_surface_cache(GeometryInstanceSurfaceDataCache *p_surface_cache) {}
 
 	virtual void _render_material(const Transform3D &p_cam_transform, const Projection &p_cam_projection, bool p_cam_orthogonal, const PagedArray<RenderGeometryInstance *> &p_instances, RID p_framebuffer, const Rect2i &p_region, float p_exposure_normalization) override;
 	virtual void _render_uv2(const PagedArray<RenderGeometryInstance *> &p_instances, RID p_framebuffer, const Rect2i &p_region) override;
@@ -1473,6 +1523,9 @@ protected:
 
 public:
 	static RenderForwardClustered *get_singleton() { return singleton; }
+
+	// True when FRONT_FACING follows the mesh winding on mirrored instances instead of the screen winding.
+	bool is_front_facing_preserved_when_mirrored() const { return preserve_front_facing_when_mirrored; }
 
 	ClusterBuilderSharedDataRD *get_cluster_builder_shared() { return &cluster_builder_shared; }
 	RendererRD::SSEffects *get_ss_effects() { return ss_effects; }

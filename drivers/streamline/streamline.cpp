@@ -223,12 +223,16 @@ void Streamline::emit_marker(StreamlineMarkerType marker) {
 			if (sl_context.pcl_options_dirty) {
 				sl_context.pcl_set_options(sl_context.pcl_options);
 			}
+			// DLSS sets the requirement on the render graph's replay thread; the options are only changed here.
+			sl_context.reflex_apply_required_by_dlssg();
 			if (sl_context.reflex_options_dirty) {
 				sl_context.reflex_set_options(sl_context.reflex_options);
 			}
 
 			sl_context.get_new_frame_token();
-			if (sl_context.reflex_options.mode != sl::ReflexMode::eOff || sl_context.reflex_options.frameLimitUs > 0) {
+			// DLSS-G requires slReflexSleep to be called every frame while it is active. Its viewport is
+			// written by the replay thread, so the flag DLSS raises before enabling it is read instead.
+			if (sl_context.reflex_is_active() || sl_context.reflex_options.frameLimitUs > 0 || sl_context.reflex_required_by_dlssg.load()) {
 				sl_context.reflex_sleep(sl_context.last_token);
 			}
 			break;
@@ -299,10 +303,7 @@ void Streamline::set_parameter(StreamlineParameterType p_parameter_type, const V
 				newMode = sl::ReflexMode::eOff;
 			}
 
-			if (StreamlineContext::get().reflex_options.mode != newMode) {
-				StreamlineContext::get().reflex_options_dirty = true;
-			}
-			StreamlineContext::get().reflex_options.mode = newMode;
+			StreamlineContext::get().reflex_request_mode(newMode);
 			break;
 		}
 		case StreamlineParameterType::STREAMLINE_PARAM_REFLEX_FRAME_LIMIT_US: {

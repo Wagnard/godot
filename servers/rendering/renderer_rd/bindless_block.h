@@ -48,6 +48,11 @@ public:
 
 	void finalize(RID p_shader, uint32_t p_set_index);
 
+	// For consumers whose set layout differs from the finalized one (e.g. other shader stages); the caller owns the set.
+	// Recreate when get_version() changes. Not const: the textures destroyed since they were added are scrubbed first.
+	RID create_uniform_set(RID p_shader, uint32_t p_set_index) { return _create_uniform_set(p_shader, p_set_index); }
+	uint64_t get_version() const { return textures_version; }
+
 	RID get_uniform_set() const { return uniform_set; }
 
 	// The other set layouts of the table, for shaders whose stages differ from the finalized one's: every caller of a

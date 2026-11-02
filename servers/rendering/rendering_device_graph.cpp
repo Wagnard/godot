@@ -833,6 +833,32 @@ void RenderingDeviceGraph::_add_acceleration_structure_barrier_to_command(RDD::A
 	r_barrier_count++;
 }
 
+void RenderingDeviceGraph::_run_acceleration_structure_build_batch(RDD::CommandBufferID p_command_buffer, const RecordedAccelerationStructureBuild *p_builds, uint32_t p_build_count) {
+	// Generic memory access, as acceleration structure reads are not allowed in global memory barriers on every driver.
+	RDD::MemoryAccessBarrier build_barrier;
+	build_barrier.src_access = RDD::BARRIER_ACCESS_MEMORY_WRITE_BIT;
+	build_barrier.dst_access = RDD::BARRIER_ACCESS_MEMORY_READ_BIT | RDD::BARRIER_ACCESS_MEMORY_WRITE_BIT;
+
+	for (uint32_t i = 0; i < p_build_count; i++) {
+		const RecordedAccelerationStructureBuild &build = p_builds[i];
+		if (build.barrier_before && driver_honors_barriers) {
+			driver->command_pipeline_barrier(p_command_buffer, RDD::PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT, RDD::PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT, build_barrier, {}, {}, {});
+		}
+
+		switch (build.type) {
+			case RecordedAccelerationStructureBuild::TYPE_BLAS_BUILD: {
+				driver->command_build_blas(p_command_buffer, build.acceleration_structure, build.scratch_buffer, build.scratch_offset);
+			} break;
+			case RecordedAccelerationStructureBuild::TYPE_BLAS_UPDATE: {
+				driver->command_update_blas(p_command_buffer, build.acceleration_structure, build.scratch_buffer, build.scratch_offset);
+			} break;
+			case RecordedAccelerationStructureBuild::TYPE_TLAS_BUILD: {
+				driver->command_build_tlas(p_command_buffer, build.acceleration_structure, build.scratch_buffer, build.scratch_offset, build.instance_buffer, build.instance_offset, build.instance_count, VectorView<RDD::AccelerationStructureID>());
+			} break;
+		}
+	}
+}
+
 void RenderingDeviceGraph::_run_raytracing_list_command(RDD::CommandBufferID p_command_buffer, const uint8_t *p_instruction_data, uint32_t p_instruction_data_size) {
 	uint32_t instruction_data_cursor = 0;
 	while (instruction_data_cursor < p_instruction_data_size) {
@@ -1137,7 +1163,14 @@ void RenderingDeviceGraph::_run_render_commands(int32_t p_level, const RecordedC
 			} break;
 			case RecordedCommand::TYPE_TOP_LEVEL_ACCELERATION_STRUCTURE_BUILD: {
 				const RecordedTopLevelAccelerationStructureBuildCommand *tlas_build_command = reinterpret_cast<const RecordedTopLevelAccelerationStructureBuildCommand *>(command);
-				driver->command_build_tlas(r_command_buffer, tlas_build_command->acceleration_structure, tlas_build_command->scratch_buffer, tlas_build_command->instance_buffer, tlas_build_command->instance_offset, tlas_build_command->instance_count, VectorView<RDD::AccelerationStructureID>(tlas_build_command->blases(), tlas_build_command->blas_count));
+				driver->command_build_tlas(r_command_buffer, tlas_build_command->acceleration_structure, tlas_build_command->scratch_buffer, 0, tlas_build_command->instance_buffer, tlas_build_command->instance_offset, tlas_build_command->instance_count, VectorView<RDD::AccelerationStructureID>(tlas_build_command->blases(), tlas_build_command->blas_count));
+			} break;
+			case RecordedCommand::TYPE_ACCELERATION_STRUCTURE_BUILD_BATCH: {
+				const RecordedAccelerationStructureBuildBatchCommand *batch_command = reinterpret_cast<const RecordedAccelerationStructureBuildBatchCommand *>(command);
+				_run_acceleration_structure_build_batch(r_command_buffer, batch_command->builds(), batch_command->build_count);
+			} break;
+			case RecordedCommand::TYPE_FULL_BARRIER: {
+				// The barrier itself is recorded with the level, from the command's stages and memory barrier.
 			} break;
 			case RecordedCommand::TYPE_BUFFER_CLEAR: {
 				const RecordedBufferClearCommand *buffer_clear_command = reinterpret_cast<const RecordedBufferClearCommand *>(command);
@@ -1284,7 +1317,10 @@ void RenderingDeviceGraph::_run_render_commands(int32_t p_level, const RecordedC
 			}
 		}
 
-		r_command_buffer_has_work = true;
+		// A full barrier records barriers only (see the swap chain blit split above).
+		if (command->type != RecordedCommand::TYPE_FULL_BARRIER) {
+			r_command_buffer_has_work = true;
+		}
 	}
 }
 
@@ -2100,6 +2136,13 @@ void RenderingDeviceGraph::_print_render_commands(const RecordedCommandSort *p_s
 			case RecordedCommand::TYPE_DRIVER_CALLBACK: {
 				print_line(command_index, "LEVEL", command_level, "DRIVER CALLBACK");
 			} break;
+			case RecordedCommand::TYPE_ACCELERATION_STRUCTURE_BUILD_BATCH: {
+				const RecordedAccelerationStructureBuildBatchCommand *batch_command = reinterpret_cast<const RecordedAccelerationStructureBuildBatchCommand *>(command);
+				print_line(command_index, "LEVEL", command_level, "ACCELERATION STRUCTURE BUILD BATCH SIZE", batch_command->build_count);
+			} break;
+			case RecordedCommand::TYPE_FULL_BARRIER: {
+				print_line(command_index, "LEVEL", command_level, "FULL BARRIER");
+			} break;
 			case RecordedCommand::TYPE_COMPUTE_LIST: {
 				const RecordedComputeListCommand *compute_list_command = reinterpret_cast<const RecordedComputeListCommand *>(command);
 				print_line(command_index, "LEVEL", command_level, "COMPUTE LIST SIZE", compute_list_command->instruction_data_size);
@@ -2556,6 +2599,44 @@ void RenderingDeviceGraph::add_tlas_build(RDD::AccelerationStructureID p_acceler
 	usages[resource_count - 1] = RESOURCE_USAGE_ACCELERATION_STRUCTURE_READ_WRITE;
 
 	_add_command_to_graph(trackers.ptr(), usages.ptr(), usages.size(), command_index, command);
+}
+
+void RenderingDeviceGraph::add_acceleration_structure_build_batch(VectorView<RecordedAccelerationStructureBuild> p_builds) {
+	const uint64_t command_size = sizeof(RecordedAccelerationStructureBuildBatchCommand) + p_builds.size() * sizeof(RecordedAccelerationStructureBuild);
+	int32_t command_index;
+	RecordedAccelerationStructureBuildBatchCommand *command = static_cast<RecordedAccelerationStructureBuildBatchCommand *>(_allocate_command(command_size, command_index));
+	command->type = RecordedCommand::TYPE_ACCELERATION_STRUCTURE_BUILD_BATCH;
+	command->self_stages = RDD::PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT;
+	command->build_count = p_builds.size();
+
+	RecordedAccelerationStructureBuild *builds = command->builds();
+	bool builds_tlas = false;
+	for (uint32_t i = 0; i < command->build_count; i++) {
+		builds[i] = p_builds[i];
+		builds_tlas = builds_tlas || p_builds[i].type == RecordedAccelerationStructureBuild::TYPE_TLAS_BUILD;
+	}
+
+	_add_command_to_graph(nullptr, nullptr, 0, command_index, command);
+
+	if (builds_tlas) {
+		// The commands recorded after it wait for its TLAS builds, as after add_tlas_build() (see _add_command_to_graph()).
+		command_tlas_build_index = command_index;
+	}
+}
+
+void RenderingDeviceGraph::add_full_barrier() {
+	add_synchronization();
+
+	int32_t command_index;
+	RecordedCommand *command = _allocate_command(sizeof(RecordedCommand), command_index);
+	command->type = RecordedCommand::TYPE_FULL_BARRIER;
+	// Recorded commands only add the stages they use; earlier submissions need every stage.
+	command->previous_stages = RDD::PIPELINE_STAGE_ALL_COMMANDS_BIT;
+	command->memory_barrier.src_access = RDD::BARRIER_ACCESS_MEMORY_WRITE_BIT;
+	command->memory_barrier.dst_access = RDD::BARRIER_ACCESS_MEMORY_READ_BIT | RDD::BARRIER_ACCESS_MEMORY_WRITE_BIT;
+	_add_command_to_graph(nullptr, nullptr, 0, command_index, command);
+	// Only commands recorded before the next synchronization become adjacent; the ones after it must wait as well.
+	command->next_stages = RDD::PIPELINE_STAGE_ALL_COMMANDS_BIT;
 }
 
 void RenderingDeviceGraph::add_buffer_clear(RDD::BufferID p_dst, ResourceTracker *p_dst_tracker, uint32_t p_offset, uint32_t p_size) {
@@ -3492,6 +3573,8 @@ void RenderingDeviceGraph::end(bool p_reorder_commands, bool p_full_barriers, RD
 			5, // TYPE_DRIVER_CALLBACK
 			6, // TYPE_BOTTOM_LEVEL_ACCELERATION_STRUCTURE_UPDATE
 			6, // TYPE_OPACITY_MICROMAP_BUILD
+			6, // TYPE_ACCELERATION_STRUCTURE_BUILD_BATCH
+			0, // TYPE_FULL_BARRIER
 		};
 		static_assert(std_size(PriorityTable) == RecordedCommand::TYPE_MAX, "PriorityTable must have one entry per RecordedCommand::Type");
 
