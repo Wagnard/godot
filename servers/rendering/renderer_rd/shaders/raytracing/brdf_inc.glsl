@@ -282,6 +282,7 @@ struct MaterialProperties {
 struct BrdfData {
 	// Material properties
 	float3 specularF0;
+	float specularF90; //< godotF90()
 	float3 diffuseReflectance;
 
 	// Roughnesses
@@ -357,7 +358,7 @@ void evalIndirectVoid(const BrdfData data, float2 u, OUT_PARAMETER(float3) rayDi
 	weight = float3(0.0f, 0.0f, 0.0f);
 }
 
-float3 sampleSpecularVoid(float3 Vlocal, float alpha, float alphaSquared, float3 specularF0, float2 u, OUT_PARAMETER(float3) weight) {
+float3 sampleSpecularVoid(float3 Vlocal, float alpha, float alphaSquared, float3 specularF0, float specularF90, float2 u, OUT_PARAMETER(float3) weight) {
 	weight = float3(0.0f, 0.0f, 0.0f);
 	return float3(0.0f, 0.0f, 0.0f);
 }
@@ -477,6 +478,12 @@ float shadowedF90(float3 F0) {
 	return min(1.0f, t * luminance(F0));
 }
 
+// F90 as Godot's raster lights have it (scene_forward_lights_inc.glsl light_compute()): attenuated for a very low F0
+// (SPECULAR near 0), never under the metalness.
+float godotF90(float3 F0, float metalness) {
+	return clamp(dot(F0, float3(50.0f * 0.33f)), metalness, 1.0f);
+}
+
 // -------------------------------------------------------------------------
 //    Lambert
 // -------------------------------------------------------------------------
@@ -529,7 +536,7 @@ float3 samplePhong(float3 Vlocal, float2 alpha2D, float2 u) {
 }
 
 // Sampling the specular BRDF based on Phong, includes normalization term
-float3 sampleSpecularPhong(float3 Vlocal, float alpha, float alphaSquared, float3 specularF0, float2 u, OUT_PARAMETER(float3) weight) {
+float3 sampleSpecularPhong(float3 Vlocal, float alpha, float alphaSquared, float3 specularF0, float specularF90, float2 u, OUT_PARAMETER(float3) weight) {
 	// First convert roughness to shininess (Phong exponent)
 	float shininess = beckmannAlphaToShininess(alpha);
 
@@ -878,7 +885,7 @@ float3 evalMultiScatterApproximation(float alpha, float NdV, float3 F0) {
 
 // Samples a reflection ray from the rough surface using selected microfacet distribution and sampling method
 // Resulting weight includes multiplication by cosine (NdotL) term
-float3 sampleSpecularMicrofacet(float3 Vlocal, float alpha, float alphaSquared, float3 specularF0, float2 u, OUT_PARAMETER(float3) weight) {
+float3 sampleSpecularMicrofacet(float3 Vlocal, float alpha, float alphaSquared, float3 specularF0, float specularF90, float2 u, OUT_PARAMETER(float3) weight) {
 	// Sample a microfacet normal (H) in local space
 	float3 Hlocal;
 	if (alpha == 0.0f) {
@@ -899,7 +906,7 @@ float3 sampleSpecularMicrofacet(float3 Vlocal, float alpha, float alphaSquared, 
 	float NdotL = max(0.00001f, min(1.0f, dot(Nlocal, Llocal)));
 	float NdotV = max(0.00001f, min(1.0f, dot(Nlocal, Vlocal)));
 	float NdotH = max(0.00001f, min(1.0f, dot(Nlocal, Hlocal)));
-	float3 F = evalFresnel(specularF0, shadowedF90(specularF0), HdotL);
+	float3 F = evalFresnel(specularF0, specularF90, HdotL);
 
 #if MICROFACET_DISTRIBUTION == GGX
 	float3 ms = evalMultiScatterApproximation(alpha, NdotV, specularF0);
@@ -1039,6 +1046,7 @@ BrdfData prepareBRDFData(float3 N, float3 L, float3 V, MaterialProperties materi
 
 	// Unpack material properties
 	data.specularF0 = baseColorToSpecularF0(material.baseColor, material.metalness, material.dielectricF0);
+	data.specularF90 = godotF90(data.specularF0, material.metalness);
 	data.diffuseReflectance = baseColorToDiffuseReflectance(material.baseColor, material.metalness);
 
 	// Unpack 'perceptively linear' -> 'linear' -> 'squared' roughness
@@ -1047,7 +1055,7 @@ BrdfData prepareBRDFData(float3 N, float3 L, float3 V, MaterialProperties materi
 	data.alphaSquared = data.alpha * data.alpha;
 
 	// Pre-calculate some more BRDF terms
-	data.F = evalFresnel(data.specularF0, shadowedF90(data.specularF0), data.LdotH);
+	data.F = evalFresnel(data.specularF0, data.specularF90, data.LdotH);
 
 	return data;
 }
@@ -1123,12 +1131,12 @@ bool evalIndirectCombinedBRDF(float2 u, float3 shadingNormal, float3 geometryNor
 
 		// Clamp HdotL to small value to prevent numerical instability. Assume that rays incident from below the hemisphere have been filtered
 		float VdotH = max(0.00001f, min(1.0f, dot(Vlocal, Hspecular)));
-		sampleWeight *= (float3(1.0f, 1.0f, 1.0f) - evalFresnel(data.specularF0, shadowedF90(data.specularF0), VdotH));
+		sampleWeight *= (float3(1.0f, 1.0f, 1.0f) - evalFresnel(data.specularF0, data.specularF90, VdotH));
 #endif
 
 	} else if (brdfType == SPECULAR_TYPE) {
 		const BrdfData data = prepareBRDFData(Nlocal, float3(0.0f, 0.0f, 1.0f) /* unused L vector */, Vlocal, material);
-		rayDirectionLocal = sampleSpecular(Vlocal, data.alpha, data.alphaSquared, data.specularF0, u, sampleWeight);
+		rayDirectionLocal = sampleSpecular(Vlocal, data.alpha, data.alphaSquared, data.specularF0, data.specularF90, u, sampleWeight);
 	}
 
 	// Transform sampled direction Llocal back to V vector space.

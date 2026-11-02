@@ -235,7 +235,7 @@ vec3 rt_environment_nee(RTEnvSampling p_env, vec3 p_origin, vec3 p_geometry_norm
 		const vec2 u = vec2(dot(l_local.xy, l_local.xy), u_y < 0.0 ? u_y + 1.0 : u_y);
 		const vec3 h = sampleSpecularHalfVector(v_local, vec2(data.alpha, data.alpha), u);
 		const float v_dot_h = max(0.00001, min(1.0, dot(v_local, h)));
-		diffuse *= vec3(1.0) - evalFresnel(data.specularF0, shadowedF90(data.specularF0), v_dot_h);
+		diffuse *= vec3(1.0) - evalFresnel(data.specularF0, data.specularF90, v_dot_h);
 #endif
 		const float share = float(rt_env_mis_share(rt_env_lobe_pdf(p_env, false, v_local, l_local), sky_pdf)) / 65535.0;
 		value += diffuse * p_ao * rt_environment_light(sky_dir, false) * share;
@@ -252,7 +252,7 @@ vec3 rt_environment_nee(RTEnvSampling p_env, vec3 p_origin, vec3 p_geometry_norm
 #else
 		const vec3 ms = vec3(1.0);
 #endif
-		const vec3 f = evalFresnel(data.specularF0, shadowedF90(data.specularF0), h_dot_l);
+		const vec3 f = evalFresnel(data.specularF0, data.specularF90, h_dot_l);
 		const float lobe_pdf = rt_env_lobe_pdf(p_env, true, v_local, l_local);
 		const vec3 specular = ms * f * specularSampleWeight(data.alpha, data.alphaSquared, n_dot_l, n_dot_v, h_dot_l, n_dot_h) * (lobe_pdf / p_env.specular_probability);
 		const float share = float(rt_env_mis_share(lobe_pdf, sky_pdf)) / 65535.0;
