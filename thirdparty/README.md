@@ -26,7 +26,7 @@ Files extracted from upstream source:
 Files extracted from upstream source (headers only; the signed loader, frame generation and upscaler DLLs are
 loaded at run time):
 
-- `api/include`: `ffx_api.h`, `ffx_api_loader.h`, `ffx_api_types.h`, `dx12/ffx_api_dx12.h`
+- `api/include`: `ffx_api.h`, `ffx_api_loader.h`, `ffx_api_types.h`, `dx12/ffx_api_dx12.h`, `vk/ffx_api_vk.h`
 - `framegeneration/include`: `ffx_framegeneration.h`, `ffx_framegeneration_api_types.h`,
   `dx12/ffx_api_framegeneration_dx12.h`
 - `upscalers/include`: `ffx_upscale.h`

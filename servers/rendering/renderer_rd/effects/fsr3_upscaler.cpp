@@ -36,11 +36,18 @@
 #ifdef D3D12_ENABLED
 #include "drivers/d3d12/fsr_upscaler_d3d12.h"
 #endif
+#ifdef VULKAN_ENABLED
+#include "drivers/vulkan/fsr_upscaler_vulkan.h"
+#endif
 
 using namespace RendererRD;
 
 static bool fsr3_is_d3d12() {
 	return RD::get_singleton()->get_device_api_name().to_lower() == "d3d12";
+}
+
+static bool fsr3_is_vulkan() {
+	return RD::get_singleton()->get_device_api_name().to_lower() == "vulkan";
 }
 
 FSR3UpscalerContext::~FSR3UpscalerContext() {
@@ -49,8 +56,15 @@ FSR3UpscalerContext::~FSR3UpscalerContext() {
 		// record their dispatches first, then every frame in flight completes (as DLSSContextInner does).
 		RD::get_singleton()->wait_for_frame_threads();
 		RD::get_singleton()->_flush_and_stall_for_all_frames();
+#ifdef VULKAN_ENABLED
+		if (vulkan) {
+			FSRUpscalerVulkan::destroy_context(ffx_context);
+		}
+#endif
 #ifdef D3D12_ENABLED
-		FSRUpscalerD3D12::destroy_context(ffx_context);
+		if (!vulkan) {
+			FSRUpscalerD3D12::destroy_context(ffx_context);
+		}
 #endif
 		ffx_context = nullptr;
 	}
@@ -73,27 +87,44 @@ FSR3UpscalerEffect::~FSR3UpscalerEffect() {
 }
 
 FSR3UpscalerContext *FSR3UpscalerEffect::create_context(Size2i p_internal_size, Size2i p_target_size) {
+	RenderingDevice *rd = RD::get_singleton();
+	void *ffx_context = nullptr;
+	const bool vulkan = fsr3_is_vulkan();
+	// Godot upscales before tonemapping, in linear HDR, with a reversed-Z depth and a finite far plane. AMD recommends its
+	// input checker in development builds only: here, with --gpu-validation.
+	const bool debug_checking = Engine::get_singleton()->is_validation_layers_enabled();
+#ifdef VULKAN_ENABLED
+	if (vulkan) {
+		FSRUpscalerVulkan::ContextParams params;
+		params.device = (void *)rd->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_LOGICAL_DEVICE);
+		params.physical_device = (void *)rd->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_PHYSICAL_DEVICE);
+		params.max_render_width = p_internal_size.width;
+		params.max_render_height = p_internal_size.height;
+		params.upscale_width = p_target_size.width;
+		params.upscale_height = p_target_size.height;
+		params.debug_checking = debug_checking;
+		ffx_context = FSRUpscalerVulkan::create_context(params);
+	}
+#endif
 #ifdef D3D12_ENABLED
-	ERR_FAIL_COND_V(!fsr3_is_d3d12(), nullptr);
-
-	FSRUpscalerD3D12::ContextParams params;
-	params.device = (void *)RD::get_singleton()->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_LOGICAL_DEVICE);
-	params.max_render_width = p_internal_size.width;
-	params.max_render_height = p_internal_size.height;
-	params.upscale_width = p_target_size.width;
-	params.upscale_height = p_target_size.height;
-	// Godot upscales before tonemapping, in linear HDR, with a reversed-Z depth and a finite far plane.
-	params.high_dynamic_range = true;
-	params.depth_inverted = true;
-	// AMD recommends its input checker in development builds only: here, with --gpu-validation.
-	params.debug_checking = Engine::get_singleton()->is_validation_layers_enabled();
-	void *ffx_context = FSRUpscalerD3D12::create_context(params);
+	if (fsr3_is_d3d12()) {
+		FSRUpscalerD3D12::ContextParams params;
+		params.device = (void *)rd->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_LOGICAL_DEVICE);
+		params.max_render_width = p_internal_size.width;
+		params.max_render_height = p_internal_size.height;
+		params.upscale_width = p_target_size.width;
+		params.upscale_height = p_target_size.height;
+		params.debug_checking = debug_checking;
+		ffx_context = FSRUpscalerD3D12::create_context(params);
+	}
+#endif
 	if (!ffx_context) {
 		return nullptr;
 	}
 
 	FSR3UpscalerContext *context = memnew(FSR3UpscalerContext);
 	context->ffx_context = ffx_context;
+	context->vulkan = vulkan;
 	context->internal_size = p_internal_size;
 	context->target_size = p_target_size;
 
@@ -102,16 +133,26 @@ FSR3UpscalerContext *FSR3UpscalerEffect::create_context(Size2i p_internal_size, 
 	tf.width = p_internal_size.width;
 	tf.height = p_internal_size.height;
 	tf.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT;
-	context->reactive_mask = RD::get_singleton()->texture_create(tf, RD::TextureView());
-	RD::get_singleton()->set_resource_name(context->reactive_mask, "FSR3 Reactive Mask");
+	context->reactive_mask = rd->texture_create(tf, RD::TextureView());
+	rd->set_resource_name(context->reactive_mask, "FSR3 Reactive Mask");
 	return context;
-#else
-	return nullptr;
-#endif
+}
+
+FSR3UpscalerEffect::ResolvedTexture FSR3UpscalerEffect::_resolve_texture(RID p_texture) {
+	RenderingDevice *rd = RD::get_singleton();
+	const RD::TextureFormat texture_format = rd->texture_get_format(p_texture);
+	ResolvedTexture resolved;
+	resolved.image = rd->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_TEXTURE, p_texture);
+	resolved.format = (uint32_t)rd->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_TEXTURE_DATA_FORMAT, p_texture);
+	resolved.usage = (uint32_t)rd->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_TEXTURE_USAGE_FLAGS, p_texture);
+	resolved.width = texture_format.width;
+	resolved.height = texture_format.height;
+	resolved.layers = texture_format.array_layers;
+	resolved.mipmaps = texture_format.mipmaps;
+	return resolved;
 }
 
 void FSR3UpscalerEffect::upscale(const Parameters &p_params) {
-#ifdef D3D12_ENABLED
 	FSR3UpscalerContext *context = p_params.context;
 	ERR_FAIL_NULL(context);
 	ERR_FAIL_NULL(context->ffx_context);
@@ -183,19 +224,21 @@ void FSR3UpscalerEffect::upscale(const Parameters &p_params) {
 	RenderingDevice *rd = RD::get_singleton();
 	CallbackPayload *payload = memnew(CallbackPayload);
 	payload->ffx_context = context->ffx_context;
+	payload->vulkan = context->vulkan;
 	payload->params = p_params;
 	payload->reset = context->reset;
 	context->reset = false;
-	payload->color_resource = rd->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_TEXTURE, p_params.color);
-	payload->depth_resource = rd->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_TEXTURE, p_params.depth);
-	payload->velocity_resource = rd->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_TEXTURE, p_params.velocity);
-	payload->reactive_resource = rd->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_TEXTURE, context->reactive_mask);
-	payload->output_resource = rd->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_TEXTURE, p_params.output);
+	payload->color = _resolve_texture(p_params.color);
+	payload->depth = _resolve_texture(p_params.depth);
+	payload->velocity = _resolve_texture(p_params.velocity);
+	payload->reactive = _resolve_texture(context->reactive_mask);
+	payload->output = _resolve_texture(p_params.output);
 
 	// Every texture the dispatch reads or writes, the output included: the render graph orders the passes that read
-	// the output after it only if it is declared (DLSS-OUTPUT-GRAPH-FIXES). GENERAL (D3D12_BARRIER_LAYOUT_COMMON) is a
-	// write usage for the graph; FidelityFX transitions with legacy barriers, valid with enhanced ones only through
-	// COMMON, so the textures are announced as FFX_API_RESOURCE_STATE_COMMON.
+	// the output after it only if it is declared (DLSS-OUTPUT-GRAPH-FIXES). GENERAL is a write usage for the graph, and
+	// the layout AMD's backends take FFX_API_RESOURCE_STATE_COMMON for on both APIs: D3D12_BARRIER_LAYOUT_COMMON, the
+	// only layout where FidelityFX's legacy barriers may meet Godot's enhanced ones, and VK_IMAGE_LAYOUT_GENERAL
+	// (backend/vk/ffx_vk.cpp, getVKImageLayoutFromResourceState()).
 	RD::CallbackResource resources[5];
 	resources[0].rid = p_params.color;
 	resources[1].rid = p_params.depth;
@@ -206,38 +249,71 @@ void FSR3UpscalerEffect::upscale(const Parameters &p_params) {
 		resource.usage = RD::CALLBACK_RESOURCE_USAGE_GENERAL;
 	}
 	rd->driver_callback_add((RDD::DriverCallback)FSR3UpscalerEffect::_upscale_graph_callback, payload, VectorView<RD::CallbackResource>(resources, 5));
-#endif
 }
 
-void FSR3UpscalerEffect::_upscale_graph_callback(RenderingDeviceDriver *p_driver, RDD::CommandBufferID p_command_buffer, void *p_userdata) {
-#ifdef D3D12_ENABLED
-	CallbackPayload *payload = (CallbackPayload *)p_userdata;
-	const Parameters &p = payload->params;
-
-	FSRUpscalerD3D12::DispatchParams dispatch;
-	dispatch.native_command_list = p_driver->command_buffer_get_native_handle(p_command_buffer);
-	dispatch.color_resource = payload->color_resource;
-	dispatch.depth_resource = payload->depth_resource;
-	dispatch.motion_vectors_resource = payload->velocity_resource;
-	dispatch.reactive_resource = payload->reactive_resource;
-	dispatch.output_resource = payload->output_resource;
-	dispatch.render_width = p.internal_size.width;
-	dispatch.render_height = p.internal_size.height;
-	dispatch.upscale_width = p.target_size.width;
-	dispatch.upscale_height = p.target_size.height;
-	dispatch.jitter_x = p.jitter.x;
-	dispatch.jitter_y = p.jitter.y;
+// The parameters both backends take alike.
+template <typename T>
+static void fsr3_fill_dispatch(T &r_dispatch, const FSR3UpscalerEffect::Parameters &p, bool p_reset) {
+	r_dispatch.render_width = p.internal_size.width;
+	r_dispatch.render_height = p.internal_size.height;
+	r_dispatch.upscale_width = p.target_size.width;
+	r_dispatch.upscale_height = p.target_size.height;
+	r_dispatch.jitter_x = p.jitter.x;
+	r_dispatch.jitter_y = p.jitter.y;
 	// Godot's velocity buffer is in UV space, as for FSR2 (effects/fsr2.cpp).
-	dispatch.motion_vector_scale_x = float(p.internal_size.width);
-	dispatch.motion_vector_scale_y = float(p.internal_size.height);
-	dispatch.sharpening = p.sharpness > 1e-6f;
-	dispatch.sharpness = p.sharpness;
-	dispatch.frame_time_delta_ms = p.delta_time * 1000.0f;
-	dispatch.reset = payload->reset;
-	dispatch.camera_near = p.z_near;
-	dispatch.camera_far = p.z_far;
-	dispatch.fov_vertical_radians = Math::deg_to_rad(p.fovy);
-	FSRUpscalerD3D12::dispatch(payload->ffx_context, dispatch);
-	memdelete(payload);
+	r_dispatch.motion_vector_scale_x = float(p.internal_size.width);
+	r_dispatch.motion_vector_scale_y = float(p.internal_size.height);
+	r_dispatch.sharpening = p.sharpness > 1e-6f;
+	r_dispatch.sharpness = p.sharpness;
+	r_dispatch.frame_time_delta_ms = p.delta_time * 1000.0f;
+	r_dispatch.reset = p_reset;
+	r_dispatch.camera_near = p.z_near;
+	r_dispatch.camera_far = p.z_far;
+	r_dispatch.fov_vertical_radians = Math::deg_to_rad(p.fovy);
+}
+
+#ifdef VULKAN_ENABLED
+static FSRUpscalerVulkan::Texture fsr3_vulkan_texture(const FSR3UpscalerEffect::ResolvedTexture &p_texture) {
+	FSRUpscalerVulkan::Texture texture;
+	texture.image = p_texture.image;
+	texture.format = p_texture.format;
+	texture.usage = p_texture.usage;
+	texture.width = p_texture.width;
+	texture.height = p_texture.height;
+	texture.layers = p_texture.layers;
+	texture.mipmaps = p_texture.mipmaps;
+	return texture;
+}
 #endif
+
+void FSR3UpscalerEffect::_upscale_graph_callback(RenderingDeviceDriver *p_driver, RDD::CommandBufferID p_command_buffer, void *p_userdata) {
+	CallbackPayload *payload = (CallbackPayload *)p_userdata;
+	void *native_command_buffer = p_driver->command_buffer_get_native_handle(p_command_buffer);
+#ifdef VULKAN_ENABLED
+	if (payload->vulkan) {
+		FSRUpscalerVulkan::DispatchParams dispatch;
+		dispatch.native_command_buffer = native_command_buffer;
+		dispatch.color = fsr3_vulkan_texture(payload->color);
+		dispatch.depth = fsr3_vulkan_texture(payload->depth);
+		dispatch.motion_vectors = fsr3_vulkan_texture(payload->velocity);
+		dispatch.reactive = fsr3_vulkan_texture(payload->reactive);
+		dispatch.output = fsr3_vulkan_texture(payload->output);
+		fsr3_fill_dispatch(dispatch, payload->params, payload->reset);
+		FSRUpscalerVulkan::dispatch(payload->ffx_context, dispatch);
+	}
+#endif
+#ifdef D3D12_ENABLED
+	if (!payload->vulkan) {
+		FSRUpscalerD3D12::DispatchParams dispatch;
+		dispatch.native_command_list = native_command_buffer;
+		dispatch.color_resource = payload->color.image;
+		dispatch.depth_resource = payload->depth.image;
+		dispatch.motion_vectors_resource = payload->velocity.image;
+		dispatch.reactive_resource = payload->reactive.image;
+		dispatch.output_resource = payload->output.image;
+		fsr3_fill_dispatch(dispatch, payload->params, payload->reset);
+		FSRUpscalerD3D12::dispatch(payload->ffx_context, dispatch);
+	}
+#endif
+	memdelete(payload);
 }

@@ -58,19 +58,29 @@
 #ifdef D3D12_ENABLED
 #include "drivers/d3d12/fsr_upscaler_d3d12.h"
 #endif
+#ifdef VULKAN_ENABLED
+#include "drivers/vulkan/fsr_upscaler_vulkan.h"
+#endif
 
-// AMD FSR 3.1 upscaling (RendererRD::FSR3UpscalerEffect): the D3D12 driver, and AMD's loader reports an upscaling
-// provider for its device.
+// AMD FSR 3.1 upscaling (RendererRD::FSR3UpscalerEffect): the D3D12 or Vulkan driver, and AMD's loader for that API
+// reports an upscaling provider for its device.
 static bool _fsr3_upscaler_supported() {
-#ifdef D3D12_ENABLED
 	RenderingDevice *rd = RD::get_singleton();
-	if (!rd || rd->get_device_api_name().to_lower() != "d3d12") {
+	if (!rd) {
 		return false;
 	}
-	return FSRUpscalerD3D12::is_available((void *)rd->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_LOGICAL_DEVICE));
-#else
-	return false;
+	const String api = rd->get_device_api_name().to_lower();
+#ifdef D3D12_ENABLED
+	if (api == "d3d12") {
+		return FSRUpscalerD3D12::is_available((void *)rd->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_LOGICAL_DEVICE));
+	}
 #endif
+#ifdef VULKAN_ENABLED
+	if (api == "vulkan") {
+		return FSRUpscalerVulkan::is_available((void *)rd->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_LOGICAL_DEVICE), (void *)rd->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_PHYSICAL_DEVICE));
+	}
+#endif
+	return false;
 }
 
 static Transform2D _canvas_get_transform(RendererViewport::Viewport *p_viewport, RendererCanvasCull::Canvas *p_canvas, RendererViewport::Viewport::CanvasData *p_canvas_data, const Vector2 &p_vp_size) {
@@ -202,10 +212,10 @@ void RendererViewport::_configure_3d_render_buffers(Viewport *p_viewport) {
 			}
 
 			if (scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_FSR3 && (p_viewport->view_count > 1 || !_fsr3_upscaler_supported())) {
-				// AMD's FidelityFX DLLs exist for D3D12 only here, and this path upscales one view.
+				// AMD ships the FidelityFX DLLs for Windows (D3D12 and Vulkan), and this path upscales one view.
 				scaling_3d_mode = RSE::VIEWPORT_SCALING_3D_MODE_FSR2;
 				scaling_type = RSE::scaling_3d_mode_type(scaling_3d_mode);
-				WARN_PRINT_ONCE("AMD FSR 3.1 upscaling is not available (it needs the D3D12 driver, amd_fidelityfx_loader_dx12.dll and amd_fidelityfx_upscaler_dx12.dll next to the executable, and a single view). Falling back to FSR 2 scaling.");
+				WARN_PRINT_ONCE("AMD FSR 3.1 upscaling is not available (it needs Windows with the D3D12 or Vulkan driver, AMD's loader and upscaler DLLs for that API next to the executable, and a single view). Falling back to FSR 2 scaling.");
 			}
 
 			if (scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_METALFX_SPATIAL && !RD::get_singleton()->has_feature(RD::SUPPORTS_METALFX_SPATIAL)) {

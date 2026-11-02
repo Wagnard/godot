@@ -40,6 +40,7 @@ namespace RendererRD {
 class FSR3UpscalerContext {
 public:
 	void *ffx_context = nullptr;
+	bool vulkan = false; // The context's backend: FSRUpscalerVulkan, else FSRUpscalerD3D12.
 	Size2i internal_size;
 	Size2i target_size;
 	RID reactive_mask;
@@ -48,8 +49,8 @@ public:
 	~FSR3UpscalerContext();
 };
 
-// AMD FSR 3.1 upscaling through AMD's signed DLLs (Viewport.SCALING_3D_MODE_FSR3), D3D12 only. The DLL picks the
-// newest provider the GPU supports: FSR 3.1 on any GPU, FSR 4 on RDNA 4.
+// AMD FSR 3.1 upscaling through AMD's signed DLLs (Viewport.SCALING_3D_MODE_FSR3), on D3D12 and Vulkan (Windows). The
+// DLL picks the newest provider the GPU supports: FSR 3.1 on any GPU, FSR 4 on RDNA 4.
 class FSR3UpscalerEffect {
 public:
 	struct Parameters {
@@ -68,6 +69,17 @@ public:
 		float delta_time = 0.0f; // Seconds.
 		// The decode shader's convention (see DLSSContext::Parameters::reprojection).
 		Projection reprojection;
+	};
+
+	// A texture as the driver knows it, resolved on the render thread for a callback that may run on another thread.
+	struct ResolvedTexture {
+		uint64_t image = 0; // ID3D12Resource* or VkImage.
+		uint32_t format = 0; // The driver's format of the view RenderingDevice reads it through.
+		uint32_t usage = 0; // The driver's usage flags.
+		uint32_t width = 0;
+		uint32_t height = 0;
+		uint32_t layers = 1;
+		uint32_t mipmaps = 1;
 	};
 
 	FSR3UpscalerEffect();
@@ -91,14 +103,17 @@ private:
 	// render thread moved on. Owned and freed by the callback.
 	struct CallbackPayload {
 		void *ffx_context = nullptr;
+		bool vulkan = false;
 		Parameters params;
 		bool reset = false;
-		uint64_t color_resource = 0;
-		uint64_t depth_resource = 0;
-		uint64_t velocity_resource = 0;
-		uint64_t reactive_resource = 0;
-		uint64_t output_resource = 0;
+		ResolvedTexture color;
+		ResolvedTexture depth;
+		ResolvedTexture velocity;
+		ResolvedTexture reactive;
+		ResolvedTexture output;
 	};
+
+	static ResolvedTexture _resolve_texture(RID p_texture);
 
 	static void _upscale_graph_callback(RenderingDeviceDriver *p_driver, RDD::CommandBufferID p_command_buffer, void *p_userdata);
 };
