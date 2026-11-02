@@ -861,11 +861,13 @@ void FSR2Effect::upscale(const Parameters &p_params) {
 	dispatch_desc.renderSize.height = p_params.internal_size.height;
 	dispatch_desc.enableSharpening = (p_params.sharpness > 1e-6f);
 	dispatch_desc.sharpness = p_params.sharpness;
-	dispatch_desc.frameTimeDelta = p_params.delta_time;
+	// AMD's units (ffx_fsr2.h): milliseconds and radians; Parameters holds seconds and degrees. The FOV sets the depth separation FSR2 needs to call a pixel
+	// disoccluded (ffx_fsr2_depth_clip.h, Kfov); in degrees it was the tangent of a meaningless angle.
+	dispatch_desc.frameTimeDelta = p_params.delta_time * 1000.0f;
 	dispatch_desc.preExposure = 1.0f;
 	dispatch_desc.cameraNear = p_params.z_near;
 	dispatch_desc.cameraFar = p_params.z_far;
-	dispatch_desc.cameraFovAngleVertical = p_params.fovy;
+	dispatch_desc.cameraFovAngleVertical = Math::deg_to_rad(p_params.fovy);
 	dispatch_desc.viewSpaceToMetersFactor = 1.0f;
 	dispatch_desc.enableAutoReactive = false;
 	dispatch_desc.autoTcThreshold = 1.0f;
