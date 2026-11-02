@@ -170,7 +170,11 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 
 	p_render_data->scene_data->directional_light_count = _count_directional_lights(p_render_data);
 
-	_setup_environment(p_render_data, false, screen_size, screen_size, p_default_bg_color, false);
+	// The trace and the displacement passes bind scene_state.uniform_buffers[0] (RenderRaytracing): this view's, as
+	// used_uniform_buffer_count was reset above. A later view of the frame writes it again after this view's commands,
+	// ordered by the render graph as raster's views are.
+	[[maybe_unused]] const uint32_t scene_uniform_buffer_index = _setup_environment(p_render_data, false, screen_size, screen_size, p_default_bg_color, false);
+	DEV_ASSERT(scene_uniform_buffer_index == 0);
 
 	// May have changed due to the above (light buffer enlarged, as an example).
 	_update_render_base_uniform_set();
