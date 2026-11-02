@@ -10,3 +10,7 @@ const uint FLAG_DEFORMED = 4u;
 const uint FLAG_DISPLACED = 8u;
 // Uncompressed positions over a compressed attribute buffer (deformed copies of compressed meshes).
 const uint FLAG_COMPRESSED_ATTRIBUTES = 16u;
+// A triangle the ray tracer reports front facing is a raster back face (FRONT_FACING false), rt_triangle_facing().
+const uint FLAG_FACING_INVERTED = 32u;
+// The material turns the normal of back faces, as raster's DO_SIDE_CHECK (cull_front and cull_disabled).
+const uint FLAG_SIDE_CHECK = 64u;

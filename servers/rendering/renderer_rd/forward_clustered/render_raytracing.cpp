@@ -4367,6 +4367,16 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 		}
 	};
 
+	// The facing of an instance's triangles traced with p_tlas_transform, as raster culls and reports it. p_instance_mirror
+	// is the mirror flag raster draws the instance with; raster also mirrors the screen winding for a mirrored camera.
+	const bool camera_mirror = p_render_data->scene_data->cam_transform.basis.determinant() < 0;
+	const bool preserve_front_facing = owner->is_front_facing_preserved_when_mirrored();
+	auto triangle_facing = [&](const SceneShaderForwardClustered::ShaderData *p_shader, bool p_instance_mirror, const Transform3D &p_tlas_transform) -> RTTriangleFacing {
+		const RSE::CullMode cull_mode = p_shader ? p_shader->rt_cull_mode() : RSE::CULL_MODE_BACK;
+		const bool screen_mirrored = p_instance_mirror != camera_mirror && !preserve_front_facing;
+		return rt_triangle_facing(cull_mode, p_instance_mirror != (p_tlas_transform.basis.determinant() < 0), screen_mirrored);
+	};
+
 	// -----------------------------------------------------------------------
 	// Phase 1: CPU / buffer-update work
 	// -----------------------------------------------------------------------
@@ -4570,23 +4580,8 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 					}
 				}
 
+				// The facing flags are the TLAS instance's (triangle_facing()), added where it is pushed.
 				uint32_t inst_flags = 0;
-				if (mm_surf->shader) {
-					switch (mm_surf->shader->rt_cull_mode()) {
-						case RSE::CULL_MODE_DISABLED:
-							inst_flags |= RD::ACCELERATION_STRUCTURE_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT;
-							inst_flags |= RD::ACCELERATION_STRUCTURE_INSTANCE_TRIANGLE_FLIP_FACING_BIT;
-							break;
-						case RSE::CULL_MODE_FRONT:
-							break;
-						case RSE::CULL_MODE_BACK:
-						default:
-							inst_flags |= RD::ACCELERATION_STRUCTURE_INSTANCE_TRIANGLE_FLIP_FACING_BIT;
-							break;
-					}
-				} else {
-					inst_flags |= RD::ACCELERATION_STRUCTURE_INSTANCE_TRIANGLE_FLIP_FACING_BIT;
-				}
 				if (mat_data->rt_sbt_offset > 0) {
 					const SceneShaderRaytracing::CustomShaderEntry *cse =
 							rt_shader_singleton->get_custom_shader_entry(mat_data->rt_sbt_offset);
@@ -4899,23 +4894,9 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 			material_data[material_data.size() - 1].instance_uniforms_ofs = uint32_t(inst->shader_uniforms_offset);
 
 			// Determine per-instance TLAS flags from material properties.
-			uint32_t inst_flags = 0;
-			if (surf->shader) {
-				switch (surf->shader->rt_cull_mode()) {
-					case RSE::CULL_MODE_DISABLED:
-						inst_flags |= RD::ACCELERATION_STRUCTURE_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT;
-						inst_flags |= RD::ACCELERATION_STRUCTURE_INSTANCE_TRIANGLE_FLIP_FACING_BIT;
-						break;
-					case RSE::CULL_MODE_FRONT:
-						break;
-					case RSE::CULL_MODE_BACK:
-					default:
-						inst_flags |= RD::ACCELERATION_STRUCTURE_INSTANCE_TRIANGLE_FLIP_FACING_BIT;
-						break;
-				}
-			} else {
-				inst_flags |= RD::ACCELERATION_STRUCTURE_INSTANCE_TRIANGLE_FLIP_FACING_BIT;
-			}
+			const RTTriangleFacing facing = triangle_facing(surf->shader, inst->mirror, final_transform);
+			uint32_t inst_flags = facing.instance_flags;
+			geometry_data[geometry_data.size() - 1].flags |= facing.geometry_flags;
 
 			if (front_layer) {
 				// A blended surface is the front layer wherever raster draws it: an alpha scissor cuts it, and so does a
@@ -5020,7 +5001,11 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 			} else {
 				motion_indices.push_back(-1);
 			}
-			instance_flags.push_back(pending.inst_flags);
+			// A mirrored instance of the MultiMesh is mirrored in the merged BLAS as raster draws it: only the node's mirror
+			// flag counts.
+			const RTTriangleFacing facing = triangle_facing(pending.mm_surf->shader, pending.mm_surf->owner->mirror, pending.instance_transform);
+			geometry_data[geometry_data.size() - 1].flags |= facing.geometry_flags;
+			instance_flags.push_back(pending.inst_flags | facing.instance_flags);
 			instance_masks.push_back(instance_mask(pending.mm_surf->owner));
 #ifdef TOOLS_ENABLED
 			if (collect_render_info) {
@@ -5051,6 +5036,10 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 			mm_geometry.layer_mask = pending.mm_surf->owner->layer_mask;
 			RT_MaterialData mm_material = pending.mat_data->data;
 			mm_material.instance_uniforms_ofs = uint32_t(pending.mm_surf->owner->shader_uniforms_offset);
+			// The facing of the node's transform for every instance, which the GPU writes: an instance mirrored by its own
+			// transform keeps the facing of its mesh, where raster's mirrors.
+			const RTTriangleFacing facing = triangle_facing(pending.mm_surf->shader, pending.mm_surf->owner->mirror, pending.instance_transform);
+			mm_geometry.flags |= facing.geometry_flags;
 
 			TlasExpandJob job;
 			RendererRD::MaterialStorage::store_transform_transposed_3x4(pending.instance_transform, job.data.node);
@@ -5080,7 +5069,7 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 			job.mm_gpu_buffer = pending.mm_gpu_buffer;
 			job.count = pending.mm_count;
 			job.sbt_offset = pending.mat_data->rt_sbt_offset;
-			job.flags = pending.inst_flags;
+			job.flags = pending.inst_flags | facing.instance_flags;
 			job.mask = instance_mask(pending.mm_surf->owner);
 			tlas_expand_jobs.push_back(job);
 
@@ -5171,7 +5160,10 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 					motion_indices.push_back(-1);
 				}
 
-				instance_flags.push_back(pending.inst_flags);
+				// The TLAS instance holds the instance's own mirroring, which raster does not undo (it culls with the node's).
+				const RTTriangleFacing facing = triangle_facing(pending.mm_surf->shader, pending.mm_surf->owner->mirror, final_transform);
+				geometry_data[geometry_data.size() - 1].flags |= facing.geometry_flags;
+				instance_flags.push_back(pending.inst_flags | facing.instance_flags);
 				instance_masks.push_back(instance_mask(pending.mm_surf->owner));
 			}
 

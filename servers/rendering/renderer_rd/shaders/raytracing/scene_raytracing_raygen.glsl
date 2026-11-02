@@ -970,11 +970,15 @@ void main() {
 		rt_normal = normalize(normal_matrix * ah_tbn.normal);
 		rt_tangent = normalize(normal_matrix * ah_tbn.tangent);
 		rt_bitangent = cross(rt_normal, rt_tangent) * ah_tbn.bitangent_sign;
-		rt_front_face = (gl_HitKindEXT == gl_HitKindFrontFacingTriangleEXT);
+		// As compute_hit_data(): FRONT_FACING and the normal's side as raster has them.
+		rt_front_face = rt_triangle_front_facing(geom);
+		rt_normal = rt_side_checked_normal(geom, rt_normal, rt_front_face);
 	}
-	if (!rt_front_face) {
+#ifdef ENABLE_INTERSECTION_SHADERS
+	if ((geom.flags & FLAG_PROCEDURAL) != 0u && !rt_front_face) {
 		rt_normal = -rt_normal;
 	}
+#endif
 
 	vec3 rt_hit_pos = gl_WorldRayOriginEXT + gl_WorldRayDirectionEXT * gl_HitTEXT;
 	vec4 rt_color = fetch_color(geom, i0, i1, i2, bary);

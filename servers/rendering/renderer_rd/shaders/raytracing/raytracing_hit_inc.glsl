@@ -67,7 +67,17 @@ void get_triangle_indices_ex(in GeometryData geom, uint primitive_id, out uint i
 void get_triangle_indices(in GeometryData geom, out uint i0, out uint i1, out uint i2) {
 	get_triangle_indices_ex(geom, gl_PrimitiveID, i0, i1, i2);
 }
+
+/// FRONT_FACING of a triangle hit, as raster's gl_FrontFacing (render_raytracing.h rt_triangle_facing()).
+bool rt_triangle_front_facing(in GeometryData geom) {
+	return (gl_HitKindEXT == gl_HitKindFrontFacingTriangleEXT) != ((geom.flags & FLAG_FACING_INVERTED) != 0u);
+}
 #endif
+
+/// A triangle's normal on the side raster shades: turned on back faces only where the material does (DO_SIDE_CHECK).
+vec3 rt_side_checked_normal(in GeometryData geom, vec3 p_normal, bool p_front_facing) {
+	return (!p_front_facing && (geom.flags & FLAG_SIDE_CHECK) != 0u) ? -p_normal : p_normal;
+}
 
 /// Displaced geometry: a vertex's position before vertex() moved it (mesh space).
 vec3 fetch_rest_vertex(in GeometryData geom, uint index) {

@@ -15,7 +15,7 @@
 
 struct HitData {
 	vec3 hit_pos;
-	vec3 geometry_normal; // World space, flipped for back-face hits.
+	vec3 geometry_normal; // World space, flipped for back-face hits of a material with DO_SIDE_CHECK (rt_side_checked_normal()).
 	vec3 tangent; // World space.
 	vec3 bitangent; // World space.
 	vec3 mesh_pos; // Mesh space: the instance transform of a compressed mesh also scales by its AABB.
@@ -73,10 +73,10 @@ HitData compute_hit_data() {
 		h.tangent = normalize(normal_matrix * attrs.tangent);
 		h.bitangent = cross(h.geometry_normal, h.tangent) * attrs.bitangent_sign;
 
-		h.is_front_face = (gl_HitKindEXT == gl_HitKindFrontFacingTriangleEXT);
-		if (!h.is_front_face) {
-			h.geometry_normal = -h.geometry_normal;
-		}
+		// FRONT_FACING and the side of the normal as raster has them: a front-culled material, or a mirrored instance,
+		// reports the other face, and only a material with DO_SIDE_CHECK turns the normal of its back faces.
+		h.is_front_face = rt_triangle_front_facing(geom);
+		h.geometry_normal = rt_side_checked_normal(geom, h.geometry_normal, h.is_front_face);
 	}
 
 	h.hit_pos = gl_WorldRayOriginEXT + gl_WorldRayDirectionEXT * gl_HitTEXT;
@@ -315,7 +315,7 @@ void debug_visualize(
 	} else if (vis_mode == 18) {
 		ps.radiance = baseColorToSpecularF0(albedo, metalness, specular_to_f0(specular));
 	} else if (vis_mode == 19) {
-		bool is_front_face = (gl_HitKindEXT == gl_HitKindFrontFacingTriangleEXT);
+		bool is_front_face = rt_triangle_front_facing(geometries[gl_InstanceCustomIndexEXT]);
 		ps.radiance = is_front_face ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
 	} else if (vis_mode == 20) {
 		float depth_range = scene_data_block.data.z_far - scene_data_block.data.z_near;

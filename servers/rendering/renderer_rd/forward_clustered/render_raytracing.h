@@ -48,6 +48,7 @@
 #include "servers/rendering/renderer_rd/shaders/raytracing/raytracing_tlas_expand.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/raytracing/raytracing_volumetric_fog.glsl.gen.h"
 #include "servers/rendering/rendering_device.h"
+#include "servers/rendering/rendering_server_enums.h"
 
 // The path tracer's own textures, in a scope of their own so a view that stops path tracing frees them.
 #define RB_SCOPE_RAYTRACING SNAME("raytracing")
@@ -319,7 +320,36 @@ enum {
 	RT_GEOM_FLAG_DISPLACED = 8u,
 	// Uncompressed positions over a compressed attribute buffer (deformed copies of compressed meshes).
 	RT_GEOM_FLAG_COMPRESSED_ATTRIBUTES = 16u,
+	// Per TLAS instance (rt_triangle_facing()): a triangle the ray tracer reports front facing is a raster back face.
+	RT_GEOM_FLAG_FACING_INVERTED = 32u,
+	// Per TLAS instance: the material turns the normal of back faces, as raster's DO_SIDE_CHECK (cull_front, cull_disabled).
+	RT_GEOM_FLAG_SIDE_CHECK = 64u,
 };
+
+// The facing of the traced triangles of one TLAS instance.
+struct RTTriangleFacing {
+	uint32_t instance_flags = 0; // TRIANGLE_FACING_CULL_DISABLE and TRIANGLE_FLIP_FACING.
+	uint32_t geometry_flags = 0; // RT_GEOM_FLAG_FACING_INVERTED and RT_GEOM_FLAG_SIDE_CHECK.
+};
+
+// The facing of triangles drawn with p_cull_mode, as raster has it (RenderForwardClustered::_render_list_template()):
+// raster culls by the winding in mesh space (a mirrored instance is drawn with the reversed cull mode), and its
+// FRONT_FACING follows the winding on screen, or in mesh space with preserve_front_facing_when_mirrored.
+// The ray tracer decides facing in BLAS space, which the instance transform does not change (Vulkan "Ray Triangle Culling",
+// DXR D3D12_RAYTRACING_INSTANCE_FLAGS), and its front face, without TRIANGLE_FLIP_FACING, is raster's back face.
+// p_blas_mirrored: the BLAS space is mirrored from the space raster culls in (the TLAS instance transform's determinant
+// has the other sign than the one of the transform raster takes the instance's mirror flag from: a MultiMesh instance's
+// own mirroring, which raster does not undo). p_screen_mirrored: raster mirrors the instance's winding on screen (the
+// instance or the camera is mirrored, without preserve_front_facing_when_mirrored).
+constexpr RTTriangleFacing rt_triangle_facing(RSE::CullMode p_cull_mode, bool p_blas_mirrored, bool p_screen_mirrored) {
+	const bool cull_front = p_cull_mode == RSE::CULL_MODE_FRONT;
+	RTTriangleFacing facing;
+	facing.instance_flags = (cull_front == p_blas_mirrored ? uint32_t(RD::ACCELERATION_STRUCTURE_INSTANCE_TRIANGLE_FLIP_FACING_BIT) : 0u) |
+			(p_cull_mode == RSE::CULL_MODE_DISABLED ? uint32_t(RD::ACCELERATION_STRUCTURE_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT) : 0u);
+	facing.geometry_flags = (cull_front != p_screen_mirrored ? uint32_t(RT_GEOM_FLAG_FACING_INVERTED) : 0u) |
+			(p_cull_mode != RSE::CULL_MODE_BACK ? uint32_t(RT_GEOM_FLAG_SIDE_CHECK) : 0u);
+	return facing;
+}
 
 // Must match GLSL DisplaceJob (raytracing_displace.glsl, std430).
 struct alignas(16) RT_DisplaceJob {
