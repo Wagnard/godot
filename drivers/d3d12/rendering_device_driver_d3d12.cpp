@@ -2762,7 +2762,16 @@ void RenderingDeviceDriverD3D12::command_pipeline_barrier(CommandBufferID p_cmd_
 		VectorView<RDD::TextureBarrier> p_texture_barriers,
 		VectorView<AccelerationStructureBarrier> p_acceleration_structure_barriers) {
 	if (!barrier_capabilities.enhanced_barriers_supported) {
-		// Enhanced barriers are a requirement for this function.
+		// The legacy path tracks resource states itself, so the graph only asks it for memory barriers between untracked
+		// work (batched acceleration structure builds, untracked_barrier()). Their legacy equivalent is a UAV barrier
+		// without a resource: "any UAV access could require the barrier" (D3D12_RESOURCE_UAV_BARRIER), which also orders
+		// acceleration structure writes and reads (DXR spec, "Synchronizing acceleration structure memory writes/reads").
+		if (p_memory_barriers.size() > 0) {
+			CommandBufferInfo *cmd_buf_info = (CommandBufferInfo *)(p_cmd_buffer.id);
+			_resource_transitions_flush(cmd_buf_info);
+			const D3D12_RESOURCE_BARRIER uav_barrier = CD3DX12_RESOURCE_BARRIER::UAV(nullptr);
+			cmd_buf_info->cmd_list->ResourceBarrier(1, &uav_barrier);
+		}
 		return;
 	}
 
@@ -6654,6 +6663,18 @@ RDD::AccelerationStructureID RenderingDeviceDriverD3D12::blas_create(VectorView<
 
 			if (!barrier_capabilities.enhanced_barriers_supported) {
 				blas_info.input_buffer_infos.push_back(index_buffer);
+			}
+		}
+
+		if (triangles.transform_buffer) {
+			// A row-major 3x4 affine matrix applied to the vertices during the build, as Vulkan's VkTransformMatrixKHR
+			// (DXR spec, D3D12_RAYTRACING_GEOMETRY_TRIANGLES_DESC). RenderingDevice checked the 16-byte alignment.
+			BufferInfo *transform_buffer = (BufferInfo *)triangles.transform_buffer.id;
+			d3d12_geometry.Triangles.Transform3x4 = transform_buffer->gpu_virtual_address + triangles.transform_offset;
+
+			if (!barrier_capabilities.enhanced_barriers_supported) {
+				// Must be in NON_PIXEL_SHADER_RESOURCE, the state the legacy build transitions its inputs to.
+				blas_info.input_buffer_infos.push_back(transform_buffer);
 			}
 		}
 

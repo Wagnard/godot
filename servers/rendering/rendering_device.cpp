@@ -1093,9 +1093,10 @@ Error RenderingDevice::_acceleration_structure_scratch_grow(uint64_t p_size) {
 // Places the scratch range of r_build in the shared scratch buffer and appends r_build to the batch.
 Error RenderingDevice::_acceleration_structure_batch_push(RDG::RecordedAccelerationStructureBuild &r_build) {
 	AccelerationStructureScratch &scratch = acceleration_structure_scratch;
-	const uint64_t size = driver->acceleration_structure_get_scratch_size_bytes(r_build.acceleration_structure);
+	// Each build's scratch range starts on the alignment D3D12 requires (Vulkan's sizes already include its own).
+	const uint64_t size = STEPIFY(driver->acceleration_structure_get_scratch_size_bytes(r_build.acceleration_structure), AS_SCRATCH_RANGE_ALIGNMENT);
 	bool barrier = acceleration_structure_batch.barrier_pending;
-	uint64_t offset = barrier ? 0 : scratch.used;
+	uint64_t offset = barrier ? 0 : STEPIFY(scratch.used, AS_SCRATCH_RANGE_ALIGNMENT);
 	if (offset + size > scratch.size) {
 		if (scratch.size < scratch.max_size || size > scratch.size) {
 			// No build uses the new buffer yet, so it needs no barrier of its own.

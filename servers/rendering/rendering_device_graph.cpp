@@ -834,14 +834,19 @@ void RenderingDeviceGraph::_add_acceleration_structure_barrier_to_command(RDD::A
 }
 
 void RenderingDeviceGraph::_run_acceleration_structure_build_batch(RDD::CommandBufferID p_command_buffer, const RecordedAccelerationStructureBuild *p_builds, uint32_t p_build_count) {
-	// Generic memory access, as acceleration structure reads are not allowed in global memory barriers on every driver.
+	// Builds access their scratch ranges and acceleration structures with the acceleration structure read and write types
+	// at the build stage (Vulkan, vkCmdBuildAccelerationStructuresKHR). D3D12 maps them to its acceleration structure
+	// access bits; generic memory access would be ACCESS_COMMON, whose use as AccessBefore the Enhanced Barriers spec
+	// strongly discourages (costly cache flushes).
 	RDD::MemoryAccessBarrier build_barrier;
-	build_barrier.src_access = RDD::BARRIER_ACCESS_MEMORY_WRITE_BIT;
-	build_barrier.dst_access = RDD::BARRIER_ACCESS_MEMORY_READ_BIT | RDD::BARRIER_ACCESS_MEMORY_WRITE_BIT;
+	build_barrier.src_access = RDD::BARRIER_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT;
+	build_barrier.dst_access = RDD::BARRIER_ACCESS_ACCELERATION_STRUCTURE_READ_BIT | RDD::BARRIER_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT;
 
 	for (uint32_t i = 0; i < p_build_count; i++) {
 		const RecordedAccelerationStructureBuild &build = p_builds[i];
-		if (build.barrier_before && driver_honors_barriers) {
+		// Also on a driver that doesn't honor pipeline barriers: nothing tracks these builds, and such a driver turns a
+		// memory barrier into its own global barrier (D3D12 legacy barriers: a UAV barrier without a resource).
+		if (build.barrier_before) {
 			driver->command_pipeline_barrier(p_command_buffer, RDD::PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT, RDD::PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT, build_barrier, {}, {}, {});
 		}
 
@@ -1170,7 +1175,15 @@ void RenderingDeviceGraph::_run_render_commands(int32_t p_level, const RecordedC
 				_run_acceleration_structure_build_batch(r_command_buffer, batch_command->builds(), batch_command->build_count);
 			} break;
 			case RecordedCommand::TYPE_FULL_BARRIER: {
-				// The barrier itself is recorded with the level, from the command's stages and memory barrier.
+				// The barrier itself is recorded with the level, from the command's stages and memory barrier. A driver that
+				// doesn't honor pipeline barriers records no level barriers, but must still order the untracked work around
+				// this one: it turns a memory barrier into its own global barrier.
+				if (!driver_honors_barriers) {
+					RDD::MemoryAccessBarrier full_barrier;
+					full_barrier.src_access = RDD::BARRIER_ACCESS_MEMORY_WRITE_BIT;
+					full_barrier.dst_access = RDD::BARRIER_ACCESS_MEMORY_READ_BIT | RDD::BARRIER_ACCESS_MEMORY_WRITE_BIT;
+					driver->command_pipeline_barrier(r_command_buffer, RDD::PIPELINE_STAGE_ALL_COMMANDS_BIT, RDD::PIPELINE_STAGE_ALL_COMMANDS_BIT, full_barrier, {}, {}, {});
+				}
 			} break;
 			case RecordedCommand::TYPE_BUFFER_CLEAR: {
 				const RecordedBufferClearCommand *buffer_clear_command = reinterpret_cast<const RecordedBufferClearCommand *>(command);
