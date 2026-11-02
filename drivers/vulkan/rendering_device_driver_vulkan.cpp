@@ -601,6 +601,8 @@ Error RenderingDeviceDriverVulkan::_initialize_device_extensions() {
 		_register_requested_device_extension(VK_NV_RAY_TRACING_VALIDATION_EXTENSION_NAME, false);
 	}
 	_register_requested_device_extension(VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME, false);
+	// Not used by Godot itself: AMD's FidelityFX shaders declare its capability (see synchronization2_support).
+	_register_requested_device_extension(VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME, false);
 
 	// We don't actually use this extension, but some runtime components on some platforms
 	// can and will fill the validation layers with useless info otherwise if not enabled.
@@ -939,6 +941,8 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 		VkPhysicalDeviceRayTracingPipelineFeaturesKHR raytracing_pipeline_features = {};
 		VkPhysicalDeviceRayQueryFeaturesKHR ray_query_features = {};
 		VkPhysicalDeviceSynchronization2FeaturesKHR sync_2_features = {};
+		VkPhysicalDeviceSubgroupSizeControlFeatures subgroup_size_control_features = {};
+		VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR compute_shader_derivatives_features = {};
 		VkPhysicalDeviceRayTracingValidationFeaturesNV raytracing_validation_features = {};
 		VkPhysicalDeviceOpacityMicromapFeaturesEXT opacity_micromap_features = {};
 		VkPhysicalDeviceShaderRelaxedExtendedInstructionFeaturesKHR relaxed_extended_instruction_features = {};
@@ -1050,6 +1054,18 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 			next_features = &sync_2_features;
 		}
 
+		if (enabled_device_extension_names.has(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME)) {
+			subgroup_size_control_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES;
+			subgroup_size_control_features.pNext = next_features;
+			next_features = &subgroup_size_control_features;
+		}
+
+		if (enabled_device_extension_names.has(VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME)) {
+			compute_shader_derivatives_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR;
+			compute_shader_derivatives_features.pNext = next_features;
+			next_features = &compute_shader_derivatives_features;
+		}
+
 		if (enabled_device_extension_names.has(VK_KHR_SHADER_RELAXED_EXTENDED_INSTRUCTION_EXTENSION_NAME)) {
 			relaxed_extended_instruction_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_RELAXED_EXTENDED_INSTRUCTION_FEATURES_KHR;
 			relaxed_extended_instruction_features.pNext = next_features;
@@ -1086,6 +1102,7 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 			descriptor_indexing_capabilities.descriptor_binding_partially_bound = device_features_vk_1_2.descriptorBindingPartiallyBound;
 			descriptor_indexing_capabilities.descriptor_binding_variable_descriptor_count = device_features_vk_1_2.descriptorBindingVariableDescriptorCount;
 			descriptor_indexing_capabilities.runtime_descriptor_array = device_features_vk_1_2.runtimeDescriptorArray;
+			separate_depth_stencil_layouts_support = device_features_vk_1_2.separateDepthStencilLayouts;
 		} else {
 			if (enabled_device_extension_names.has(VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME)) {
 				shader_capabilities.shader_float16_is_supported = shader_features.shaderFloat16;
@@ -1165,6 +1182,20 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 
 		if (enabled_device_extension_names.has(VK_KHR_SHADER_RELAXED_EXTENDED_INSTRUCTION_EXTENSION_NAME)) {
 			shader_relaxed_extended_instruction_support = relaxed_extended_instruction_features.shaderRelaxedExtendedInstruction;
+		}
+
+		if (enabled_device_extension_names.has(VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME)) {
+			synchronization2_support = sync_2_features.synchronization2;
+		}
+
+		if (enabled_device_extension_names.has(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME)) {
+			subgroup_size_control_support = subgroup_size_control_features.subgroupSizeControl;
+			compute_full_subgroups_support = subgroup_size_control_features.computeFullSubgroups;
+		}
+
+		if (enabled_device_extension_names.has(VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME)) {
+			compute_derivative_group_quads_support = compute_shader_derivatives_features.computeDerivativeGroupQuads;
+			compute_derivative_group_linear_support = compute_shader_derivatives_features.computeDerivativeGroupLinear;
 		}
 
 		// The extension depends on synchronization2 (extension or Vulkan 1.3), only for the stage and accesses its
@@ -1561,6 +1592,32 @@ Error RenderingDeviceDriverVulkan::_initialize_device(const LocalVector<VkDevice
 		create_info_next = &relaxed_extended_instruction_features;
 	}
 
+	VkPhysicalDeviceSynchronization2FeaturesKHR sync_2_features = {};
+	if (synchronization2_support) {
+		sync_2_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES;
+		sync_2_features.pNext = create_info_next;
+		sync_2_features.synchronization2 = VK_TRUE;
+		create_info_next = &sync_2_features;
+	}
+
+	VkPhysicalDeviceSubgroupSizeControlFeatures subgroup_size_control_features = {};
+	if (subgroup_size_control_support) {
+		subgroup_size_control_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES;
+		subgroup_size_control_features.pNext = create_info_next;
+		subgroup_size_control_features.subgroupSizeControl = VK_TRUE;
+		subgroup_size_control_features.computeFullSubgroups = compute_full_subgroups_support;
+		create_info_next = &subgroup_size_control_features;
+	}
+
+	VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR compute_shader_derivatives_features = {};
+	if (compute_derivative_group_quads_support || compute_derivative_group_linear_support) {
+		compute_shader_derivatives_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR;
+		compute_shader_derivatives_features.pNext = create_info_next;
+		compute_shader_derivatives_features.computeDerivativeGroupQuads = compute_derivative_group_quads_support;
+		compute_shader_derivatives_features.computeDerivativeGroupLinear = compute_derivative_group_linear_support;
+		create_info_next = &compute_shader_derivatives_features;
+	}
+
 	VkPhysicalDeviceRayTracingValidationFeaturesNV raytracing_validation_features = {};
 	if (raytracing_capabilities.validation) {
 		raytracing_validation_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_VALIDATION_FEATURES_NV;
@@ -1591,6 +1648,9 @@ Error RenderingDeviceDriverVulkan::_initialize_device(const LocalVector<VkDevice
 		vulkan_1_2_features.descriptorBindingPartiallyBound = descriptor_indexing_capabilities.descriptor_binding_partially_bound;
 		vulkan_1_2_features.descriptorBindingVariableDescriptorCount = descriptor_indexing_capabilities.descriptor_binding_variable_descriptor_count;
 		vulkan_1_2_features.runtimeDescriptorArray = descriptor_indexing_capabilities.runtime_descriptor_array;
+		// Barriers on the depth aspect alone of a depth/stencil image (VUID-VkImageMemoryBarrier-image-03320): AMD's
+		// FidelityFX backend transitions Godot's depth that way.
+		vulkan_1_2_features.separateDepthStencilLayouts = separate_depth_stencil_layouts_support;
 		create_info_next = &vulkan_1_2_features;
 
 		vulkan_1_1_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;

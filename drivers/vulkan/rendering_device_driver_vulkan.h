@@ -196,6 +196,14 @@ class RenderingDeviceDriverVulkan : public RenderingDeviceDriver {
 	bool shader_output_viewport_index_support = false;
 	bool shader_output_layer_support = false;
 	bool shader_relaxed_extended_instruction_support = false;
+	// Not used by Godot itself; enabled when available, as AMD's FidelityFX SDK sample does, because its effects pick
+	// wave sizes and synchronization2 barriers from what the GPU offers (FSRUpscalerVulkan).
+	bool subgroup_size_control_support = false;
+	bool compute_full_subgroups_support = false;
+	bool synchronization2_support = false;
+	bool compute_derivative_group_quads_support = false;
+	bool compute_derivative_group_linear_support = false;
+	bool separate_depth_stencil_layouts_support = false;
 	AccelerationStructureCapabilities acceleration_structure_capabilities;
 	bool ray_query_support = false;
 	bool opacity_micromap_support = false;
