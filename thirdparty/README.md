@@ -20,7 +20,7 @@ Files extracted from upstream source:
 ## amd-ffx-api
 
 - Upstream: https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK
-- Version: 2.3.0 (2026)
+- Version: 2.4.0 (2026)
 - License: MIT
 
 Files extracted from upstream source (headers only; the signed loader, frame generation and upscaler DLLs are
