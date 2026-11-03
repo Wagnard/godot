@@ -633,6 +633,9 @@ struct RTDeformedCacheEntry {
 	RID omm_micromap;
 	uint32_t omm_level = 0;
 	RID built_omm_micromap;
+
+	uint32_t updated_frame = 0; // The last frame its BLAS was built or refit; 0 = never.
+	uint32_t budget_held_frame = 0; // The last frame the dynamic BLAS budgets held its update (_schedule_dynamic_updates()).
 };
 
 /// Cache entry for a per-(MultiMesh, surface) merged BLAS.
@@ -874,8 +877,54 @@ class RenderRaytracing {
 	uint64_t displaced_vertices = 0;
 	uint32_t displaced_refitted = 0; // Of displaced_evaluated, refit instead of built again.
 	uint32_t displaced_guard_rebuilds = 0; // BLASes the NaN guard asked to build again, since the previous log.
-	// The frame's BLAS updates of deforming geometry waiting for their turn out of view (out_of_view_update_distance).
+	// The frame's BLAS updates of deforming geometry waiting for their turn out of view (out_of_view_update_distance), or
+	// held by the dynamic BLAS budgets.
 	uint32_t out_of_view_deferred = 0;
+	// The most frames a held update of deforming geometry waited since its last BLAS update, since the previous log
+	// (GODOT_RT_LOG_CACHES).
+	uint32_t held_max_age = 0;
+
+	// out_of_view_update_distance's turns: what is in view is updated every frame, what is out of view and far every N
+	// frames (build_tlas()).
+	struct UpdateTurns {
+		Vector<Plane> view_planes; // Empty: everything counts as in view.
+		Vector3 view_points[8];
+		Vector3 camera_origin;
+		float update_distance = 0.0f; // 0: no turns.
+		uint32_t frame = 0;
+		bool in_view(const AABB &p_aabb) const;
+		bool turn(const AABB &p_aabb, uint64_t p_key) const; // False when the update waits for a later frame.
+	};
+
+	// rendering/pathtracing/dynamic_blas_*: per-frame budgets of the updates of deforming geometry that can wait (refits,
+	// periodic and RT_BLAS_UPDATE_REBUILD builds), ranked by apparent size and frames waited (NVIDIA's RTDynamicScheduler).
+	// Off by default. A new or reshaped BLAS is built at once and not counted. Shared by the views of a frame.
+	struct DynamicCandidate {
+		RTDeformedCacheEntry *entry = nullptr;
+		AABB aabb; // World space.
+		uint64_t key = 0;
+		float score = 0.0f;
+		uint32_t order = 0;
+		uint32_t triangles = 0;
+		bool in_view = false;
+		uint32_t pending = UINT32_MAX; // A displaced surface's pending job in _displace_surfaces(); UINT32_MAX: skinned.
+		bool rebuild = false; // The update is a build.
+		bool rebuild_only = false; // RT_BLAS_UPDATE_REBUILD: it cannot become a refit.
+		bool selected = false;
+		bool downgraded = false; // A periodic build past the build budget, refit instead.
+	};
+	struct DynamicBudgetUsage {
+		uint32_t frame = UINT32_MAX;
+		uint32_t operations = 0;
+		uint64_t build_triangles = 0;
+		uint64_t update_triangles = 0;
+		uint32_t cursor = 0; // Rotates equal scores between frames.
+	} dynamic_budget_usage;
+	LocalVector<DynamicCandidate> dynamic_candidates;
+	static bool _dynamic_budgets_enabled();
+	// Adds the skinned and blend shape surfaces whose update is due, ranks every candidate and selects those within the
+	// budgets; the others keep their BLAS this frame (RTDeformedCacheEntry::budget_held_frame).
+	void _schedule_dynamic_updates(const RenderDataRD *p_render_data, const UpdateTurns &p_turns);
 	// What a build_tlas() call did, for its view's Viewport.RENDER_INFO_RT_* counters: counted on the CPU where the work is
 	// decided (no readback). Later views of a frame count what they do themselves (the first one updates shared entries).
 	struct RenderInfoCounters {
@@ -885,7 +934,7 @@ class RenderRaytracing {
 		uint64_t captured_vertices = 0;
 		uint64_t captured_bytes = 0; // Written to the surfaces' displaced vertex buffers.
 		uint32_t dynamic_updated = 0; // Deforming geometry (skinned, blend shapes, displaced, merged) whose BLAS was built or refit.
-		uint32_t budget_limited = 0; // Merged MultiMeshes kept at the LOD they are built with by the LOD switch budget.
+		uint32_t budget_limited = 0; // Merged MultiMeshes kept at their LOD by the LOD switch budget, updates held by the dynamic BLAS budgets.
 		uint32_t pending_surfaces = 0; // Surfaces whose hit group is still compiling: left out, or traced with a stand-in.
 	} render_info_counters;
 	uint64_t displaced_vb_bytes = 0; // The capacity of every surface's displaced vertex buffer.
@@ -1020,7 +1069,7 @@ class RenderRaytracing {
 	uint32_t displace_job_capacity = 0;
 	Transform3D displace_camera_transform;
 	Projection displace_camera_projection;
-	void _displace_surfaces(const RenderDataRD *p_render_data);
+	void _displace_surfaces(const RenderDataRD *p_render_data, const UpdateTurns &p_turns);
 	bool displaced_refit_used = true; // rendering/pathtracing/displaced_refit in the previous frame.
 	// The refit jobs' NaN guard counts (raytracing_displace.glsl), one per job, read back without waiting: the surfaces of
 	// the jobs that kept vertices are built again once they arrive.

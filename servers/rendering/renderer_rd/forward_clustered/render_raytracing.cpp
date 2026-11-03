@@ -1245,9 +1245,11 @@ RTSurfaceData *RenderRaytracing::process_deformed_surface(
 				static_cast<uint32_t>(p_source.cache_key), entry.ptr, r_dirty_blas_list, entry.omm_micromap, entry.omm_level);
 		entry.blas_built_once = entry.ptr->blas.is_valid();
 		entry.built_omm_micromap = entry.omm_micromap;
+		entry.updated_frame = current_frame;
 		render_info_counters.dynamic_updated++;
 	} else if (data_changed) {
 		cache_misses++;
+		entry.updated_frame = current_frame;
 		render_info_counters.dynamic_updated++;
 		if (p_source.force_rebuild || p_source.rebuild_only) {
 			r_dirty_blas_list.push_back(entry.ptr->blas);
@@ -1270,7 +1272,10 @@ RTSurfaceData *RenderRaytracing::process_deformed_surface(
 	if (defer_update) {
 		// Still a change for the next frame. The motion until the update is reported then: prev_pos_vb takes the positions
 		// owned_vb_full keeps, those the BLAS was last updated with.
-		out_of_view_deferred += first_touch_this_frame ? 1 : 0;
+		if (first_touch_this_frame) {
+			out_of_view_deferred++;
+			held_max_age = MAX(held_max_age, current_frame - entry.updated_frame);
+		}
 	} else {
 		entry.cached_change_stamp = p_source.change_stamp;
 		entry.cached_buffer_id = buffer_id;
@@ -1637,12 +1642,147 @@ static RSE::RTBlasUpdate _rt_blas_update(const RenderGeometryInstanceBase *p_ins
 }
 
 // ---------------------------------------------------------------------------
+// Updates of deforming geometry: turns out of view and budgets
+// ---------------------------------------------------------------------------
+
+bool RenderRaytracing::UpdateTurns::in_view(const AABB &p_aabb) const {
+	return view_planes.is_empty() || p_aabb.intersects_convex_shape(view_planes.ptr(), view_planes.size(), view_points, 8);
+}
+
+bool RenderRaytracing::UpdateTurns::turn(const AABB &p_aabb, uint64_t p_key) const {
+	if (update_distance <= 0.0f || in_view(p_aabb)) {
+		return true;
+	}
+	const uint32_t OUT_OF_VIEW_MAX_UPDATE_PERIOD = 8;
+	const float distance = Vector3().max(p_aabb.position - camera_origin).max(camera_origin - (p_aabb.position + p_aabb.size)).length();
+	const uint32_t period = CLAMP(uint32_t(distance / update_distance), 1u, OUT_OF_VIEW_MAX_UPDATE_PERIOD);
+	return (frame + uint32_t(p_key)) % period == 0;
+}
+
+bool RenderRaytracing::_dynamic_budgets_enabled() {
+	return GLOBAL_GET_CACHED(int64_t, "rendering/pathtracing/dynamic_blas_max_operations") > 0 ||
+			GLOBAL_GET_CACHED(int64_t, "rendering/pathtracing/dynamic_blas_build_triangle_budget") > 0 ||
+			GLOBAL_GET_CACHED(int64_t, "rendering/pathtracing/dynamic_blas_update_triangle_budget") > 0;
+}
+
+// NVIDIA's RTDynamicScheduler (render_raytracing_scheduler.cpp @49a825dc52) on the updates our rules leave due: what is
+// in view every frame, out of view at its turn (out_of_view_update_distance), displaced surfaces at theirs
+// (displacement_update_distance). The same priority, (radius / max(distance, radius))^2 weighted by
+// dynamic_offscreen_size_weight out of view, times 1 + the frames waited (at most dynamic_max_stale_frames, past which it
+// ranks first), and the same budgets of operations and of built and refit triangles, shared by the views of a frame. As
+// theirs, a periodic build past the build budget is refit instead, and a held update is traced at the state of its last
+// one. Unlike theirs, a new or reshaped BLAS is never held (built at once, not counted), and the first update of each kind
+// in a frame passes whatever its size, so that a surface larger than a budget is not starved.
+void RenderRaytracing::_schedule_dynamic_updates(const RenderDataRD *p_render_data, const UpdateTurns &p_turns) {
+	RendererRD::MeshStorage *mesh_storage = RendererRD::MeshStorage::get_singleton();
+	const uint32_t current_frame = p_turns.frame;
+
+	// Skinned and blend shape surfaces whose deformed buffer changed: build_tlas() refits their BLAS (builds it again with
+	// RT_BLAS_UPDATE_REBUILD). Those displaced further by a vertex capture are candidates of _displace_surfaces().
+	const PagedArray<RenderGeometryInstance *> &rt_instances = *p_render_data->rt_instances;
+	for (uint32_t i = 0; i < (uint32_t)rt_instances.size(); i++) {
+		const RenderForwardClustered::GeometryInstanceForwardClustered *inst =
+				static_cast<const RenderForwardClustered::GeometryInstanceForwardClustered *>(rt_instances[i]);
+		if (!inst || !inst->data || inst->rt_procedural || !inst->mesh_instance.is_valid() || inst->data->base_type == RSE::INSTANCE_MULTIMESH) {
+			continue;
+		}
+		const uint32_t mi_index = uint32_t(inst->mesh_instance.get_id() & 0xFFFFFFFFULL);
+		if (!p_turns.turn(inst->transformed_aabb, mi_index)) {
+			continue;
+		}
+		const bool in_view = p_turns.in_view(inst->transformed_aabb);
+		for (const RenderForwardClustered::GeometryInstanceSurfaceDataCache *surf = inst->surface_caches; surf; surf = surf->next) {
+			if ((_front_layer_surface(surf) && _front_layer_skipped(surf)) || surf->primitive != RSE::PRIMITIVE_TRIANGLES) {
+				continue;
+			}
+			RTDeformedCacheEntry *entry = deformed_pool.get_or_null(surf->rt_deformed_handle);
+			if (!entry || !entry->ptr || !entry->blas_built_once || entry->displaced_frame == current_frame) {
+				continue;
+			}
+			const RID vertex_buffer = mesh_storage->mesh_instance_get_vertex_buffer(inst->mesh_instance, surf->surface_index);
+			if (!vertex_buffer.is_valid() || (entry->cached_buffer_id == vertex_buffer.get_id() && entry->cached_change_stamp == mesh_storage->mesh_instance_get_last_change(inst->mesh_instance, surf->surface_index))) {
+				continue;
+			}
+			DynamicCandidate candidate;
+			candidate.entry = entry;
+			candidate.aabb = inst->transformed_aabb;
+			candidate.key = (uint64_t(mi_index) << 16) | (surf->surface_index & 0xFFFFu);
+			candidate.triangles = mesh_storage->mesh_surface_get_vertices_drawn_count(surf->surface) / 3;
+			candidate.in_view = in_view;
+			candidate.rebuild = _rt_blas_update(inst, surf->shader) == RSE::RT_BLAS_UPDATE_REBUILD;
+			candidate.rebuild_only = candidate.rebuild;
+			dynamic_candidates.push_back(candidate);
+		}
+	}
+	if (dynamic_candidates.is_empty()) {
+		return;
+	}
+
+	const int64_t max_operations = GLOBAL_GET_CACHED(int64_t, "rendering/pathtracing/dynamic_blas_max_operations");
+	const int64_t build_budget = GLOBAL_GET_CACHED(int64_t, "rendering/pathtracing/dynamic_blas_build_triangle_budget");
+	const int64_t update_budget = GLOBAL_GET_CACHED(int64_t, "rendering/pathtracing/dynamic_blas_update_triangle_budget");
+	const uint32_t max_stale = uint32_t(MAX(GLOBAL_GET_CACHED(int64_t, "rendering/pathtracing/dynamic_max_stale_frames"), int64_t(1)));
+	const float offscreen_weight = GLOBAL_GET_CACHED(float, "rendering/pathtracing/dynamic_offscreen_size_weight");
+	DynamicBudgetUsage &usage = dynamic_budget_usage;
+	if (usage.frame != current_frame) {
+		const uint32_t cursor = usage.cursor;
+		usage = DynamicBudgetUsage();
+		usage.frame = current_frame;
+		usage.cursor = cursor;
+	}
+
+	for (DynamicCandidate &candidate : dynamic_candidates) {
+		const real_t radius = candidate.aabb.size.length() * 0.5f;
+		float visibility = 0.0f;
+		if (radius > 0) {
+			const real_t ratio = radius / MAX(p_turns.camera_origin.distance_to(candidate.aabb.get_center()), radius);
+			visibility = float(ratio * ratio) * (candidate.in_view ? 1.0f : offscreen_weight);
+		}
+		const uint32_t waited = current_frame - candidate.entry->updated_frame;
+		candidate.score = MAX(visibility, 1e-4f) * float(1 + MIN(waited, max_stale)) + (waited >= max_stale ? 1e6f : 0.0f);
+		candidate.order = uint32_t(candidate.key) - usage.cursor;
+	}
+	struct CandidateSort {
+		_FORCE_INLINE_ bool operator()(const DynamicCandidate &p_a, const DynamicCandidate &p_b) const {
+			return p_a.score != p_b.score ? p_a.score > p_b.score : p_a.order < p_b.order;
+		}
+	};
+	dynamic_candidates.sort_custom<CandidateSort>();
+
+	uint32_t selected = 0;
+	for (DynamicCandidate &candidate : dynamic_candidates) {
+		if (max_operations > 0 && usage.operations >= uint64_t(max_operations)) {
+			break;
+		}
+		const bool fits_build = build_budget <= 0 || usage.build_triangles == 0 || usage.build_triangles + candidate.triangles <= uint64_t(build_budget);
+		const bool fits_update = update_budget <= 0 || usage.update_triangles == 0 || usage.update_triangles + candidate.triangles <= uint64_t(update_budget);
+		if (candidate.rebuild && fits_build) {
+			usage.build_triangles += candidate.triangles;
+		} else if ((!candidate.rebuild || !candidate.rebuild_only) && fits_update) {
+			candidate.downgraded = candidate.rebuild;
+			usage.update_triangles += candidate.triangles;
+		} else {
+			continue;
+		}
+		candidate.selected = true;
+		usage.operations++;
+		selected++;
+	}
+	usage.cursor += selected;
+	for (const DynamicCandidate &candidate : dynamic_candidates) {
+		// A later view of the frame may select what an earlier one held.
+		candidate.entry->budget_held_frame = candidate.selected ? 0 : current_frame;
+		render_info_counters.budget_limited += candidate.selected ? 0 : 1;
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Displacement by material vertex() code
 // ---------------------------------------------------------------------------
 
 // Runs the vertex() of every material that moves VERTEX on its surfaces, so their BLAS holds what raster draws
 // (Terrain3D builds its whole relief there). The output goes through the deformed path in build_tlas().
-void RenderRaytracing::_displace_surfaces(const RenderDataRD *p_render_data) {
+void RenderRaytracing::_displace_surfaces(const RenderDataRD *p_render_data, const UpdateTurns &p_turns) {
 	SceneShaderRaytracing *rt_shader = SceneShaderRaytracing::get_singleton();
 	RendererRD::MeshStorage *mesh_storage = RendererRD::MeshStorage::get_singleton();
 	RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
@@ -1701,6 +1841,31 @@ void RenderRaytracing::_displace_surfaces(const RenderDataRD *p_render_data) {
 	LocalVector<Job> jobs;
 	LocalVector<RT_DisplaceJob> job_data;
 	displaced_refitted = 0;
+	// A surface to evaluate this frame, once the dynamic BLAS budgets (if any) let it.
+	struct Evaluation {
+		const RenderForwardClustered::GeometryInstanceForwardClustered *inst = nullptr;
+		const RenderForwardClustered::GeometryInstanceSurfaceDataCache *surf = nullptr;
+		RTDeformedCacheEntry *entry = nullptr;
+		RTMaterialData *mat_data = nullptr;
+		RID program_shader;
+		RID pipeline;
+		void *mesh_surface = nullptr;
+		uint64_t format = 0;
+		uint64_t deformation = 0;
+		uint32_t vertex_count = 0;
+		uint32_t tbn_words = 0;
+		uint32_t size = 0;
+		uint32_t instance_uniforms_hash = 0;
+		uint16_t material_counter = 0;
+		bool capture = false;
+		bool skinned = false;
+		bool first = false;
+		bool rebuild = false;
+		bool held = false;
+	};
+	LocalVector<Evaluation> evaluations;
+	const bool dynamic_budgets = _dynamic_budgets_enabled();
+	dynamic_candidates.clear();
 
 	// rendering/pathtracing/vertex_capture_mode, read every frame (nothing depends on it in a pipeline key): the surfaces
 	// the raster vertex shader evaluates, where the device has vertex pipeline stores. Without, the compute pass for all.
@@ -1791,7 +1956,10 @@ void RenderRaytracing::_displace_surfaces(const RenderDataRD *p_render_data) {
 				}
 				evaluate = (current_frame + uint32_t(surf->rt_deformed_handle.get_id())) % period == 0;
 				entry->displaced_deferred = !evaluate;
-				displaced_deferred += evaluate ? 0 : 1;
+				if (!evaluate) {
+					displaced_deferred++;
+					held_max_age = MAX(held_max_age, current_frame - entry->updated_frame);
+				}
 			}
 			if (entry->displaced_vb_capacity < size) {
 				if (entry->displaced_vb.is_valid()) {
@@ -1817,95 +1985,165 @@ void RenderRaytracing::_displace_surfaces(const RenderDataRD *p_render_data) {
 			// the shader's rt_blas render mode): REBUILD builds again every time, REFIT leaves out the periodic builds.
 			const RSE::RTBlasUpdate blas_update = _rt_blas_update(inst, surf->shader);
 			const bool periodic_rebuild = blas_update != RSE::RT_BLAS_UPDATE_REFIT && entry->displaced_refits >= DISPLACED_REBUILD_PERIOD;
-			const bool rebuild = !displaced_refit || blas_update == RSE::RT_BLAS_UPDATE_REBUILD || refit_switched || reshaped || entry->displaced_guard_rebuild || periodic_rebuild ||
+			// What only a build does; the dynamic BLAS budgets never hold it.
+			const bool required_rebuild = refit_switched || reshaped || entry->displaced_guard_rebuild ||
 					!entry->ptr || !rd->acceleration_structure_is_valid(entry->ptr->blas) || !entry->blas_built_once ||
 					!entry->owned_vb_full.is_valid() || entry->cached_vertex_count != vertex_count || entry->omm_micromap != entry->built_omm_micromap;
+			const bool rebuild_only = !displaced_refit || blas_update == RSE::RT_BLAS_UPDATE_REBUILD;
+			const bool rebuild = required_rebuild || rebuild_only || periodic_rebuild;
 			entry->displaced_frame = current_frame;
 			entry->displaced_rebuild = evaluate && rebuild;
 			entry->displaced_prev_offset = vertex_count * (3 + tbn_words + 3) * sizeof(uint32_t);
 			if (!evaluate) {
 				continue;
 			}
-			if (rebuild) {
-				// The surfaces built together (a level loaded) take their periodic rebuilds in turns.
-				entry->displaced_refits = first ? uint32_t(surf->rt_deformed_handle.get_id() % DISPLACED_REBUILD_PERIOD) : 0;
-				entry->displaced_guard_rebuild = false;
-			} else {
-				entry->displaced_refits++;
-				displaced_refitted++;
+			if (dynamic_budgets && !required_rebuild) {
+				DynamicCandidate candidate;
+				candidate.entry = entry;
+				candidate.aabb = inst->transformed_aabb;
+				candidate.key = surf->rt_deformed_handle.get_id();
+				candidate.triangles = mesh_storage->mesh_surface_get_vertices_drawn_count(mesh_surface) / 3;
+				candidate.in_view = p_turns.in_view(inst->transformed_aabb);
+				candidate.rebuild = rebuild;
+				candidate.rebuild_only = rebuild_only;
+				candidate.pending = evaluations.size();
+				dynamic_candidates.push_back(candidate);
 			}
-			entry->displaced_stamp++;
-			entry->displaced_deferred = false;
-			displaced_evaluated++;
-			displaced_vertices += vertex_count;
-			render_info_counters.captured_bytes += size;
-			entry->displaced_slot = mat_data->rt_sbt_offset;
-			entry->displaced_material_counter = material_counter;
-			entry->displaced_instance_uniforms_hash = instance_uniforms_hash;
-			entry->displaced_transform = inst->transform;
-			entry->displaced_deformation = deformation;
-			entry->displaced_captured = false;
-
-			RT_DisplaceJob data = {};
-			RTSurfaceData source;
-			RID vertex_buffer, attribute_buffer;
-			_fill_surface_geometry_data(mesh_surface, false, &source, &vertex_buffer, &attribute_buffer);
-			data.geometry = source.geometry;
-			if (vertex_buffer.is_valid()) {
-				data.geometry.vertex_buffer_address = rd->buffer_get_device_address(vertex_buffer);
-			}
-			if (attribute_buffer.is_valid()) {
-				data.geometry.attribute_buffer_address = rd->buffer_get_device_address(attribute_buffer);
-			}
-			RendererRD::MaterialStorage::store_transform(inst->transform, data.model_matrix);
-			RendererRD::MaterialStorage::store_transform(inst->transform.affine_inverse(), data.inv_model_matrix);
-			// A teleported instance has no motion from its transform (Terrain3D moves its clipmap that way).
-			const Transform3D &prev_transform = inst->transform_status == RenderForwardClustered::GeometryInstanceForwardClustered::TransformStatus::MOVED ? inst->prev_transform : inst->transform;
-			RendererRD::MaterialStorage::store_transform(prev_transform, data.prev_model_matrix);
-			RendererRD::MaterialStorage::store_transform(prev_transform.affine_inverse(), data.prev_inv_model_matrix);
-			data.material_address = mat_data->data.uniform_address;
-			data.tbn_words = tbn_words;
-			data.instance_uniforms_ofs = uint32_t(inst->shader_uniforms_offset);
-			data.mm_instance_count = 0;
-			data.refit_guard = rebuild ? 0 : 1;
-			job_data.push_back(data);
-
-			mat_ubo_pool_ensure_initialized();
-			Job job;
-			job.entry = entry;
-			job.handle = surf->rt_deformed_handle;
-			job.blas_positions = rebuild ? RID() : entry->owned_vb_full;
-			job.shader = program_shader;
-			job.pipeline = pipeline;
-			job.material_buffer = mat_data->uniform_buffer.is_valid() ? mat_data->uniform_buffer : mat_ubo_pool_buffer;
-			job.vertex_count = vertex_count;
-			if (capture) {
-				job.capture = captures.size();
-				RenderForwardClustered::RTVertexCaptureRequest request;
-				request.surf = surf;
-				request.output = entry->displaced_vb;
-				request.blas_positions = job.blas_positions;
-				request.vertex_count = vertex_count;
-				captures.push_back(request);
-
-				// vertex() ends in view space; the BLAS is in the mesh's.
-				RT_VertexCaptureDraw draw = {};
-				const Transform3D view_to_local = inst->transform.affine_inverse() * p_render_data->scene_data->cam_transform;
-				for (int row = 0; row < 3; row++) {
-					draw.view_to_local[row * 4 + 0] = float(view_to_local.basis.rows[row][0]);
-					draw.view_to_local[row * 4 + 1] = float(view_to_local.basis.rows[row][1]);
-					draw.view_to_local[row * 4 + 2] = float(view_to_local.basis.rows[row][2]);
-					draw.view_to_local[row * 4 + 3] = float(view_to_local.origin[row]);
-				}
-				draw.vertex_count = vertex_count;
-				draw.tbn_words = tbn_words;
-				// The skinning output is not the mesh's format: its TBN is encoded again too.
-				draw.flags = (rebuild ? 0u : RT_CAPTURE_FLAG_REFIT_GUARD) | ((skinned || (format & RSE::ARRAY_FLAG_COMPRESS_ATTRIBUTES)) ? RT_CAPTURE_FLAG_COMPRESSED : 0u);
-				draw.guard_index = job.capture;
-				capture_draws.push_back(draw);
-			}
-			jobs.push_back(job);
+			Evaluation evaluation;
+			evaluation.inst = inst;
+			evaluation.surf = surf;
+			evaluation.entry = entry;
+			evaluation.mat_data = mat_data;
+			evaluation.program_shader = program_shader;
+			evaluation.pipeline = pipeline;
+			evaluation.mesh_surface = mesh_surface;
+			evaluation.format = format;
+			evaluation.deformation = deformation;
+			evaluation.vertex_count = vertex_count;
+			evaluation.tbn_words = tbn_words;
+			evaluation.size = size;
+			evaluation.instance_uniforms_hash = instance_uniforms_hash;
+			evaluation.material_counter = material_counter;
+			evaluation.capture = capture;
+			evaluation.skinned = skinned;
+			evaluation.first = first;
+			evaluation.rebuild = rebuild;
+			evaluations.push_back(evaluation);
 		}
+	}
+
+	if (dynamic_budgets) {
+		_schedule_dynamic_updates(p_render_data, p_turns);
+		for (const DynamicCandidate &candidate : dynamic_candidates) {
+			if (candidate.pending == UINT32_MAX) {
+				continue;
+			}
+			Evaluation &evaluation = evaluations[candidate.pending];
+			if (!candidate.selected) {
+				// As a surface waiting for its update frame: traced as it was last updated.
+				evaluation.held = true;
+				evaluation.entry->displaced_rebuild = false;
+				evaluation.entry->displaced_deferred = true;
+				displaced_deferred++;
+				held_max_age = MAX(held_max_age, current_frame - evaluation.entry->updated_frame);
+			} else if (candidate.downgraded) {
+				evaluation.rebuild = false;
+				evaluation.entry->displaced_rebuild = false;
+			}
+		}
+	}
+
+	for (const Evaluation &evaluation : evaluations) {
+		if (evaluation.held) {
+			continue;
+		}
+		const RenderForwardClustered::GeometryInstanceForwardClustered *inst = evaluation.inst;
+		const RenderForwardClustered::GeometryInstanceSurfaceDataCache *surf = evaluation.surf;
+		RTDeformedCacheEntry *entry = evaluation.entry;
+		RTMaterialData *mat_data = evaluation.mat_data;
+		void *mesh_surface = evaluation.mesh_surface;
+		const uint32_t vertex_count = evaluation.vertex_count;
+		const uint32_t tbn_words = evaluation.tbn_words;
+		const bool rebuild = evaluation.rebuild;
+		if (rebuild) {
+			// The surfaces built together (a level loaded) take their periodic rebuilds in turns.
+			entry->displaced_refits = evaluation.first ? uint32_t(surf->rt_deformed_handle.get_id() % DISPLACED_REBUILD_PERIOD) : 0;
+			entry->displaced_guard_rebuild = false;
+		} else {
+			entry->displaced_refits++;
+			displaced_refitted++;
+		}
+		entry->displaced_stamp++;
+		entry->displaced_deferred = false;
+		displaced_evaluated++;
+		displaced_vertices += vertex_count;
+		render_info_counters.captured_bytes += evaluation.size;
+		entry->displaced_slot = mat_data->rt_sbt_offset;
+		entry->displaced_material_counter = evaluation.material_counter;
+		entry->displaced_instance_uniforms_hash = evaluation.instance_uniforms_hash;
+		entry->displaced_transform = inst->transform;
+		entry->displaced_deformation = evaluation.deformation;
+		entry->displaced_captured = false;
+
+		RT_DisplaceJob data = {};
+		RTSurfaceData source;
+		RID vertex_buffer, attribute_buffer;
+		_fill_surface_geometry_data(mesh_surface, false, &source, &vertex_buffer, &attribute_buffer);
+		data.geometry = source.geometry;
+		if (vertex_buffer.is_valid()) {
+			data.geometry.vertex_buffer_address = rd->buffer_get_device_address(vertex_buffer);
+		}
+		if (attribute_buffer.is_valid()) {
+			data.geometry.attribute_buffer_address = rd->buffer_get_device_address(attribute_buffer);
+		}
+		RendererRD::MaterialStorage::store_transform(inst->transform, data.model_matrix);
+		RendererRD::MaterialStorage::store_transform(inst->transform.affine_inverse(), data.inv_model_matrix);
+		// A teleported instance has no motion from its transform (Terrain3D moves its clipmap that way).
+		const Transform3D &prev_transform = inst->transform_status == RenderForwardClustered::GeometryInstanceForwardClustered::TransformStatus::MOVED ? inst->prev_transform : inst->transform;
+		RendererRD::MaterialStorage::store_transform(prev_transform, data.prev_model_matrix);
+		RendererRD::MaterialStorage::store_transform(prev_transform.affine_inverse(), data.prev_inv_model_matrix);
+		data.material_address = mat_data->data.uniform_address;
+		data.tbn_words = tbn_words;
+		data.instance_uniforms_ofs = uint32_t(inst->shader_uniforms_offset);
+		data.mm_instance_count = 0;
+		data.refit_guard = rebuild ? 0 : 1;
+		job_data.push_back(data);
+
+		mat_ubo_pool_ensure_initialized();
+		Job job;
+		job.entry = entry;
+		job.handle = surf->rt_deformed_handle;
+		job.blas_positions = rebuild ? RID() : entry->owned_vb_full;
+		job.shader = evaluation.program_shader;
+		job.pipeline = evaluation.pipeline;
+		job.material_buffer = mat_data->uniform_buffer.is_valid() ? mat_data->uniform_buffer : mat_ubo_pool_buffer;
+		job.vertex_count = vertex_count;
+		if (evaluation.capture) {
+			job.capture = captures.size();
+			RenderForwardClustered::RTVertexCaptureRequest request;
+			request.surf = surf;
+			request.output = entry->displaced_vb;
+			request.blas_positions = job.blas_positions;
+			request.vertex_count = vertex_count;
+			captures.push_back(request);
+
+			// vertex() ends in view space; the BLAS is in the mesh's.
+			RT_VertexCaptureDraw draw = {};
+			const Transform3D view_to_local = inst->transform.affine_inverse() * p_render_data->scene_data->cam_transform;
+			for (int row = 0; row < 3; row++) {
+				draw.view_to_local[row * 4 + 0] = float(view_to_local.basis.rows[row][0]);
+				draw.view_to_local[row * 4 + 1] = float(view_to_local.basis.rows[row][1]);
+				draw.view_to_local[row * 4 + 2] = float(view_to_local.basis.rows[row][2]);
+				draw.view_to_local[row * 4 + 3] = float(view_to_local.origin[row]);
+			}
+			draw.vertex_count = vertex_count;
+			draw.tbn_words = tbn_words;
+			// The skinning output is not the mesh's format: its TBN is encoded again too.
+			draw.flags = (rebuild ? 0u : RT_CAPTURE_FLAG_REFIT_GUARD) | ((evaluation.skinned || (evaluation.format & RSE::ARRAY_FLAG_COMPRESS_ATTRIBUTES)) ? RT_CAPTURE_FLAG_COMPRESSED : 0u);
+			draw.guard_index = job.capture;
+			capture_draws.push_back(draw);
+		}
+		jobs.push_back(job);
 	}
 
 	if (jobs.is_empty()) {
@@ -4589,45 +4827,37 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 
 	render_info_counters = RenderInfoCounters();
 	merged_displaced_records.clear();
-	_displace_surfaces(p_render_data);
 	const uint32_t current_frame = RSG::rasterizer->get_frame_number();
-
-	RendererRD::MeshStorage *mesh_storage = RendererRD::MeshStorage::get_singleton();
-	RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
-	LocalVector<RID> dirty_blas_list;
-	LocalVector<RID> dirty_blas_update_list;
 
 	// Out of view, geometry that keeps deforming (skinning, blend shapes, the wind on merged MultiMeshes) is updated, and
 	// its BLAS refit, every frame within out_of_view_update_distance of the camera and every N frames beyond, N growing
 	// with the distance: Unreal's dynamic geometry update budget for ray tracing. What is in view is updated every frame,
 	// so primary visibility never lags; only reflections and shadows of what is out of view and far do. The instances take
-	// turns, and the motion between two updates is reported on the update frame.
+	// turns, and the motion between two updates is reported on the update frame. The dynamic BLAS budgets, when set, hold
+	// what is due past them (_schedule_dynamic_updates()).
 	static const float out_of_view_update_distance = GLOBAL_GET("rendering/pathtracing/out_of_view_update_distance");
-	const uint32_t OUT_OF_VIEW_MAX_UPDATE_PERIOD = 8;
-	out_of_view_deferred = 0;
-	Vector<Plane> view_planes;
-	Vector3 view_points[8];
-	if (out_of_view_update_distance > 0.0f) {
-		view_planes = p_render_data->scene_data->cam_projection.get_projection_planes(p_render_data->scene_data->cam_transform);
-		if (!p_render_data->scene_data->cam_projection.get_endpoints(p_render_data->scene_data->cam_transform, view_points)) {
-			view_planes.clear();
+	UpdateTurns turns;
+	turns.update_distance = out_of_view_update_distance;
+	turns.camera_origin = p_render_data->scene_data->cam_transform.origin;
+	turns.frame = current_frame;
+	if (out_of_view_update_distance > 0.0f || _dynamic_budgets_enabled()) {
+		turns.view_planes = p_render_data->scene_data->cam_projection.get_projection_planes(p_render_data->scene_data->cam_transform);
+		if (!p_render_data->scene_data->cam_projection.get_endpoints(p_render_data->scene_data->cam_transform, turns.view_points)) {
+			turns.view_planes.clear();
 		}
 	}
+	_displace_surfaces(p_render_data, turns);
+
+	RendererRD::MeshStorage *mesh_storage = RendererRD::MeshStorage::get_singleton();
+	RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
+	LocalVector<RID> dirty_blas_list;
+	LocalVector<RID> dirty_blas_update_list;
+	out_of_view_deferred = 0;
 	// An instance of the TLAS waits for its material's hit group: those nearest the camera are compiled first.
 	const Vector3 request_origin = p_render_data->scene_data->cam_transform.origin;
 	auto request_hit_group = [&](uint32_t p_slot_index, const AABB &p_aabb) {
 		const float distance = Vector3().max(p_aabb.position - request_origin).max(request_origin - (p_aabb.position + p_aabb.size)).length();
 		SceneShaderRaytracing::get_singleton()->request_hit_group(p_slot_index, distance);
-	};
-	// False when the instance's BLAS update waits for its next turn this frame.
-	auto update_turn = [&](const AABB &p_aabb, uint64_t p_key) -> bool {
-		if (view_planes.is_empty() || p_aabb.intersects_convex_shape(view_planes.ptr(), view_planes.size(), view_points, 8)) {
-			return true;
-		}
-		const Vector3 camera_origin = p_render_data->scene_data->cam_transform.origin;
-		const float distance = Vector3().max(p_aabb.position - camera_origin).max(camera_origin - (p_aabb.position + p_aabb.size)).length();
-		const uint32_t period = CLAMP(uint32_t(distance / out_of_view_update_distance), 1u, OUT_OF_VIEW_MAX_UPDATE_PERIOD);
-		return (current_frame + uint32_t(p_key)) % period == 0;
 	};
 
 	uint32_t tlas_instance_count = 0;
@@ -4889,7 +5119,7 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 					if (displace_cse && displace_cse->writes_vertex && rt_shader_singleton->get_displace_pipeline(mat_data->rt_sbt_offset, displace_shader).is_valid()) {
 						displace = true;
 						reevaluate = displace_cse->uses_vertex_time || (displace_cse->vertex_reads_camera && displace_camera_moved);
-						if (reevaluate && !update_turn(inst->transformed_aabb, mm_rid.get_id())) {
+						if (reevaluate && !turns.turn(inst->transformed_aabb, mm_rid.get_id())) {
 							// The wind waits for its turn out of view; a change of the instances or the material still evaluates it.
 							reevaluate = false;
 							out_of_view_deferred++;
@@ -5037,7 +5267,7 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 					src.cache_version = static_cast<uint32_t>(mi_id >> 32);
 					src.cache_key = (static_cast<uint64_t>(mi_index) << 16) | (surf->surface_index & 0xFFFFu);
 					src.surface_counter = surface_counter;
-					src.defer_update = !update_turn(inst->transformed_aabb, mi_index);
+					src.defer_update = !turns.turn(inst->transformed_aabb, mi_index) || (displaced && displaced->budget_held_frame == current_frame);
 					src.rebuild_only = _rt_blas_update(inst, surf->shader) == RSE::RT_BLAS_UPDATE_REBUILD;
 					src.no_duplicate_any_hit = transparent_shadow;
 					surf_data = process_deformed_surface(surf, mesh_surface, src, dirty_blas_list, dirty_blas_update_list);
@@ -5601,7 +5831,9 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 				int(merged_mb[0] >> 20), int(merged_mb[1] >> 20), int(merged_mb[2] >> 20),
 				int(RD::get_singleton()->get_memory_usage(RD::MEMORY_BUFFERS) >> 20), int(RD::get_singleton()->get_memory_usage(RD::MEMORY_TEXTURES) >> 20)));
 		const SceneShaderRaytracing *rt_shader = SceneShaderRaytracing::get_singleton();
-		print_line(vformat("RTCACHES out of view: %d BLAS updates waiting for their turn", out_of_view_deferred));
+		print_line(vformat("RTCACHES out of view: %d BLAS updates waiting for their turn | budget-limited %d | oldest held update since the previous log: %d frames",
+				out_of_view_deferred, render_info_counters.budget_limited, held_max_age));
+		held_max_age = 0;
 		print_line(vformat("RTCACHES displaced: %d refit, %d guard rebuilds since the previous log", displaced_refitted, displaced_guard_rebuilds));
 		displaced_guard_rebuilds = 0;
 		print_line(vformat("RTCACHES frame %d: TLAS %d instances, %d BLAS builds, %d refits | displaced %d (%d vertices), %d deferred | surfaces %d, merged MultiMeshes %d, deformed %d, LOD views %d, materials %d, dedicated UBOs %d | hit groups %d, pipeline swaps %d | video %d MB",
@@ -5641,7 +5873,8 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 void RenderRaytracing::_record_render_info(const RenderDataRD *p_render_data) {
 	const RenderInfoCounters &c = render_info_counters;
 	// Out of view and far: deforming geometry kept at the state of its last update, for its turn
-	// (out_of_view_update_distance, displacement_update_distance); LOD switches waiting for the frame's budget.
+	// (out_of_view_update_distance, displacement_update_distance) or past the dynamic BLAS budgets; LOD switches waiting for
+	// the frame's budget.
 	const uint32_t held = out_of_view_deferred + displaced_deferred;
 	if (held > 0 || c.budget_limited > 0) {
 		_flag_not_ready(RSE::RENDERING_NOT_READY_RT_STALE_GEOMETRY);
