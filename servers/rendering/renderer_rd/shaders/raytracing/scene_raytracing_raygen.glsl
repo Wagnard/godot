@@ -1023,6 +1023,16 @@ void main() {
 	if (alpha_scissor_threshold > 0.0 && alpha < alpha_scissor_threshold) {
 		ignoreIntersectionEXT;
 	}
+#ifdef RT_TRANSPARENT_SHADOWS
+	// The shadow rays' copy of a transparent surface (build_tlas()): its color and alpha filter the light, and the ray goes on.
+	if ((geom.flags & FLAG_TRANSPARENT_SHADOW) != 0u && is_shadow_ray(payload.packed_bounces_flags)) {
+		vec3 transmittance = shadow_transmittance_load(payload);
+		if (shadow_transmittance_filter(transmittance, albedo, alpha)) {
+			shadow_transmittance_store(payload, transmittance);
+			ignoreIntersectionEXT;
+		}
+	}
+#endif
 #else
 	// HG0: Standard material alpha test.
 	vec2 uv = fetch_uv(geom, i0, i1, i2, bary);
@@ -1031,11 +1041,28 @@ void main() {
 	// The base level, as the opacity micromap is baked (raytracing_omm_bake.glsl): zero gradients take level 0 whatever
 	// the sampler's mip bias. A mip following the ray's footprint would disagree with the micromap's known states at a
 	// distance (NVIDIA OMM SDK integration guide: "Pick a texture mip and always use that version").
+#ifdef RT_TRANSPARENT_SHADOWS
+	vec4 albedo = textureGrad(sampler2D(bindless_textures[nonuniformEXT(mat.albedo_texture_idx)], SAMPLER_LINEAR_WITH_MIPMAPS_REPEAT), uv, vec2(0.0), vec2(0.0)) * mat.albedo_color;
+	if ((mat.flags & MAT_FLAG_VERTEX_COLOR_ALBEDO) != 0u) {
+		albedo *= material_vertex_color(fetch_color(geom, i0, i1, i2, bary), mat.flags);
+	}
+	float alpha = albedo.a;
+	// The shadow rays' copy of a transparent surface (build_tlas()): its color and alpha filter the light, and the ray goes on.
+	if ((geom.flags & FLAG_TRANSPARENT_SHADOW) != 0u && is_shadow_ray(payload.packed_bounces_flags)) {
+		vec3 transmittance = shadow_transmittance_load(payload);
+		if (shadow_transmittance_filter(transmittance, albedo.rgb, alpha)) {
+			shadow_transmittance_store(payload, transmittance);
+			ignoreIntersectionEXT;
+		}
+		alpha = 1.0;
+	}
+#else
 	float alpha = textureGrad(sampler2D(bindless_textures[nonuniformEXT(mat.albedo_texture_idx)], SAMPLER_LINEAR_WITH_MIPMAPS_REPEAT), uv, vec2(0.0), vec2(0.0)).a;
 	alpha *= mat.albedo_color.a;
 	if ((mat.flags & MAT_FLAG_VERTEX_COLOR_ALBEDO) != 0u) {
 		alpha *= fetch_color(geom, i0, i1, i2, bary).a;
 	}
+#endif
 
 	if (alpha < 0.5) {
 		ignoreIntersectionEXT;

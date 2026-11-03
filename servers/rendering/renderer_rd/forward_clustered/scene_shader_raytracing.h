@@ -90,6 +90,9 @@ public:
 		// (rendering/pathtracing/specular_motion_vectors, DLSS_RR_SPECULAR_MOTION_VECTORS). A project setting, as
 		// RT_FLAG_RAY_QUERY_SHADOWS_ENABLED: off, the other variants keep their code unchanged.
 		RT_FLAG_DLSS_RR_SPECULAR_MOTION_VECTORS = (1 << 6),
+		// Transparent surfaces filter the light of the shadow rays (rendering/pathtracing/transparent_shadows,
+		// RT_TRANSPARENT_SHADOWS): their any-hit shaders and the shadow rays carry a transmittance. A project setting too.
+		RT_FLAG_TRANSPARENT_SHADOWS = (1 << 7),
 	};
 
 	// RT pipeline limits (must match GLSL payload/hit attribute struct sizes).
@@ -377,6 +380,7 @@ public:
 		HashMap<StringName, ShaderLanguage::ShaderNode::Uniform> uniforms;
 		Vector<TextureUniformInfo> texture_uniforms; // Sampler2D packed as bindless indices after UBO
 		bool uses_alpha_clip = false; // Writes ALPHA_SCISSOR_THRESHOLD; needs per-HG any-hit
+		bool uses_alpha = false; // Uses ALPHA: with RT_FLAG_TRANSPARENT_SHADOWS, its any-hit filters the shadow rays.
 		bool writes_vertex = false; // vertex() moves VERTEX or writes MODELVIEW_MATRIX: the BLAS needs the displaced positions.
 		bool writes_modelview = false; // vertex() writes MODELVIEW_MATRIX (billboards): raster draws VERTEX through it.
 		bool uses_vertex_time = false;
@@ -557,7 +561,9 @@ private:
 		String ah;
 		String is;
 	};
-	static HitGroupSources _hit_group_sources(const CustomShaderEntry &p_entry, const VariantCompileContext &p_ctx);
+	// Whether the hit group has an any-hit of its own (the material's fragment code), in the variant of p_rt_flags.
+	static bool _custom_any_hit(const CustomShaderEntry &p_entry, uint32_t p_rt_flags);
+	static HitGroupSources _hit_group_sources(const CustomShaderEntry &p_entry, const VariantCompileContext &p_ctx, bool p_custom_any_hit);
 	String _displace_source(const CustomShaderEntry &p_entry) const;
 	String _omm_bake_source(const CustomShaderEntry *p_entry) const; // Null: hit group 0's (BaseMaterial3D's alpha).
 
@@ -625,13 +631,13 @@ public:
 		LocalVector<RD::ShaderStage> stages; // In the order the run time compiles them.
 		Vector<String> sources; // Parallel to stages.
 	};
-	// The variants' base programs and hit group 0's opacity micromap bake. p_simple_shadows, p_ser and
-	// p_specular_motion_vectors: the project's rendering/pathtracing/use_simple_shadows, use_shader_execution_reordering
-	// and specular_motion_vectors.
-	void get_bake_programs(bool p_simple_shadows, bool p_ser, bool p_specular_motion_vectors, LocalVector<BakeProgram> &r_programs);
+	// The variants' base programs and hit group 0's opacity micromap bake. p_simple_shadows, p_ser,
+	// p_specular_motion_vectors and p_transparent_shadows: the project's rendering/pathtracing/use_simple_shadows,
+	// use_shader_execution_reordering, specular_motion_vectors and transparent_shadows.
+	void get_bake_programs(bool p_simple_shadows, bool p_ser, bool p_specular_motion_vectors, bool p_transparent_shadows, LocalVector<BakeProgram> &r_programs);
 	// p_material's hit group in every such variant, and its displacement and opacity micromap bake programs; nothing for a
 	// material path traced by hit group 0.
-	void get_material_bake_programs(RID p_material, bool p_simple_shadows, bool p_ser, bool p_specular_motion_vectors, LocalVector<BakeProgram> &r_programs);
+	void get_material_bake_programs(RID p_material, bool p_simple_shadows, bool p_ser, bool p_specular_motion_vectors, bool p_transparent_shadows, LocalVector<BakeProgram> &r_programs);
 	static String get_binary_cache_file_name(const String &p_key, const String &p_api);
 	static Vector<uint8_t> make_binary_cache_file(const Vector<uint8_t> &p_binary);
 	// Null when the path tracer's shaders were never initialized (no Forward+ renderer).

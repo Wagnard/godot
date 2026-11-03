@@ -284,6 +284,8 @@ enum : uint8_t {
 	// In place of CAMERA for a surface the raster pass draws over the traced image (render_mode pathtracing_rasterized):
 	// every ray but the camera's sees it (RT_MASK_BOUNCE).
 	RT_INSTANCE_MASK_SECONDARY = 0x20u,
+	// Build-time only: a transparent surface gets a copy for the shadow rays (rendering/pathtracing/transparent_shadows).
+	RT_INSTANCE_MASK_TRANSPARENT_SHADOW = 0x40u,
 	RT_INSTANCE_MASK_DOUBLE_SIDED_SHADOW = 0x80u, // Build-time only: the shadow rays need both faces, see build_tlas().
 };
 
@@ -339,6 +341,9 @@ enum {
 	RT_GEOM_FLAG_FACING_INVERTED = 32u,
 	// Per TLAS instance: the material turns the normal of back faces, as raster's DO_SIDE_CHECK (cull_front, cull_disabled).
 	RT_GEOM_FLAG_SIDE_CHECK = 64u,
+	// Per TLAS instance: the shadow rays' copy of a transparent surface, whose any-hit filters their light
+	// (rendering/pathtracing/transparent_shadows, RT_TRANSPARENT_SHADOWS).
+	RT_GEOM_FLAG_TRANSPARENT_SHADOW = 128u,
 };
 
 // The facing of the traced triangles of one TLAS instance.
@@ -459,6 +464,9 @@ struct RTSurfaceData {
 	Transform3D aabb_transform;
 	bool is_compressed = false;
 	uint64_t blas_size = 0;
+	// Built with ACCELERATION_STRUCTURE_GEOMETRY_NO_DUPLICATE_ANY_HIT_INVOCATION_BIT: a transparent shadow caster's any-hit
+	// multiplies the shadow ray's transmittance, which a second call for the same triangle would apply twice.
+	bool no_duplicate_any_hit = false;
 };
 
 struct RTOmmEntry {
@@ -508,6 +516,7 @@ struct RTDeformedGeometrySource {
 	bool force_rebuild = false; ///< Rebuild instead of refitting when the data changed.
 	uint32_t prev_offset = UINT32_MAX; ///< When set and the data changed: previous positions read from `prev_vb` there.
 	bool defer_update = false; ///< A change of `current_vb` waits for a later frame (out of view and far): the BLAS keeps the positions it has.
+	bool no_duplicate_any_hit = false; ///< The BLAS needs RTSurfaceData::no_duplicate_any_hit (kept once built with it).
 };
 
 // BaseMaterial3D's billboard modes, which place the instance in vertex().
@@ -1026,7 +1035,8 @@ class RenderRaytracing {
 			void *p_mesh_surface,
 			uint32_t p_surface_invalidation_counter,
 			const Transform3D &p_transform,
-			LocalVector<RID> &r_dirty_blas_list);
+			LocalVector<RID> &r_dirty_blas_list,
+			bool p_no_duplicate_any_hit = false);
 	RTSurfaceData *process_deformed_surface(
 			const void *p_surf,
 			void *p_mesh_surface,
@@ -1082,6 +1092,9 @@ class RenderRaytracing {
 	static bool _front_layer_skipped(const void *p_surf);
 	// A surface of the raster transparent pass that the TLAS holds for the front layer rays only.
 	static bool _front_layer_surface(const void *p_surf);
+	// A front layer surface whose alpha is a coverage of its color (mix and OIT blending), which
+	// rendering/pathtracing/transparent_shadows lets filter the shadow rays.
+	static bool _transparent_shadow_blend(const void *p_surf);
 	// Whether a MultiMesh surface goes into a merged BLAS (_build_merged_mm_blas()), or one TLAS instance per instance.
 	bool _mm_fits_merged_blas(void *p_mesh_surface, uint32_t p_mm_count, const RTLodView *p_lod_view) const;
 	bool _build_merged_mm_blas(

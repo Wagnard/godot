@@ -14,3 +14,7 @@ const uint FLAG_COMPRESSED_ATTRIBUTES = 16u;
 const uint FLAG_FACING_INVERTED = 32u;
 // The material turns the normal of back faces, as raster's DO_SIDE_CHECK (cull_front and cull_disabled).
 const uint FLAG_SIDE_CHECK = 64u;
+#ifdef RT_TRANSPARENT_SHADOWS
+// The shadow rays' copy of a transparent surface (rendering/pathtracing/transparent_shadows): its any-hit filters their light.
+const uint FLAG_TRANSPARENT_SHADOW = 128u;
+#endif

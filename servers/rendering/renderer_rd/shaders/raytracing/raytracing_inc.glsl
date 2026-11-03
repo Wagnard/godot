@@ -365,6 +365,28 @@ bool is_path_terminated(uint packed) {
 	return (packed & PATH_TERMINATED_FLAG) != 0u;
 }
 
+#ifdef RT_TRANSPARENT_SHADOWS
+// rendering/pathtracing/transparent_shadows: the light a transparent surface (alpha a, color c) lets through to the shadow
+// rays, (1 - a) * mix(1, c, a): the mean of NVIDIA's estimator (49a825dc52, scene_raytracing_raygen.glsl any-hit: blocked
+// with probability a, else tinted by mix(1, c, a)), without its noise. Opaque at a = 1, clear at a = 0. False once nothing
+// passes any more: the surface then blocks the ray.
+bool shadow_transmittance_filter(inout vec3 r_transmittance, vec3 p_color, float p_alpha) {
+	const float a = clamp(p_alpha, 0.0, 1.0);
+	r_transmittance *= (1.0 - a) * mix(vec3(1.0), clamp(p_color, vec3(0.0), vec3(1.0)), a);
+	return any(greaterThanEqual(r_transmittance, vec3(1.0 / 4096.0)));
+}
+
+// A shadow ray's transmittance, in payload fields only the hits of path rays write.
+void shadow_transmittance_store(inout PathPayload p, vec3 p_transmittance) {
+	p.oct_geometry_normal = packHalf2x16(p_transmittance.rg);
+	p.oct_normal = packHalf2x16(vec2(p_transmittance.b, 0.0));
+}
+
+vec3 shadow_transmittance_load(PathPayload p) {
+	return vec3(unpackHalf2x16(p.oct_geometry_normal), unpackHalf2x16(p.oct_normal).x);
+}
+#endif
+
 // Bounce limits
 #define MAX_DIFFUSE_BOUNCES 2u
 #define MAX_DENOISER_SPECULAR_HIT_THRESHOLD 0.25

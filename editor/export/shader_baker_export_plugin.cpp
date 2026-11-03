@@ -124,12 +124,13 @@ bool ShaderBakerExportPlugin::_begin_customize_resources(const Ref<EditorExportP
 	// The binaries are the driver's: resources customized for another one would not be visited again.
 	to_hash.append("[Driver]");
 	to_hash.append(shader_container_driver);
-	// The path tracer's variants follow these three (SceneShaderRaytracing::get_bake_programs()).
+	// The path tracer's variants follow these (SceneShaderRaytracing::get_bake_programs()).
 	raytracing_simple_shadows = get_export_preset()->get_project_setting("rendering/pathtracing/use_simple_shadows");
 	raytracing_ser = get_export_preset()->get_project_setting("rendering/pathtracing/use_shader_execution_reordering");
 	raytracing_specular_motion_vectors = get_export_preset()->get_project_setting("rendering/pathtracing/specular_motion_vectors");
+	raytracing_transparent_shadows = get_export_preset()->get_project_setting("rendering/pathtracing/transparent_shadows");
 	to_hash.append("[PathTracing]");
-	to_hash.append(itos(bool(get_option("shader_baker/path_tracing"))) + itos(raytracing_simple_shadows) + itos(raytracing_ser) + itos(raytracing_specular_motion_vectors));
+	to_hash.append(itos(bool(get_option("shader_baker/path_tracing"))) + itos(raytracing_simple_shadows) + itos(raytracing_ser) + itos(raytracing_specular_motion_vectors) + itos(raytracing_transparent_shadows));
 	customization_configuration_hash = to_hash.as_string().hash64();
 
 	BitField<RenderingShaderLibrary::FeatureBits> renderer_features = {};
@@ -552,9 +553,9 @@ void ShaderBakerExportPlugin::_customize_raytracing_programs(RID p_material) {
 
 	LocalVector<SceneShaderRaytracing::BakeProgram> programs;
 	if (p_material.is_valid()) {
-		raytracing->get_material_bake_programs(p_material, raytracing_simple_shadows, raytracing_ser, raytracing_specular_motion_vectors, programs);
+		raytracing->get_material_bake_programs(p_material, raytracing_simple_shadows, raytracing_ser, raytracing_specular_motion_vectors, raytracing_transparent_shadows, programs);
 	} else {
-		raytracing->get_bake_programs(raytracing_simple_shadows, raytracing_ser, raytracing_specular_motion_vectors, programs);
+		raytracing->get_bake_programs(raytracing_simple_shadows, raytracing_ser, raytracing_specular_motion_vectors, raytracing_transparent_shadows, programs);
 	}
 
 	for (const SceneShaderRaytracing::BakeProgram &program : programs) {

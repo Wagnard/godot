@@ -1011,7 +1011,8 @@ RTSurfaceData *RenderRaytracing::process_surface(
 		void *p_mesh_surface,
 		uint32_t p_surface_invalidation_counter,
 		const Transform3D &p_transform,
-		LocalVector<RID> &r_dirty_blas_list) {
+		LocalVector<RID> &r_dirty_blas_list,
+		bool p_no_duplicate_any_hit) {
 	const RenderForwardClustered::GeometryInstanceSurfaceDataCache *surf =
 			static_cast<const RenderForwardClustered::GeometryInstanceSurfaceDataCache *>(p_surf);
 
@@ -1032,7 +1033,8 @@ RTSurfaceData *RenderRaytracing::process_surface(
 	uint32_t current_frame = RSG::rasterizer->get_frame_number();
 	bool needs_refresh = !entry->ptr ||
 			entry->cached_rid_version != mesh_version ||
-			entry->cached_counter != p_surface_invalidation_counter;
+			entry->cached_counter != p_surface_invalidation_counter ||
+			(p_no_duplicate_any_hit && !entry->ptr->no_duplicate_any_hit);
 
 	if (!needs_refresh && entry->ptr->blas.is_valid()) {
 		cache_hits++;
@@ -1056,6 +1058,8 @@ RTSurfaceData *RenderRaytracing::process_surface(
 	}
 
 	RTSurfaceData *surf_data = entry->ptr;
+	// Kept once set: the BLAS is shared by every instance of the mesh surface, transparent shadow casters or not.
+	surf_data->no_duplicate_any_hit = surf_data->no_duplicate_any_hit || p_no_duplicate_any_hit;
 
 	_populate_surface_blas(p_mesh_surface, RID(), false, false, false, cache_key, surf_data, r_dirty_blas_list);
 
@@ -1140,7 +1144,8 @@ RTSurfaceData *RenderRaytracing::process_deformed_surface(
 	bool needs_full_rebuild = !entry.ptr || !entry.blas_built_once || layout_changed ||
 			entry.cached_key_version != p_source.cache_version ||
 			entry.cached_surface_counter != p_source.surface_counter ||
-			entry.omm_micromap != entry.built_omm_micromap;
+			entry.omm_micromap != entry.built_omm_micromap ||
+			(p_source.no_duplicate_any_hit && !entry.ptr->no_duplicate_any_hit);
 
 	// Storage: a displaced surface's refit reads the positions its BLAS has (raytracing_displace.glsl's NaN guard).
 	BitField<RD::BufferCreationBits> owned_full_flags = RD::BUFFER_CREATION_DEVICE_ADDRESS_BIT |
@@ -1207,6 +1212,7 @@ RTSurfaceData *RenderRaytracing::process_deformed_surface(
 			}
 			entry.ptr->blas = RID();
 		}
+		entry.ptr->no_duplicate_any_hit = entry.ptr->no_duplicate_any_hit || p_source.no_duplicate_any_hit;
 		_populate_surface_blas(p_mesh_surface, entry.owned_vb_full, true, true, true,
 				static_cast<uint32_t>(p_source.cache_key), entry.ptr, r_dirty_blas_list, entry.omm_micromap, entry.omm_level);
 		entry.blas_built_once = entry.ptr->blas.is_valid();
@@ -1475,6 +1481,11 @@ void RenderRaytracing::_populate_surface_blas(
 		RD::AccelerationStructureGeometry as_geom;
 		// Type defaults to TYPE_TRIANGLES; set explicitly for clarity.
 		as_geom.type = RD::AccelerationStructureGeometry::TYPE_TRIANGLES;
+		if (r_surf_data->no_duplicate_any_hit) {
+			// The any-hit shader runs once per triangle (Vulkan VK_GEOMETRY_NO_DUPLICATE_ANY_HIT_INVOCATION_BIT_KHR, DXR
+			// D3D12_RAYTRACING_GEOMETRY_FLAG_NO_DUPLICATE_ANYHIT_INVOCATION): without it, it may run more than once.
+			as_geom.flags.set_flag(RD::ACCELERATION_STRUCTURE_GEOMETRY_NO_DUPLICATE_ANY_HIT_INVOCATION_BIT);
+		}
 		as_geom.geometry.triangles.vertex_buffer = vertex_buffer;
 		as_geom.geometry.triangles.vertex_stride = position_stride;
 		as_geom.geometry.triangles.vertex_count = vertex_count;
@@ -1538,6 +1549,16 @@ bool RenderRaytracing::_front_layer_surface(const void *p_surf) {
 	const RenderForwardClustered::GeometryInstanceSurfaceDataCache *surf =
 			static_cast<const RenderForwardClustered::GeometryInstanceSurfaceDataCache *>(p_surf);
 	return (surf->rt_pass_flags & RenderForwardClustered::GeometryInstanceSurfaceDataCache::FLAG_PASS_ALPHA) && !(surf->rt_pass_flags & RenderForwardClustered::GeometryInstanceSurfaceDataCache::FLAG_PT_RASTERIZED);
+}
+
+bool RenderRaytracing::_transparent_shadow_blend(const void *p_surf) {
+	const SceneShaderForwardClustered::ShaderData *shader = static_cast<const RenderForwardClustered::GeometryInstanceSurfaceDataCache *>(p_surf)->shader;
+	if (!shader) {
+		return false;
+	}
+	// Add, subtract and multiply blending add or scale the light behind them rather than cover it: no shadow.
+	const int blend_mode = shader->rt ? shader->rt->blend_mode : shader->blend_mode;
+	return blend_mode == SceneShaderForwardClustered::ShaderData::BLEND_MODE_MIX || blend_mode == SceneShaderForwardClustered::ShaderData::BLEND_MODE_OIT;
 }
 
 bool RenderRaytracing::_front_layer_skipped(const void *p_surf) {
@@ -4789,6 +4810,10 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 				surf = surf->next;
 				continue;
 			}
+			// rendering/pathtracing/transparent_shadows: a transparent surface that casts shadows also gets a copy only the
+			// shadow rays see, whose any-hit filters their light (below).
+			const bool transparent_shadow = front_layer && (p_rt_flags & SceneShaderRaytracing::RT_FLAG_TRANSPARENT_SHADOWS) &&
+					(instance_mask(inst) & RT_INSTANCE_MASK_SHADOW) && _transparent_shadow_blend(surf);
 
 			void *mesh_surface = surf->surface;
 			uint32_t surface_counter = mesh_storage->mesh_surface_get_rt_invalidation_counter(mesh_surface);
@@ -4813,6 +4838,7 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 					src.cache_key = (static_cast<uint64_t>(mi_index) << 16) | (surf->surface_index & 0xFFFFu);
 					src.surface_counter = surface_counter;
 					src.defer_update = !update_turn(inst->transformed_aabb, mi_index);
+					src.no_duplicate_any_hit = transparent_shadow;
 					surf_data = process_deformed_surface(surf, mesh_surface, src, dirty_blas_list, dirty_blas_update_list);
 				}
 			}
@@ -4828,6 +4854,7 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 					src.force_rebuild = displaced->displaced_rebuild;
 					src.prev_vb = displaced->displaced_vb;
 					src.prev_offset = displaced->displaced_prev_offset;
+					src.no_duplicate_any_hit = transparent_shadow;
 					surf_data = process_deformed_surface(surf, mesh_surface, src, dirty_blas_list, dirty_blas_update_list);
 					if (surf_data && surf_data->blas.is_valid()) {
 						// The rest positions follow the deformed vertex buffer's sections.
@@ -4841,7 +4868,7 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 				}
 			}
 			if (!surf_data) {
-				surf_data = process_surface(surf, mesh_surface, surface_counter, instance_transform, dirty_blas_list);
+				surf_data = process_surface(surf, mesh_surface, surface_counter, instance_transform, dirty_blas_list, transparent_shadow);
 			}
 			if (!surf_data || !surf_data->blas.is_valid()) {
 				surf = surf->next;
@@ -5013,7 +5040,9 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 				}
 			}
 			if (front_layer) {
-				instance_masks.push_back(RT_INSTANCE_MASK_FRONT_LAYER);
+				// The shadow rays' copy is made below, after the walk; a double-sided caster's has both faces.
+				const uint8_t shadow_copy = transparent_shadow ? (RT_INSTANCE_MASK_TRANSPARENT_SHADOW | (instance_mask(inst) & RT_INSTANCE_MASK_DOUBLE_SIDED_SHADOW)) : 0;
+				instance_masks.push_back(RT_INSTANCE_MASK_FRONT_LAYER | shadow_copy);
 				front_layer_instance_count++;
 			} else if (surf->rt_pass_flags & RenderForwardClustered::GeometryInstanceSurfaceDataCache::FLAG_PT_RASTERIZED) {
 				// The raster pass draws it over the traced image: hidden from the camera rays, seen by the others.
@@ -5248,6 +5277,32 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 			}
 #endif
 		}
+	}
+
+	// rendering/pathtracing/transparent_shadows: the copy of a transparent surface only the shadow rays see. Not forced
+	// opaque (its any-hit runs, unlike the front layer instance's) and RT_GEOM_FLAG_TRANSPARENT_SHADOW: the any-hit lets
+	// the ray through with its light filtered (RT_TRANSPARENT_SHADOWS). Both faces for a double-sided caster.
+	const uint32_t walked_count = blass.size();
+	for (uint32_t i = 0; i < walked_count; i++) {
+		if (!(instance_masks[i] & RT_INSTANCE_MASK_TRANSPARENT_SHADOW)) {
+			continue;
+		}
+		const bool double_sided = instance_masks[i] & RT_INSTANCE_MASK_DOUBLE_SIDED_SHADOW;
+		instance_masks[i] &= ~(RT_INSTANCE_MASK_TRANSPARENT_SHADOW | RT_INSTANCE_MASK_DOUBLE_SIDED_SHADOW);
+		RT_GeometryData geometry = geometry_data[i];
+		geometry.flags |= RT_GEOM_FLAG_TRANSPARENT_SHADOW;
+		blass.push_back(blass[i]);
+		blas_transforms.push_back(blas_transforms[i]);
+		geometry_data.push_back(geometry);
+		material_data.push_back(material_data[i]);
+		sbt_offsets.push_back(sbt_offsets[i]);
+		motion_indices.push_back(motion_indices[i]);
+		uint32_t flags = instance_flags[i] & ~uint32_t(RD::ACCELERATION_STRUCTURE_INSTANCE_FORCE_OPAQUE_BIT);
+		if (double_sided) {
+			flags |= RD::ACCELERATION_STRUCTURE_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT;
+		}
+		instance_flags.push_back(flags);
+		instance_masks.push_back(RT_INSTANCE_MASK_SHADOW);
 	}
 
 	// The shadow rays ignore the faces turned away from the light, as raster's shadow pass culls them. A double-sided
