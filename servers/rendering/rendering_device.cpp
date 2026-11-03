@@ -7825,6 +7825,10 @@ void RenderingDevice::raytracing_list_trace_rays(RaytracingListID p_list, uint32
 
 			UniformSet *uniform_set = uniform_set_owner.get_or_null(raytracing_list.state.sets[i].uniform_set);
 			_uniform_set_update_shared(uniform_set);
+			// A texture the driver must clear before its first use (API_TRAIT_TEXTURE_OUTPUTS_REQUIRE_CLEARS) is cleared now, as
+			// compute lists do: left pending, it was cleared at its next use by a compute or draw list, after these rays had
+			// written it.
+			_uniform_set_update_clears(uniform_set);
 
 			draw_graph->add_raytracing_list_usages(uniform_set->draw_trackers, uniform_set->draw_trackers_usage);
 
