@@ -411,6 +411,18 @@ struct alignas(16) RT_DisplaceJob {
 };
 static_assert(sizeof(RT_DisplaceJob) == 480, "RT_DisplaceJob must be 480 bytes for std430");
 
+// Must match GLSL RTCaptureDraw (forward_clustered/rt_capture_inc.glsl, std430): a vertex capture request's draw.
+struct RT_VertexCaptureDraw {
+	float view_to_local[12]; // Rows of the 3x4 transform from view space to the surface's mesh space.
+	uint32_t vertex_count;
+	uint32_t tbn_words;
+	uint32_t flags; // RT_CAPTURE_FLAG_*.
+	uint32_t guard_index;
+};
+static_assert(sizeof(RT_VertexCaptureDraw) == 64, "RT_VertexCaptureDraw must be 64 bytes for std430");
+static constexpr uint32_t RT_CAPTURE_FLAG_REFIT_GUARD = 1u << 0;
+static constexpr uint32_t RT_CAPTURE_FLAG_COMPRESSED = 1u << 1;
+
 // Must match GLSL OmmBakeJob (raytracing_omm_bake.glsl, std430).
 struct alignas(16) RT_OmmBakeJob {
 	RT_GeometryData geometry; // The mesh surface as stored.
@@ -611,6 +623,10 @@ struct RTDeformedCacheEntry {
 	uint32_t displaced_instance_uniforms_hash = 0; // The instance uniforms vertex() was evaluated with.
 	bool displaced_deferred = false; // A change waits for the surface's next update frame (far from the camera).
 	Transform3D displaced_transform;
+	uint64_t displaced_deformation = 0; // A captured skinned surface's: the skinning output it was captured from.
+	// Last evaluated by a vertex capture (rt_capture_inc.glsl), which leaves the previous positions' section out: the
+	// previous positions are then the last evaluation's (process_deformed_surface()).
+	bool displaced_captured = false;
 
 	// The surface's cut-out baked into an opacity micromap (build_tlas() sets it, _omm_entry()), and the one the BLAS
 	// was built with: a change builds the BLAS again.
@@ -1015,6 +1031,18 @@ class RenderRaytracing {
 	static RenderRaytracing *displace_guard_target;
 	static void _displace_guard_arrived_static(const Vector<uint8_t> &p_data, uint64_t p_serial);
 	void _displace_guard_arrived(const Vector<uint8_t> &p_data, uint64_t p_serial);
+	// rendering/pathtracing/vertex_capture_mode: the surfaces whose vertex() output comes from the raster vertex shader
+	// (RenderForwardClustered::_rt_record_vertex_captures()) instead of the compute pass, where the device has vertex
+	// pipeline stores (Vulkan). Its parameters per request (RT_VertexCaptureDraw) and NaN guard counts.
+	enum VertexCaptureMode {
+		VERTEX_CAPTURE_AUTOMATIC,
+		VERTEX_CAPTURE_OPT_IN,
+		VERTEX_CAPTURE_DISABLED,
+	};
+	RID vertex_capture_params_buffer;
+	uint32_t vertex_capture_params_capacity = 0;
+	RID vertex_capture_guard_buffer;
+	uint32_t vertex_capture_guard_capacity = 0;
 	RTMergedMMEntry *_access_merged_mm_slot(RID &r_handle);
 	void _free_merged_mm_entry(RID p_handle);
 	const RTMergedMMEntry *_get_merged_mm_entry(RID p_mm_rid, uint32_t p_surface_index); // With a BLAS built, or null.

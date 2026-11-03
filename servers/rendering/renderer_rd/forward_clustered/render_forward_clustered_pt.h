@@ -80,7 +80,13 @@ class RenderForwardClusteredPT : public RenderForwardClustered {
 	// The factor that brings the rasterized instances' probes (pt_probes) to the units a lightmap capture is given in.
 	float _pt_probe_sh_scale(const RenderDataRD *p_render_data, float p_luminance_multiplier);
 
+	// rendering/pathtracing/vertex_capture_mode: the raster vertex shader's capture draws (SHADER_VERSION_RT_CAPTURE), points
+	// into an empty framebuffer.
+	RID rt_capture_framebuffer;
+	SceneShaderForwardClustered::ShaderData::PipelineKey _rt_capture_pipeline_key(RD::VertexFormatID p_vertex_format) const;
+
 protected:
+	virtual void _rt_record_vertex_captures(RID p_params_buffer, RID p_guard_counts, LocalVector<RTVertexCaptureRequest> &r_requests) override;
 	virtual void _render_scene(RenderDataRD *p_render_data, const Color &p_default_bg_color) override;
 	virtual void _render_buffers_debug_draw(const RenderDataRD *p_render_data) override;
 	virtual void _free_rt_viewport_state(RenderSceneBuffersRD *p_render_buffers) override;

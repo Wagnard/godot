@@ -98,6 +98,7 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	int specular_modei = SPECULAR_SCHLICK_GGX;
 	int billboard_modei = RenderingBillboard::MODE_DISABLED;
 	int rt_blasi = RSE::RT_BLAS_UPDATE_AUTO;
+	int rt_vertexi = RT_VERTEX_AUTO;
 
 	int stencil_readi = 0;
 	int stencil_writei = 0;
@@ -158,6 +159,10 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	actions.render_mode_values["rt_blas_auto"] = Pair<int *, int>(&rt_blasi, RSE::RT_BLAS_UPDATE_AUTO);
 	actions.render_mode_values["rt_blas_refit"] = Pair<int *, int>(&rt_blasi, RSE::RT_BLAS_UPDATE_REFIT);
 	actions.render_mode_values["rt_blas_rebuild"] = Pair<int *, int>(&rt_blasi, RSE::RT_BLAS_UPDATE_REBUILD);
+	actions.render_mode_values["rt_vertex_auto"] = Pair<int *, int>(&rt_vertexi, RT_VERTEX_AUTO);
+	actions.render_mode_values["rt_vertex_dynamic"] = Pair<int *, int>(&rt_vertexi, RT_VERTEX_DYNAMIC);
+	actions.render_mode_values["rt_vertex_static"] = Pair<int *, int>(&rt_vertexi, RT_VERTEX_STATIC);
+	actions.render_mode_values["rt_vertex_frozen"] = Pair<int *, int>(&rt_vertexi, RT_VERTEX_FROZEN);
 
 	actions.usage_flag_pointers["ALPHA"] = &uses_alpha;
 	actions.usage_flag_pointers["ALPHA_SCISSOR_THRESHOLD"] = &uses_alpha_clip;
@@ -240,6 +245,7 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	specular_mode = SpecularMode(specular_modei);
 	billboard.mode = RenderingBillboard::Mode(billboard_modei);
 	rt_blas_update = RSE::RTBlasUpdate(rt_blasi);
+	rt_vertex_mode = RTVertexMode(rt_vertexi);
 	writes_modelview_or_projection = writes_modelview || writes_projection;
 	if (depth_test_disabledi) {
 		depth_test = DEPTH_TEST_DISABLED;
@@ -508,6 +514,8 @@ uint16_t SceneShaderForwardClustered::ShaderData::_get_shader_version(PipelineVe
 
 			return ShaderVersion::SHADER_VERSION_COLOR_PASS * 2 + shader_flags;
 		} break;
+		case PIPELINE_VERSION_RT_CAPTURE:
+			return SHADER_VERSION_RT_CAPTURE;
 		default: {
 			DEV_ASSERT(false && "Unknown pipeline version.");
 			return 0;
@@ -621,6 +629,16 @@ void SceneShaderForwardClustered::ShaderData::_create_pipeline(PipelineKey p_pip
 	raster_state.cull_mode = p_pipeline_key.cull_mode;
 	raster_state.front_face = p_pipeline_key.front_face;
 	raster_state.wireframe = wireframe || p_pipeline_key.wireframe;
+
+	if (p_pipeline_key.version == PIPELINE_VERSION_RT_CAPTURE) {
+		// One point per vertex: the vertex stage stores its output and places the point outside the clip volume. Not with
+		// rasterizer discard: the shader has a fragment stage, which a pipeline without fragment shader state may not
+		// have (VUID-VkGraphicsPipelineCreateInfo-pStages-06894).
+		primitive_rd = RD::RENDER_PRIMITIVE_POINTS;
+		emulate_point_size_flag = false;
+		raster_state.wireframe = false;
+		depth_stencil_state = RD::PipelineDepthStencilState();
+	}
 
 	RD::PipelineMultisampleState multisample_state;
 	multisample_state.sample_count = RD::get_singleton()->framebuffer_format_get_texture_samples(p_pipeline_key.framebuffer_format_id, 0);
@@ -938,6 +956,10 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 
 			shader_versions.push_back(ShaderRD::VariantDefine(group, version, false));
 		}
+
+		// SHADER_VERSION_RT_CAPTURE. Normals and tangents always, for the TBN block of every mesh format. Its set is defined
+		// here, not in the general defines, so that no other variant's source changes.
+		shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_RT_CAPTURE, "\n#define MODE_RENDER_DEPTH\n#define MODE_RT_CAPTURE\n#define NORMAL_USED\n#define TANGENT_USED\n#define RT_CAPTURE_UNIFORM_SET " + itos(RenderForwardClustered::RT_CAPTURE_UNIFORM_SET) + "\n", false));
 
 		Vector<uint64_t> dynamic_buffers;
 		dynamic_buffers.push_back(ShaderRD::DynamicBuffer::encode(RenderForwardClustered::RENDER_PASS_UNIFORM_SET, 2));
@@ -1356,6 +1378,16 @@ void SceneShaderForwardClustered::enable_rt_shadows_shader_group(bool p_for_baki
 
 bool SceneShaderForwardClustered::is_rt_shadows_shader_group_enabled() const {
 	return default_shader_rt_shadows_rd.is_valid();
+}
+
+void SceneShaderForwardClustered::enable_rt_capture_shader_group() {
+	if (RD::get_singleton()->has_feature(RD::SUPPORTS_VERTEX_PIPELINE_STORES) && !shader.is_group_enabled(SHADER_GROUP_RT_CAPTURE)) {
+		shader.enable_group(SHADER_GROUP_RT_CAPTURE);
+	}
+}
+
+bool SceneShaderForwardClustered::is_rt_capture_shader_group_enabled() const {
+	return shader.is_group_enabled(SHADER_GROUP_RT_CAPTURE);
 }
 
 uint32_t SceneShaderForwardClustered::get_pipeline_compilations(RSE::PipelineSource p_source) {

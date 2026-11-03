@@ -58,6 +58,9 @@ public:
 		SHADER_GROUP_OIT, // Compiled on first blend_oit material.
 		SHADER_GROUP_OIT_MULTIVIEW,
 		SHADER_GROUP_OIT_UNUSED, // OIT combos that are never requested; never enabled.
+		// The path tracer's vertex capture (rendering/pathtracing/vertex_capture_mode), once it is on: compiled for every
+		// material then.
+		SHADER_GROUP_RT_CAPTURE,
 	};
 
 	// Not an enum because these values are constants that are processed as numbers
@@ -88,6 +91,9 @@ public:
 		SHADER_COLOR_PASS_FLAG_COUNT = 1 << 8
 	};
 
+	// After the color pass variants: the vertex stage stores vertex()'s output (rt_capture_inc.glsl), nothing is rasterized.
+	static constexpr uint16_t SHADER_VERSION_RT_CAPTURE = ShaderVersion::SHADER_VERSION_COLOR_PASS * 2 + SHADER_COLOR_PASS_FLAG_COUNT;
+
 	enum PipelineVersion {
 		PIPELINE_VERSION_DEPTH_PASS,
 		PIPELINE_VERSION_DEPTH_PASS_DP,
@@ -100,6 +106,7 @@ public:
 		PIPELINE_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_AND_VOXEL_GI_MULTIVIEW,
 		PIPELINE_VERSION_DEPTH_PASS_CUBE_LAYERED,
 		PIPELINE_VERSION_COLOR_PASS,
+		PIPELINE_VERSION_RT_CAPTURE, // SHADER_VERSION_RT_CAPTURE, drawn as points outside the clip volume.
 		PIPELINE_VERSION_MAX
 	};
 
@@ -259,7 +266,7 @@ public:
 
 		RID version;
 
-		static const uint32_t VERTEX_INPUT_MASKS_SIZE = ShaderVersion::SHADER_VERSION_COLOR_PASS * 2 + SHADER_COLOR_PASS_FLAG_COUNT;
+		static const uint32_t VERTEX_INPUT_MASKS_SIZE = SHADER_VERSION_RT_CAPTURE + 1;
 		std::atomic<uint64_t> vertex_input_masks[VERTEX_INPUT_MASKS_SIZE] = {};
 
 		Vector<ShaderCompiler::GeneratedCode::Texture> texture_uniforms;
@@ -319,6 +326,14 @@ public:
 		bool uses_world_coordinates = false;
 		RenderingBillboard::Settings billboard;
 		RSE::RTBlasUpdate rt_blas_update = RSE::RT_BLAS_UPDATE_AUTO;
+		// render_mode rt_vertex_*, in the order of its options: how the path tracer takes what vertex() makes of the mesh.
+		enum RTVertexMode {
+			RT_VERTEX_AUTO, // Evaluated when vertex() moves VERTEX or writes MODELVIEW_MATRIX.
+			RT_VERTEX_DYNAMIC, // As auto; captured from the raster vertex shader in vertex_capture_mode Opt-in.
+			RT_VERTEX_STATIC, // Never evaluated: traced as the mesh is.
+			RT_VERTEX_FROZEN, // Evaluated once, again only when the surface or its shader changes (not for TIME, the camera, the transform or parameters).
+		};
+		RTVertexMode rt_vertex_mode = RT_VERTEX_AUTO;
 		bool uses_screen_texture_mipmaps = false;
 		bool uses_z_clip_scale = false;
 		RSE::CullMode cull_mode = RSE::CULL_MODE_DISABLED;
@@ -539,6 +554,9 @@ public:
 	// p_for_baking: the shader baker's, both groups (with and without opacity micromaps), whatever this device has.
 	void enable_rt_shadows_shader_group(bool p_for_baking = false);
 	bool is_rt_shadows_shader_group_enabled() const;
+	// The path tracer's vertex capture: compiled for every material once it is on. Needs vertex pipeline stores.
+	void enable_rt_capture_shader_group();
+	bool is_rt_capture_shader_group_enabled() const;
 	uint32_t get_pipeline_compilations(RSE::PipelineSource p_source);
 };
 

@@ -81,6 +81,7 @@ protected:
 		TRANSFORMS_UNIFORM_SET = 2,
 		MATERIAL_UNIFORM_SET = 3,
 		RT_SHADOW_TEXTURES_UNIFORM_SET = 4, // The path tracer's material textures, in its transparent pass (USE_RT_SHADOWS).
+		RT_CAPTURE_UNIFORM_SET = 4, // The path tracer's vertex capture (SHADER_VERSION_RT_CAPTURE, another variant): its draws and outputs.
 	};
 
 	enum {
@@ -1520,6 +1521,17 @@ protected:
 	virtual void _free_rt_viewport_state(RenderSceneBuffersRD *p_render_buffers);
 	// Compiles pipelines a subclass draws the surface with, after the surface cache's own were queued.
 	virtual void _mesh_generate_extra_pipelines_for_surface_cache(GeometryInstanceSurfaceDataCache *p_surface_cache) {}
+	// A surface whose vertex() output the path tracer takes from the raster vertex shader (rendering/pathtracing/
+	// vertex_capture_mode) rather than from its displacement compute pass: RenderRaytracing::_displace_surfaces() makes
+	// them, _rt_record_vertex_captures() draws them. Request i reads its parameters at index i of the parameters buffer.
+	struct RTVertexCaptureRequest {
+		const GeometryInstanceSurfaceDataCache *surf = nullptr;
+		RID output; // The surface's displaced vertex buffer.
+		RID blas_positions; // A refit's: the positions its BLAS has.
+		uint32_t vertex_count = 0;
+		bool recorded = false; // Drawn: false while its shader variant or pipeline compiles.
+	};
+	virtual void _rt_record_vertex_captures(RID p_params_buffer, RID p_guard_counts, LocalVector<RTVertexCaptureRequest> &r_requests) {}
 
 	virtual void _render_material(const Transform3D &p_cam_transform, const Projection &p_cam_projection, bool p_cam_orthogonal, const PagedArray<RenderGeometryInstance *> &p_instances, RID p_framebuffer, const Rect2i &p_region, float p_exposure_normalization) override;
 	virtual void _render_uv2(const PagedArray<RenderGeometryInstance *> &p_instances, RID p_framebuffer, const Rect2i &p_region) override;

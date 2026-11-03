@@ -3364,6 +3364,14 @@
 			[b]Note:[/b] Only has an effect when path tracing is enabled on the active [Environment].
 			[b]Note:[/b] A Ray Query cannot run the intersection code of an [RTProceduralInstance3D]: while the scene holds any, the shadow rays that the Ray Query lets through are traced again through the pipeline against procedural geometry only.
 		</member>
+		<member name="rendering/pathtracing/vertex_capture_mode" type="int" setter="" getter="" default="2">
+			Controls which mesh surfaces the path tracer vertex-captures: their material's raster vertex shader runs over every vertex and stores where [code]vertex()[/code] put it, and the surface is traced with that geometry. Without a capture, a surface whose [code]vertex()[/code] function writes [code]VERTEX[/code] or [code]MODELVIEW_MATRIX[/code] is evaluated by the path tracer's own compute pass (the same vertices, from the material's code compiled for ray tracing). Read every frame. Both are updated as often (see [member rendering/pathtracing/displacement_update_distance]).
+			- [b]Automatic[/b] ([code]0[/code]): Captures every such surface. Also captures skinned and blend shape meshes whose material writes [code]VERTEX[/code] in [code]vertex()[/code], which the compute pass leaves at their skinned pose.
+			- [b]Opt-in[/b] ([code]1[/code]): Only captures the surfaces of shaders with [code]render_mode rt_vertex_dynamic[/code] or [code]rt_vertex_frozen[/code]; the compute pass evaluates the others.
+			- [b]Disabled[/b] ([code]2[/code]): Never captures; the compute pass evaluates every such surface.
+			[code]render_mode rt_vertex_static[/code] leaves a surface undeformed in every mode, and [code]rt_vertex_frozen[/code] evaluates it only when its mesh or shader changes.
+			[b]Note:[/b] Capturing needs vertex pipeline stores ([constant RenderingDevice.SUPPORTS_VERTEX_PIPELINE_STORES]), so it only happens with the Vulkan rendering driver; elsewhere this setting behaves as [b]Disabled[/b]. [MultiMesh] and particle surfaces are never captured. A surface whose capture shader is still compiling is evaluated by the compute pass meanwhile.
+		</member>
 		<member name="rendering/pathtracing/volumetric_fog_positional_shadow_rays" type="int" setter="" getter="" default="2">
 			Maximum number of shadow rays traced per volumetric fog froxel for shadowed [OmniLight3D]s, [SpotLight3D]s and [AreaLight3D]s when [member rendering/pathtracing/volumetric_fog_shadows] is enabled. Lights are picked stochastically by their contribution, so more rays reduce noise in scenes with many overlapping lights. Shadowed [DirectionalLight3D]s always use one additional ray, shared stochastically between them. Read every frame.
 		</member>

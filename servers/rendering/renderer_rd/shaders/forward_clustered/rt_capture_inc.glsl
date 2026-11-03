@@ -1,20 +1,21 @@
-// Path tracer vertex capture: stores the final vertex() output of every point into the capture arena,
-// in the deformed-mesh layout the ray tracing hit shaders decode (float3 positions, then packed TBN).
+// Path tracer vertex capture (rendering/pathtracing/vertex_capture_mode): the raster vertex shader stores what vertex()
+// made of each vertex in the surface's displaced vertex buffer, in the layout raytracing_displace.glsl writes for the
+// deformed path (RenderRaytracing::_displace_surfaces()): [displaced float3 positions][rest TBN block][rest float3
+// positions]. The previous positions are the last capture's (process_deformed_surface() keeps them).
 
-// Mirrors RTVertexCapture::DrawParams.
+// Mirrors RT_VertexCaptureDraw (render_raytracing.h).
 struct RTCaptureDraw {
-	vec4 view_to_local[3];
-	uint position_offset; // In uints.
-	uint tbn_offset; // In uints.
+	vec4 view_to_local[3]; // Rows: from the view space vertex() ends in to the space of the BLAS.
 	uint vertex_count;
+	uint tbn_words; // 0, 1 (normal) or 2 (normal and tangent).
 	uint flags;
-	vec4 dead_position; // xyz in capture space.
+	uint guard_index;
 };
 
-#define RT_CAPTURE_FLAG_NORMAL (1u << 0)
-#define RT_CAPTURE_FLAG_TANGENT (1u << 1)
+#define RT_CAPTURE_FLAG_REFIT_GUARD (1u << 0) // The BLAS is refit: a vertex keeps its triangles' active state.
+#define RT_CAPTURE_FLAG_COMPRESSED (1u << 1) // The mesh's attributes are compressed: the rest TBN is encoded again.
 
-// Indexed by draw_call.instance_index so the push constant layout stays untouched.
+// Indexed by draw_call.instance_index, the request's element: the push constant stays raster's.
 layout(set = RT_CAPTURE_UNIFORM_SET, binding = 0, std430) restrict readonly buffer RTCaptureParams {
 	RTCaptureDraw data[];
 }
@@ -25,66 +26,86 @@ layout(set = RT_CAPTURE_UNIFORM_SET, binding = 1, std430) restrict writeonly buf
 }
 rt_capture_output;
 
-uint rt_capture_pack_unorm2(vec2 p_value) {
-	uvec2 v = uvec2(clamp(ivec2(p_value * 65535.0), ivec2(0), ivec2(0xFFFF)));
-	return v.x | (v.y << 16);
+layout(set = RT_CAPTURE_UNIFORM_SET, binding = 2, std430) restrict readonly buffer RTCaptureBlasPositions {
+	uint data[];
+}
+rt_capture_blas_positions;
+
+// Per request: the vertices a refit kept as the BLAS has them; any makes the CPU build that BLAS again.
+layout(set = RT_CAPTURE_UNIFORM_SET, binding = 3, std430) restrict buffer RTCaptureGuardCounts {
+	uint data[];
+}
+rt_capture_guard_counts;
+
+// As raytracing_displace.glsl encodes compressed meshes (Vector3::octahedron_encode(), octahedron_tangent_encode()).
+uint rt_capture_pack_unorm16x2(vec2 p_value) {
+	uvec2 u = uvec2(clamp(p_value, 0.0, 1.0) * 65535.0);
+	return u.x | (u.y << 16);
 }
 
-vec2 rt_capture_sign_not_zero(vec2 p_v) {
-	return mix(vec2(-1.0), vec2(1.0), greaterThanEqual(p_v, vec2(0.0)));
-}
-
-// Octahedral encoding in [0, 1], matching the mesh vertex format.
 vec2 rt_capture_vec3_to_oct(vec3 p_n) {
-	vec2 o = p_n.xy / (abs(p_n.x) + abs(p_n.y) + abs(p_n.z));
-	o = p_n.z >= 0.0 ? o : (1.0 - abs(o.yx)) * rt_capture_sign_not_zero(o);
+	p_n /= abs(p_n.x) + abs(p_n.y) + abs(p_n.z);
+	vec2 o = p_n.z >= 0.0 ? p_n.xy : (1.0 - abs(p_n.yx)) * vec2(p_n.x >= 0.0 ? 1.0 : -1.0, p_n.y >= 0.0 ? 1.0 : -1.0);
 	return o * 0.5 + 0.5;
 }
 
-// Tangent octahedral encoding with the binormal sign folded into y, matching the mesh vertex format.
-vec2 rt_capture_tangent_to_oct(vec3 p_t, float p_sign) {
-	vec2 o = rt_capture_vec3_to_oct(p_t);
-	o.y = o.y * 0.5 + 0.5;
-	o.y = p_sign >= 0.0 ? o.y : 1.0 - o.y;
-	return o;
+// The words of an uncompressed mesh's attribute, as raytracing_displace.glsl copies them.
+uint rt_capture_unorm16x2_words(vec2 p_value) {
+	uvec2 u = uvec2(round(clamp(p_value, 0.0, 1.0) * 65535.0));
+	return u.x | (u.y << 16);
 }
 
-vec3 rt_capture_transform_dir(RTCaptureDraw p_draw, vec3 p_dir) {
-	return normalize(vec3(dot(p_draw.view_to_local[0].xyz, p_dir), dot(p_draw.view_to_local[1].xyz, p_dir), dot(p_draw.view_to_local[2].xyz, p_dir)));
-}
-
-bool rt_capture_is_non_finite(vec3 p_v) {
-	return any(isinf(p_v)) || any(isnan(p_v));
-}
-
-// p_culled is set for instances the particle system hid with a non-finite transform. Their points collapse to
-// dead_position: Vulkan requires primitives active at BLAS build time to stay active on refit, so they can't be NaN.
-void rt_capture_store(vec3 p_vertex, vec3 p_normal, vec3 p_tangent, vec3 p_binormal, bool p_culled) {
+// p_vertex: vertex()'s output in view space, as raster draws it. p_rest_*: the vertex vertex() was given;
+// p_axis_tangent: its attribute (uncompressed: the octahedral normal and tangent words).
+void rt_capture_store(vec3 p_vertex, vec3 p_rest_vertex, vec3 p_rest_normal, vec3 p_rest_tangent, vec3 p_rest_binormal, vec4 p_axis_tangent) {
 	RTCaptureDraw draw = rt_capture_params.data[draw_call.instance_index];
-	uint idx = uint(INSTANCE_INDEX) * draw.vertex_count + uint(VERTEX_INDEX);
+	uint index = uint(gl_VertexIndex);
+	gl_PointSize = 1.0;
+	if (index >= draw.vertex_count) {
+		return;
+	}
 
 	vec4 v = vec4(p_vertex, 1.0);
-	vec3 local = vec3(dot(draw.view_to_local[0], v), dot(draw.view_to_local[1], v), dot(draw.view_to_local[2], v));
-	if (p_culled || rt_capture_is_non_finite(local)) {
-		local = draw.dead_position.xyz;
+	vec3 displaced = vec3(dot(draw.view_to_local[0], v), dot(draw.view_to_local[1], v), dot(draw.view_to_local[2], v));
+	// A point vertex() removed (NaN) makes its triangles inactive in the BLAS, which needs a NaN x; an infinite one too.
+	if (any(isnan(displaced)) || any(isinf(displaced))) {
+		displaced = vec3(uintBitsToFloat(0x7fc00000u));
 	}
-	uint pos = draw.position_offset + idx * 3u;
-	rt_capture_output.data[pos + 0u] = floatBitsToUint(local.x);
-	rt_capture_output.data[pos + 1u] = floatBitsToUint(local.y);
-	rt_capture_output.data[pos + 2u] = floatBitsToUint(local.z);
-
-	if (bool(draw.flags & RT_CAPTURE_FLAG_NORMAL)) {
-		bool has_tangent = bool(draw.flags & RT_CAPTURE_FLAG_TANGENT);
-		uint tbn = draw.tbn_offset + idx * (has_tangent ? 2u : 1u);
-		vec3 n = rt_capture_transform_dir(draw, p_normal);
-		rt_capture_output.data[tbn] = rt_capture_pack_unorm2(rt_capture_vec3_to_oct(n));
-		if (has_tangent) {
-			vec3 t = rt_capture_transform_dir(draw, p_tangent);
-			vec3 b = rt_capture_transform_dir(draw, p_binormal);
-			float binormal_sign = dot(cross(n, t), b) >= 0.0 ? 1.0 : -1.0;
-			rt_capture_output.data[tbn + 1u] = rt_capture_pack_unorm2(rt_capture_tangent_to_oct(t, binormal_sign));
+	// A refit may not turn a triangle on or off (raytracing_displace.glsl): a vertex that would change its state stays as
+	// the BLAS has it, and the count makes the CPU build the BLAS again.
+	if (bool(draw.flags & RT_CAPTURE_FLAG_REFIT_GUARD)) {
+		vec3 built = vec3(uintBitsToFloat(rt_capture_blas_positions.data[index * 3u]), uintBitsToFloat(rt_capture_blas_positions.data[index * 3u + 1u]), uintBitsToFloat(rt_capture_blas_positions.data[index * 3u + 2u]));
+		if (isnan(built.x) != isnan(displaced.x)) {
+			displaced = built;
+			atomicAdd(rt_capture_guard_counts.data[draw.guard_index], 1u);
 		}
 	}
 
-	gl_PointSize = 1.0;
+	uint vertex_count = draw.vertex_count;
+	rt_capture_output.data[index * 3u] = floatBitsToUint(displaced.x);
+	rt_capture_output.data[index * 3u + 1u] = floatBitsToUint(displaced.y);
+	rt_capture_output.data[index * 3u + 2u] = floatBitsToUint(displaced.z);
+
+	if (draw.tbn_words > 0u) {
+		uint tbn_base = vertex_count * 3u + index * draw.tbn_words;
+		if (!bool(draw.flags & RT_CAPTURE_FLAG_COMPRESSED)) {
+			rt_capture_output.data[tbn_base] = rt_capture_unorm16x2_words(p_axis_tangent.xy);
+			if (draw.tbn_words > 1u) {
+				rt_capture_output.data[tbn_base + 1u] = rt_capture_unorm16x2_words(p_axis_tangent.zw);
+			}
+		} else {
+			rt_capture_output.data[tbn_base] = rt_capture_pack_unorm16x2(rt_capture_vec3_to_oct(p_rest_normal));
+			if (draw.tbn_words > 1u) {
+				vec2 t = rt_capture_vec3_to_oct(p_rest_tangent);
+				t.y = max(t.y, 1.0 / 32767.0) * 0.5 + 0.5;
+				t.y = dot(cross(p_rest_normal, p_rest_tangent), p_rest_binormal) >= 0.0 ? t.y : 1.0 - t.y;
+				rt_capture_output.data[tbn_base + 1u] = rt_capture_pack_unorm16x2(t);
+			}
+		}
+	}
+
+	uint rest_base = vertex_count * (3u + draw.tbn_words) + index * 3u;
+	rt_capture_output.data[rest_base] = floatBitsToUint(p_rest_vertex.x);
+	rt_capture_output.data[rest_base + 1u] = floatBitsToUint(p_rest_vertex.y);
+	rt_capture_output.data[rest_base + 2u] = floatBitsToUint(p_rest_vertex.z);
 }

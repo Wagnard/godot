@@ -3890,6 +3890,7 @@ void RenderingServer::init() {
 	GLOBAL_DEF_RST(PropertyInfo(Variant::FLOAT, "rendering/pathtracing/multimesh_displacement_distance", PROPERTY_HINT_RANGE, "0,500,0.1,or_greater,suffix:m"), 30.0);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::FLOAT, "rendering/pathtracing/displacement_update_distance", PROPERTY_HINT_RANGE, "0,500,0.1,or_greater,suffix:m"), 30.0);
 	GLOBAL_DEF("rendering/pathtracing/displaced_refit", true);
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/pathtracing/vertex_capture_mode", PROPERTY_HINT_ENUM, "Automatic,Opt-in,Disabled"), 2);
 	GLOBAL_DEF("rendering/pathtracing/light_sampling_ris", true);
 	GLOBAL_DEF("rendering/pathtracing/russian_roulette", true);
 	GLOBAL_DEF("rendering/pathtracing/specular_motion_vectors", false);

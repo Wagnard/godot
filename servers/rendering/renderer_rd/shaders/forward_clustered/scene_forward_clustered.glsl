@@ -514,7 +514,7 @@ void vertex_shader(vec3 vertex_input,
 #endif
 
 #ifdef MODE_RT_CAPTURE
-	rt_capture_store(vertex, normal, tangent, binormal, sc_multimesh() && rt_capture_is_non_finite(matrix[3].xyz));
+	rt_capture_store(vertex, vertex_input, normal_input, tangent_input, binormal_input, axis_tangent_attrib);
 #endif
 
 	vertex_interp = vertex;
@@ -761,6 +761,12 @@ void vertex_shader(vec3 vertex_input,
 	} else {
 		gl_PointSize = point_size;
 	}
+#endif
+
+#ifdef MODE_RT_CAPTURE
+	// Nothing is rasterized: the point lies outside the clip volume. Rasterizer discard would need a pipeline without the
+	// fragment stage (VUID-VkGraphicsPipelineCreateInfo-pStages-06894), which this shader has.
+	gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
 #endif
 }
 
