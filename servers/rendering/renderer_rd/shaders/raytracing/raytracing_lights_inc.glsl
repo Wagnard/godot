@@ -1,5 +1,5 @@
 // Light sampling and Next Event Estimation (NEE) for raytracing.
-// Requires: raytracing_inc.glsl, brdf_inc.glsl, tlas at binding 1, payload at location 0.
+// Requires: raytracing_inc.glsl, brdf_inc.glsl, tlas at binding 1, payload at location 0, bindless_textures[].
 // Note: ray_query_alpha_test() still requires GL_EXT_ray_query (used by DLSS-RR path or when USE_RAY_QUERY_SHADOWS is defined).
 
 // ============================================================================
@@ -27,13 +27,14 @@ struct RTLightData {
 	float inv_spot_attenuation; // Spot cone softness.
 	float cos_spot_angle; // Cosine of spot cone half-angle.
 	uint cull_mask; // Layers this light lights (Light3D.light_cull_mask).
-	vec3 spot_direction; // Spot direction (normalized, world space).
+	vec3 spot_direction; // The light's -Z (normalized, world space): a spot's cone axis, an omni light's with a projector.
 	float shadow_opacity; // 0 when the light casts no shadow (no shadow ray), as raster.
-	// Directional: world position (w = 1) to the UV of rt_directional_light_projector (raster's projector).
+	// Directional: world position (w = 1) to the UV of rt_directional_light_projector (raster's projector). Omni and spot
+	// with projector_texture: xyz the light's X and Y axes, projector_uv_x.w a spot's cot(spot angle).
 	vec4 projector_uv_x;
 	vec4 projector_uv_y;
 	uint projector_enabled;
-	uint pad0;
+	uint projector_texture; // Omni and spot: the projector in bindless_textures (sRGB view), 0 for none.
 	uint pad1;
 	uint pad2;
 };
@@ -71,6 +72,34 @@ vec3 lights_directional_projector(RTLightData light, vec3 hit_pos) {
 	}
 	vec2 uv = vec2(dot(light.projector_uv_x, vec4(hit_pos, 1.0)), dot(light.projector_uv_y, vec4(hit_pos, 1.0)));
 	vec4 color = textureLod(sampler2D(rt_directional_light_projector, SAMPLER_LINEAR_WITH_MIPMAPS_REPEAT), uv, 0.0);
+	return color.rgb * color.a;
+}
+
+// Raster's light_projector_sampler (rendering/textures/light_projectors/filter, no repeat).
+layout(set = 0, binding = 45) uniform sampler rt_light_projector_sampler;
+
+// The projector of an omni or spot light (projector_texture, white when none) toward p_dir, the direction from the light's
+// position to the point, as raster's light_process_omni() and light_process_spot() map it (scene_forward_lights_inc.glsl,
+// through the light's shadow_matrix): rgb * a multiplies the light. Level 0: a ray has no screen derivatives.
+vec3 lights_positional_projector(RTLightData p_light, vec3 p_dir) {
+	if (p_light.projector_texture == 0u) {
+		return vec3(1.0);
+	}
+	const vec3 local = vec3(dot(p_dir, p_light.projector_uv_x.xyz), dot(p_dir, p_light.projector_uv_y.xyz), -dot(p_dir, p_light.spot_direction));
+	vec2 uv;
+	if (p_light.type == RT_LIGHT_TYPE_SPOT) {
+		// The spot's shadow camera, looking down -Z with a field of view of twice the spot angle, its NDC to [0, 1]
+		// (set_light_bias()); the projector rectangle flips v (light_storage.cpp: "flip because shadow is flipped").
+		const float w = -local.z >= 0.0 ? max(-local.z, 1e-6) : min(-local.z, -1e-6);
+		const vec2 ndc = local.xy * (p_light.projector_uv_x.w / w);
+		uv = vec2(ndc.x, -ndc.y) * 0.5 + 0.5;
+	} else {
+		// The decal atlas holds an omni light's projector as the dual paraboloid copy_to_fb.glsl's MODE_PANORAMA_TO_DP makes
+		// of it, the texture read as an equirectangular panorama: the point of that panorama the copy put at the paraboloid
+		// texel raster samples for p_dir.
+		uv = vec2(fract(atan(-local.x, -local.z) * (0.5 / PI)), acos(clamp(-local.y, -1.0, 1.0)) * (1.0 / PI));
+	}
+	const vec4 color = textureLod(sampler2D(bindless_textures[nonuniformEXT(p_light.projector_texture)], rt_light_projector_sampler), uv, 0.0);
 	return color.rgb * color.a;
 }
 
@@ -501,6 +530,13 @@ vec3 lights_evaluate_light(
 			spot_atten = 1.0 - pow(spot_rim, light.inv_spot_attenuation);
 		}
 
+		// From the light's center, as raster (a light with a size keeps a sharp projection); before the shadow ray, which
+		// has nothing to find where the projector is black.
+		vec3 projector = lights_positional_projector(light, -to_light / max(dist, 0.0001));
+		if (all(lessThanEqual(projector, vec3(0.0)))) {
+			return vec3(0.0);
+		}
+
 		bool through = has_backlight && dot(geometry_normal, L) < 0.0;
 		float visibility = lights_shadow_visibility(light, through ? hit_pos_back : hit_pos, L, shadow_dist, rng_state);
 		if (visibility <= 0.0) {
@@ -526,9 +562,9 @@ vec3 lights_evaluate_light(
 
 		// NdotL is already included in brdf_value (evalLambertian/evalMicrofacet bake it in).
 #ifdef NRD_ENABLED
-		r_specular = brdf_specular * spec_mul * light.emission * atten * indirect_mul * visibility;
+		r_specular = brdf_specular * spec_mul * light.emission * projector * atten * indirect_mul * visibility;
 #endif
-		return brdf_value * light.emission * atten * indirect_mul * visibility;
+		return brdf_value * light.emission * projector * atten * indirect_mul * visibility;
 	}
 	// === CONE LIGHT PATH (directional) ===
 	else {

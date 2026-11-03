@@ -5416,6 +5416,8 @@ uint32_t RenderRaytracing::gather_lights(const RenderDataRD *p_render_data, RT_L
 	struct LightScore {
 		RID light_instance;
 		float score;
+		float distance_fade; // Light3D.distance_fade_*: the light's energy.
+		float shadow_fade; // And its shadow's opacity.
 	};
 
 	LocalVector<LightScore> positional_lights;
@@ -5432,6 +5434,15 @@ uint32_t RenderRaytracing::gather_lights(const RenderDataRD *p_render_data, RT_L
 		Transform3D xform = ls->light_instance_get_base_transform(light_instance);
 		Vector3 light_pos = xform.origin;
 		Vector3 to_light = light_pos - cam_pos;
+		// The distance fade as raster's update_light_buffers() applies it (LightStorage::distance_fade_factor(), from the
+		// camera to the light): the energy fades from distance_fade_begin over distance_fade_length, past which raster
+		// drops the light, and the shadow's opacity from distance_fade_shadow over the same length.
+		const float camera_distance = to_light.length();
+		const float distance_fade = ls->light_get_distance_fade(base, camera_distance);
+		if (distance_fade <= 0.0f) {
+			return;
+		}
+		const float shadow_fade = ls->light_is_distance_fade_enabled(base) ? RendererRD::LightStorage::distance_fade_factor(camera_distance, ls->light_get_distance_fade_shadow(base), ls->light_get_distance_fade_length(base)) : 1.0f;
 		float dist_sq = MAX(to_light.dot(to_light), 0.01f);
 		Color color = ls->light_get_color(base);
 		float energy = ls->light_get_param(base, RSE::LIGHT_PARAM_ENERGY);
@@ -5448,11 +5459,13 @@ uint32_t RenderRaytracing::gather_lights(const RenderDataRD *p_render_data, RT_L
 		float t = CLAMP((forward_depth + BEHIND_FRUSTUM_BUFFER_M) / BEHIND_FRUSTUM_BUFFER_M, 0.0f, 1.0f);
 		float frustum_factor = Math::lerp(BEHIND_FRUSTUM_PENALTY, 1.0f, t);
 
-		float score = (energy * lum * range_factor * frustum_factor) / dist_sq;
+		float score = (energy * distance_fade * lum * range_factor * frustum_factor) / dist_sq;
 
 		LightScore ls_entry = {};
 		ls_entry.light_instance = light_instance;
 		ls_entry.score = score;
+		ls_entry.distance_fade = distance_fade;
+		ls_entry.shadow_fade = shadow_fade;
 		positional_lights.push_back(ls_entry);
 	};
 
@@ -5500,7 +5513,8 @@ uint32_t RenderRaytracing::gather_lights(const RenderDataRD *p_render_data, RT_L
 		memset(ld.projector_uv_x, 0, sizeof(ld.projector_uv_x));
 		memset(ld.projector_uv_y, 0, sizeof(ld.projector_uv_y));
 		ld.projector_enabled = 0;
-		ld.pad[0] = ld.pad[1] = ld.pad[2] = 0;
+		ld.projector_texture = 0;
+		ld.pad[0] = ld.pad[1] = 0;
 		const RID projector = ls->light_get_projector(base);
 		if (projector.is_valid() && rt_directional_projector.is_null()) {
 			const RID projector_texture = RendererRD::TextureStorage::get_singleton()->texture_get_rd_texture(projector, true);
@@ -5551,7 +5565,7 @@ uint32_t RenderRaytracing::gather_lights(const RenderDataRD *p_render_data, RT_L
 		ld.type = (type == RSE::LIGHT_SPOT) ? RT_LIGHT_TYPE_SPOT : RT_LIGHT_TYPE_OMNI;
 
 		Color linear_col = ls->light_get_color(base).srgb_to_linear();
-		float energy = compute_light_energy(base, type);
+		float energy = compute_light_energy(base, type) * positional_lights[i].distance_fade;
 		ld.emission[0] = linear_col.r * energy;
 		ld.emission[1] = linear_col.g * energy;
 		ld.emission[2] = linear_col.b * energy;
@@ -5567,7 +5581,7 @@ uint32_t RenderRaytracing::gather_lights(const RenderDataRD *p_render_data, RT_L
 		}
 		ld.specular_amount = ls->light_get_param(base, RSE::LIGHT_PARAM_SPECULAR) * 2.0f; // Matches rasterizer convention (light_storage.cpp), normalizes 0.5 default to 1.0.
 		ld.cull_mask = ls->light_get_cull_mask(base);
-		ld.shadow_opacity = ls->light_has_shadow(base) ? ls->light_get_param(base, RSE::LIGHT_PARAM_SHADOW_OPACITY) : 0.0f;
+		ld.shadow_opacity = ls->light_has_shadow(base) ? ls->light_get_param(base, RSE::LIGHT_PARAM_SHADOW_OPACITY) * positional_lights[i].shadow_fade : 0.0f;
 		ld.indirect_energy = ls->light_get_param(base, RSE::LIGHT_PARAM_INDIRECT_ENERGY);
 
 		if (type == RSE::LIGHT_SPOT) {
@@ -5588,7 +5602,35 @@ uint32_t RenderRaytracing::gather_lights(const RenderDataRD *p_render_data, RT_L
 		memset(ld.projector_uv_x, 0, sizeof(ld.projector_uv_x));
 		memset(ld.projector_uv_y, 0, sizeof(ld.projector_uv_y));
 		ld.projector_enabled = 0;
-		ld.pad[0] = ld.pad[1] = ld.pad[2] = 0;
+		ld.projector_texture = 0;
+		ld.pad[0] = ld.pad[1] = 0;
+		// The projector, in the light's own frame as raster's light_process_omni() / light_process_spot() map it
+		// (scene_forward_lights_inc.glsl, through shadow_matrix): a spot's in its shadow camera's perspective, an omni
+		// light's panorama around it. The texture itself (sRGB, as raster's decal_atlas_srgb), not the atlas copy.
+		const RID projector = ls->light_get_projector(base);
+		const float spot_sin = type == RSE::LIGHT_SPOT ? Math::sin(Math::deg_to_rad(ls->light_get_param(base, RSE::LIGHT_PARAM_SPOT_ANGLE))) : 1.0f;
+		if (projector.is_valid() && bindless_block && bindless_block->is_initialized() && spot_sin > 0.0f) {
+			const RID projector_texture = RendererRD::TextureStorage::get_singleton()->texture_get_rd_texture(projector, true);
+			if (projector_texture.is_valid()) {
+				ld.projector_texture = bindless_block->add_texture(projector_texture);
+			}
+		}
+		if (ld.projector_texture != 0) {
+			const Basis frame = xform.basis.orthonormalized();
+			for (int k = 0; k < 3; k++) {
+				ld.projector_uv_x[k] = frame.get_column(0)[k];
+				ld.projector_uv_y[k] = frame.get_column(1)[k];
+			}
+			if (type == RSE::LIGHT_SPOT) {
+				// Raster's shadow camera: set_perspective(spot_angle * 2.0, 1.0, ...) (RendererSceneCull), whose x and y
+				// scale is cot(spot_angle).
+				ld.projector_uv_x[3] = Math::cos(Math::deg_to_rad(ls->light_get_param(base, RSE::LIGHT_PARAM_SPOT_ANGLE))) / spot_sin;
+			} else {
+				ld.spot_direction[0] = -frame.get_column(2).x;
+				ld.spot_direction[1] = -frame.get_column(2).y;
+				ld.spot_direction[2] = -frame.get_column(2).z;
+			}
+		}
 		rt_light_count++;
 	}
 
@@ -6460,6 +6502,9 @@ RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderD
 
 		// Binding 40: the sky's sampling distribution, read only where RT_PARAM_ENV_SAMPLING says it was built.
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 40, p_state->sky_sampling_buffer.is_valid() ? p_state->sky_sampling_buffer : default_buffer));
+
+		// Binding 45: raster's sampler of the omni and spot light projectors (gather_lights(), bindless textures).
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 45, owner->light_projectors_get_sampler(rb->get_samplers())));
 	}
 
 	RID shader_rd = shader ? shader->get_pipeline_shader_rd(p_rt_flags) : RID();

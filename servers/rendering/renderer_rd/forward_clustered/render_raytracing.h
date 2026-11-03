@@ -212,14 +212,16 @@ struct alignas(16) RT_LightData {
 	float inv_spot_attenuation;
 	float cos_spot_angle;
 	uint32_t cull_mask; // Light3D.light_cull_mask: the layers this light lights.
-	float spot_direction[3];
+	float spot_direction[3]; // The light's -Z: a spot's cone axis, and an omni light's with a projector.
 	float shadow_opacity; // 0 without shadows: no shadow ray, as raster.
 	// Directional: world position (w = 1) to the UV of rt_directional_light_projector, when projector_enabled (as raster's
-	// DirectionalLightData, in world space).
+	// DirectionalLightData, in world space). Omni and spot with projector_texture: xyz the light's X and Y axes, and
+	// projector_uv_x[3] a spot's cot(spot angle), its projector's perspective.
 	float projector_uv_x[4];
 	float projector_uv_y[4];
 	uint32_t projector_enabled;
-	uint32_t pad[3];
+	uint32_t projector_texture; // Omni and spot: Light3D.light_projector in the bindless textures (sRGB), 0 for none.
+	uint32_t pad[2];
 };
 static_assert(sizeof(RT_LightData) == 128, "RT_LightData must be 128 bytes for std430");
 
