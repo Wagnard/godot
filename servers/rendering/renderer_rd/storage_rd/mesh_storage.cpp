@@ -1648,6 +1648,7 @@ void MeshStorage::_multimesh_allocate_data(RID p_multimesh, int p_instances, RSE
 	multimesh->motion_vectors_previous_offset = 0;
 	multimesh->motion_vectors_last_change = -1;
 	multimesh->motion_vectors_enabled = false;
+	multimesh->data_change_version++; // New buffer, new contents.
 
 	if (multimesh->instances) {
 		uint32_t buffer_size = multimesh->instances * multimesh->stride_cache * sizeof(float);
@@ -2239,6 +2240,7 @@ void MeshStorage::_multimesh_set_buffer(RID p_multimesh, const Vector<float> &p_
 			RD::get_singleton()->buffer_update(multimesh->buffer, multimesh->motion_vectors_previous_offset * multimesh->stride_cache * sizeof(float), p_buffer.size() * sizeof(float), r);
 		}
 		multimesh->buffer_set = true;
+		multimesh->data_change_version++;
 	}
 
 	// rendering/pathtracing/multimesh_cache_cpu_transforms: keep a CPU mirror of the
@@ -2409,6 +2411,10 @@ void MeshStorage::_update_dirty_multimeshes() {
 			const float *data = multimesh->data_cache.ptr() + buffer_offset;
 
 			uint32_t total_dirty_regions = multimesh->data_cache_dirty_region_count + multimesh->previous_data_cache_dirty_region_count;
+			if (multimesh->data_cache_dirty_region_count != 0) {
+				// The previous frame's regions alone are uploaded again unchanged.
+				multimesh->data_change_version++;
+			}
 			if (total_dirty_regions != 0) {
 				uint32_t data_cache_dirty_region_count = Math::division_round_up(multimesh->instances, (int)MULTIMESH_DIRTY_REGION_SIZE);
 				uint32_t visible_region_count = visible_instances == 0 ? 0 : Math::division_round_up(visible_instances, (uint32_t)MULTIMESH_DIRTY_REGION_SIZE);

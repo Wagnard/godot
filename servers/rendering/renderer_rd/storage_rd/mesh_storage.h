@@ -247,6 +247,7 @@ private:
 		uint32_t motion_vectors_current_offset = 0;
 		uint32_t motion_vectors_previous_offset = 0;
 		uint64_t motion_vectors_last_change = -1;
+		uint64_t data_change_version = 0; // Bumped whenever the instances written to the buffer change, with or without motion vectors.
 		uint32_t stride_cache = 0;
 		uint32_t color_offset_cache = 0;
 		uint32_t custom_data_offset_cache = 0;
@@ -851,9 +852,11 @@ public:
 		return mm ? mm->custom_data_offset_cache : 0;
 	}
 
+	// Changes whenever the instance data in the buffer changes (compare with !=). Not motion_vectors_last_change, which
+	// only moves while a viewport uses motion vectors.
 	_FORCE_INLINE_ uint64_t multimesh_get_last_change(RID p_multimesh) const {
 		MultiMesh *mm = multimesh_owner.get_or_null(p_multimesh);
-		return mm ? mm->motion_vectors_last_change : (uint64_t)-1;
+		return mm ? mm->data_change_version : (uint64_t)-1;
 	}
 
 	_FORCE_INLINE_ RID multimesh_get_gpu_buffer(RID p_multimesh) const {
