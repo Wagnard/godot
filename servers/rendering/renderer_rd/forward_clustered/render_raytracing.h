@@ -747,6 +747,8 @@ struct RTViewportState {
 	// rebuilt every frame with Environment.pathtracing_sky_sampling (RenderRaytracing::build_sky_sampling()).
 	RID sky_sampling_buffer;
 	RID scene_uniform_set;
+	// The view's parameters of the volumetric fog's ray queries (RTFogShadows, rendering/pathtracing/volumetric_fog_shadows).
+	RID fog_shadows_params_buffer;
 
 	uint32_t frame_counter = 0;
 };
@@ -1267,6 +1269,8 @@ public:
 	RID get_fragment_texture_set(RID p_shader, uint32_t p_set_index) const {
 		return bindless_block ? bindless_block->get_secondary_uniform_set(p_shader, p_set_index, BindlessBlock::SECONDARY_LAYOUT_FRAGMENT) : RID();
 	}
+	// The same table for the volumetric fog's ray queries (RTFogShadows), which owns its set.
+	BindlessBlock *get_bindless_block() const { return bindless_block; }
 
 	SceneShaderRaytracing *get_shader() const { return shader; }
 

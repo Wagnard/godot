@@ -254,6 +254,9 @@ void RenderRaytracing::_free_viewport_state_internal(RTViewportState *p_state) {
 	if (p_state->params_buffer.is_valid()) {
 		RD::get_singleton()->free_rid(p_state->params_buffer);
 	}
+	if (p_state->fog_shadows_params_buffer.is_valid()) {
+		RD::get_singleton()->free_rid(p_state->fog_shadows_params_buffer);
+	}
 	if (p_state->decal_buffer.is_valid()) {
 		RD::get_singleton()->free_rid(p_state->decal_buffer);
 	}

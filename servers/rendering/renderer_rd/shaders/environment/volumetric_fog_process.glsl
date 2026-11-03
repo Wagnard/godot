@@ -4,6 +4,19 @@
 
 #VERSION_DEFINES
 
+#ifdef USE_RAY_QUERY_SHADOWS
+// The path tracer's shadow rays, with what their alpha test reads (volumetric_fog_ray_query_inc.glsl).
+#extension GL_EXT_control_flow_attributes : enable
+#extension GL_EXT_ray_query : require
+#ifdef RT_OPACITY_MICROMAPS
+#extension GL_EXT_opacity_micromap : require
+#endif
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_ARB_gpu_shader_int64 : require
+#extension GL_EXT_nonuniform_qualifier : require
+#endif
+
 #ifdef USE_VULKAN_MEMORY_MODEL
 #pragma use_vulkan_memory_model
 #endif
@@ -415,7 +428,9 @@ void main() {
 
 				if (directional_lights.data[i].shadow_opacity > 0.001) {
 #ifdef USE_RAY_QUERY_SHADOWS
-					fog_shadows_add_directional(fog_shadows, directional_lights.data[i].color * directional_lights.data[i].energy * directional_lights.data[i].volumetric_fog_energy * directional_lights.data[i].shadow_opacity, directional_lights.data[i].direction);
+					// The projector filters the traced part too (applied to the rest below).
+					vec3 projector = directional_lights.data[i].projector_enabled != 0u ? directional_light_projector_color_lod(directional_lights.data[i].projector_uv_x, directional_lights.data[i].projector_uv_y, view_pos) : vec3(1.0);
+					fog_shadows_add_directional(fog_shadows, projector * directional_lights.data[i].color * directional_lights.data[i].energy * directional_lights.data[i].volumetric_fog_energy * directional_lights.data[i].shadow_opacity, directional_lights.data[i].direction);
 					shadow_attenuation = vec3(1.0 - directional_lights.data[i].shadow_opacity);
 #else
 					float depth_z = -view_pos.z;
@@ -701,6 +716,11 @@ void main() {
 							vec3 light_color = area_lights.data[light_index].color * texture_color;
 
 							if (area_lights.data[light_index].shadow_opacity > 0.001) {
+#ifdef USE_RAY_QUERY_SHADOWS
+								// Towards the light's point closest to the froxel, as the path tracer's transparent pass.
+								fog_shadows_add_positional(fog_shadows, light_color * attenuation * area_lights.data[light_index].volumetric_fog_energy * area_lights.data[light_index].shadow_opacity, light_vec, length(light_rel_vec));
+								shadow_attenuation = 1.0 - area_lights.data[light_index].shadow_opacity;
+#else
 								//has shadow
 								vec4 uv_rect = area_lights.data[light_index].atlas_rect;
 
@@ -720,6 +740,7 @@ void main() {
 								float depth = texture(sampler2D(shadow_atlas, linear_sampler), pos.xy).r;
 
 								shadow_attenuation = mix(1.0 - area_lights.data[light_index].shadow_opacity, 1.0, exp(min(0.0, (pos.z - depth)) / inv_center_range * INV_FOG_FADE));
+#endif
 							}
 							float cos_theta = 0.0;
 							if (dot(light_rel_vec, light_rel_vec) > EPSILON) {

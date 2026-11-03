@@ -3568,7 +3568,8 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 	// A path traced view traces its shadows, its transparent pass's too: only the volumetric fog reads shadow maps then,
 	// those of the lights it scatters (volumetric fog energy), within its length.
 	const bool rt_shadow_maps_for_fog_only = cull.rt_enabled && p_reflection_probe.is_null() && p_camera_data->view_count == 1 && scene_render->environment_pathtracing_replaces_shadow_maps(p_environment);
-	const bool rt_volumetric_fog = rt_shadow_maps_for_fog_only && scene_render->environment_get_volumetric_fog_enabled(p_environment);
+	// The fog reads none either when it traces its lights' shadows (rendering/pathtracing/volumetric_fog_shadows).
+	const bool rt_volumetric_fog = rt_shadow_maps_for_fog_only && scene_render->environment_get_volumetric_fog_enabled(p_environment) && !scene_render->environment_pathtracing_fog_traces_shadows(p_environment);
 	// The fog's froxels reach this view depth, and this distance from the camera at the frustum's corners.
 	const real_t rt_fog_depth = rt_volumetric_fog ? scene_render->environment_get_volumetric_fog_length(p_environment) : 0.0;
 	real_t rt_fog_distance = rt_fog_depth;

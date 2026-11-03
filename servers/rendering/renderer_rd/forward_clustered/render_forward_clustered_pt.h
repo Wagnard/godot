@@ -35,6 +35,7 @@
 #include "servers/rendering/renderer_rd/effects/nrd_denoiser.h"
 #include "servers/rendering/renderer_rd/effects/pt_rasterized_guides.h"
 #include "servers/rendering/renderer_rd/forward_clustered/render_raytracing.h"
+#include "servers/rendering/renderer_rd/forward_clustered/render_raytracing_fog_shadows.h"
 
 namespace RendererSceneRenderImplementation {
 
@@ -58,6 +59,10 @@ class RenderForwardClusteredPT : public RenderForwardClustered {
 	SafeNumeric<uint32_t> rt_pending_hit_groups;
 	// The transparent pass traces its lights' shadows through the TLAS (USE_RT_SHADOWS) on this device.
 	static bool _transparent_pass_traces_shadows();
+	// rendering/pathtracing/volumetric_fog_shadows: the volumetric fog's density pass traces its lights' shadows through
+	// the TLAS, after its build, made at its first use.
+	RTFogShadows *fog_shadows = nullptr;
+	bool _fog_traces_shadows();
 	// DLSS-RR's transparency layer (Integration Guide 3.4.10): the transparent surfaces drawn apart, upscaled by RR without
 	// being denoised. Unshaded ones only (nothing traced in them), blended so that the target holds premultiplied color and
 	// coverage (mix, premultiplied alpha), reading nothing from the screen.
@@ -82,6 +87,7 @@ protected:
 
 public:
 	virtual bool environment_pathtracing_replaces_shadow_maps(RID p_env) const override;
+	virtual bool environment_pathtracing_fog_traces_shadows(RID p_env) const override;
 	virtual void update() override;
 	virtual uint32_t pathtracing_get_pending_hit_group_count() const override;
 	virtual BitField<RSE::RenderingNotReadyReason> get_not_ready_reasons() override;

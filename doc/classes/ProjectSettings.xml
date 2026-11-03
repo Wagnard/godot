@@ -3364,6 +3364,13 @@
 			[b]Note:[/b] Only has an effect when path tracing is enabled on the active [Environment].
 			[b]Note:[/b] A Ray Query cannot run the intersection code of an [RTProceduralInstance3D]: while the scene holds any, the shadow rays that the Ray Query lets through are traced again through the pipeline against procedural geometry only.
 		</member>
+		<member name="rendering/pathtracing/volumetric_fog_positional_shadow_rays" type="int" setter="" getter="" default="2">
+			Maximum number of shadow rays traced per volumetric fog froxel for shadowed [OmniLight3D]s, [SpotLight3D]s and [AreaLight3D]s when [member rendering/pathtracing/volumetric_fog_shadows] is enabled. Lights are picked stochastically by their contribution, so more rays reduce noise in scenes with many overlapping lights. Shadowed [DirectionalLight3D]s always use one additional ray, shared stochastically between them. Read every frame.
+		</member>
+		<member name="rendering/pathtracing/volumetric_fog_shadows" type="bool" setter="" getter="" default="false">
+			If [code]true[/code], when path tracing, the volumetric fog ([member Environment.volumetric_fog_enabled]) is shadowed by ray queries through the path tracer's acceleration structure instead of shadow maps: each froxel traces up to one ray for its shadowed directional lights and [member rendering/pathtracing/volumetric_fog_positional_shadow_rays] rays for its other shadowed lights, as the path tracer's shadow rays (alpha tested cut-outs, and the colors of [member rendering/pathtracing/transparent_shadows]). No shadow map is rendered for the fog then, and its light shafts follow the path traced geometry at any distance. If [code]false[/code], the fog reads the shadow maps of the lights it scatters, as the rasterizer does. Read every frame; requires a device that supports ray queries (the shadow maps are used otherwise).
+			[b]Note:[/b] [RTProceduralInstance3D] geometry casts no shadow into the fog with this setting.
+		</member>
 		<member name="rendering/reflections/reflection_atlas/reflection_count" type="int" setter="" getter="" default="64">
 			Number of cubemaps to store in the reflection atlas. The number of [ReflectionProbe]s in a scene will be limited by this amount. A higher number requires more VRAM.
 		</member>

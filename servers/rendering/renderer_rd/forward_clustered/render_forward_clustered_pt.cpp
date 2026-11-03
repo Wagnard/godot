@@ -303,14 +303,18 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 	// and the cluster grid to be valid for the current frame. Before the acceleration structures, as raster renders its
 	// shadows before the opaque pass: the shadow passes recorded between the TLAS build and the trace left the TLAS
 	// faulty (VK_NV_ray_tracing_validation FAULTY_AS, then a device loss) whenever the volumetric fog was on.
-	if (rb_data.is_valid() && is_environment(p_render_data->environment) && environment_get_volumetric_fog_enabled(p_render_data->environment)) {
+	const bool volumetric_fog = rb_data.is_valid() && is_environment(p_render_data->environment) && environment_get_volumetric_fog_enabled(p_render_data->environment);
+	// rendering/pathtracing/volumetric_fog_shadows: the fog traces its lights' shadows through the TLAS once it is built
+	// (below), and no shadow map is rendered for it (RendererSceneCull::_render_scene()).
+	const bool fog_traces_shadows = volumetric_fog && _fog_traces_shadows();
+	uint32_t pt_directional_light_count = 0;
+	uint32_t pt_positional_light_count = 0;
+	if (volumetric_fog && !fog_traces_shadows) {
 		// The volumetric fog lights its volume through the shadow maps, as in raster: render them, then update it.
 		_pre_opaque_render(p_render_data, false, false, false, false, nullptr, RID());
 	} else {
-		uint32_t pt_directional_light_count = 0;
-		uint32_t pt_positional_light_count = 0;
 		_setup_lights_cluster_decals(p_render_data, pt_directional_light_count, pt_positional_light_count);
-		if (rb_data.is_valid()) {
+		if (rb_data.is_valid() && !fog_traces_shadows) {
 			// Frees the volume of a fog just turned off.
 			_update_volumetric_fog(rb, p_render_data->environment, p_render_data->scene_data->cam_projection, p_render_data->scene_data->cam_transform, p_render_data->scene_data->prev_cam_transform.affine_inverse(), p_render_data->shadow_atlas, pt_directional_light_count, false, pt_positional_light_count, p_render_data->voxel_gi_count, *p_render_data->fog_volumes);
 		}
@@ -359,6 +363,17 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 	} else if (rb_data.is_valid() && raytracing && raytracing->dlss_rr_has_buffers(rb.ptr())) {
 		// No RT shader available: free DLSS RR buffers so DLSS falls back to SR.
 		raytracing->dlss_rr_free_buffers(rb.ptr());
+	}
+
+	if (fog_traces_shadows) {
+		// Recorded after the TLAS build, which the render graph orders before it: the density pass reads the TLAS through
+		// its set (acceleration structure read in the compute stage) and, as every command recorded after a TLAS build, waits
+		// for its writes (RenderingDeviceGraph::_add_command_to_graph()). Without a TLAS this frame, the shadow maps instead
+		// (those of the lights not rendered this frame are older).
+		RENDER_TIMESTAMP("Update Volumetric Fog");
+		RendererRD::Fog::VolumetricFogRayQueryShadows ray_query_shadows;
+		const bool traced = rt_state && fog_shadows->prepare(raytracing, rt_state, p_render_data, ray_query_shadows);
+		_update_volumetric_fog(rb, p_render_data->environment, p_render_data->scene_data->cam_projection, p_render_data->scene_data->cam_transform, p_render_data->scene_data->prev_cam_transform.affine_inverse(), p_render_data->shadow_atlas, pt_directional_light_count, false, pt_positional_light_count, p_render_data->voxel_gi_count, *p_render_data->fog_volumes, traced ? &ray_query_shadows : nullptr);
 	}
 
 	RD::get_singleton()->draw_command_end_label();
@@ -1019,6 +1034,22 @@ bool RenderForwardClusteredPT::environment_pathtracing_replaces_shadow_maps(RID 
 	return environment_get_pathtracing_enabled(p_env) && raytracing && raytracing->get_shader() && raytracing->get_shader()->is_usable() && _transparent_pass_traces_shadows();
 }
 
+bool RenderForwardClusteredPT::_fog_traces_shadows() {
+	if (!RTFogShadows::is_enabled()) {
+		return false;
+	}
+	if (!fog_shadows) {
+		fog_shadows = memnew(RTFogShadows);
+		fog_shadows->initialize();
+	}
+	return fog_shadows->is_supported();
+}
+
+bool RenderForwardClusteredPT::environment_pathtracing_fog_traces_shadows(RID p_env) const {
+	// From the frame after its shader is made (_fog_traces_shadows()) on: the first one still renders the shadow maps.
+	return environment_pathtracing_replaces_shadow_maps(p_env) && fog_shadows && fog_shadows->is_supported() && RTFogShadows::is_enabled();
+}
+
 bool RenderForwardClusteredPT::_setup_rt() {
 	if (!RD::get_singleton()->has_feature(RD::SUPPORTS_RAYTRACING_PIPELINE)) {
 		WARN_PRINT_ONCE("Raytracing not supported on this device.");
@@ -1067,6 +1098,12 @@ bool RenderForwardClusteredPT::setup_raytracing_for_shader_baker() {
 	}
 	if (!finite_layer) {
 		finite_layer = memnew(RendererRD::FiniteLayer);
+	}
+	// The volumetric fog's ray query shader (rendering/pathtracing/volumetric_fog_shadows), both opacity micromap variants:
+	// the editor's device is not the player's.
+	if (!fog_shadows) {
+		fog_shadows = memnew(RTFogShadows);
+		fog_shadows->initialize(true);
 	}
 	return true;
 }
@@ -1227,6 +1264,9 @@ RenderForwardClusteredPT::~RenderForwardClusteredPT() {
 	}
 	if (nrd_denoiser) {
 		memdelete(nrd_denoiser);
+	}
+	if (fog_shadows) {
+		memdelete(fog_shadows);
 	}
 	if (pt_probes) {
 		memdelete(pt_probes);

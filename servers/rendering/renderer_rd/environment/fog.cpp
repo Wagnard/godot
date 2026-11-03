@@ -1224,6 +1224,11 @@ void Fog::volumetric_fog_update(const VolumetricFogSettings &p_settings, const P
 		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, fog->gi_dependent_sets.process_uniform_set_density, 0);
 		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, rq->uniform_set, 1);
 		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, rq->bindless_uniform_set, 2);
+		if (rq->buffer_dependencies) {
+			for (const RID &buffer : *rq->buffer_dependencies) {
+				RD::get_singleton()->compute_list_add_buffer_dependency(compute_list, buffer);
+			}
+		}
 	} else {
 		RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, volumetric_fog.process_pipelines[using_sdfgi ? VolumetricFogShader::VOLUMETRIC_FOG_PROCESS_SHADER_DENSITY_WITH_SDFGI : VolumetricFogShader::VOLUMETRIC_FOG_PROCESS_SHADER_DENSITY].get_rid());
 

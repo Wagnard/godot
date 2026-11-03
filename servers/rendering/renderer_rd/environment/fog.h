@@ -370,6 +370,8 @@ public:
 		RID pipeline;
 		RID uniform_set;
 		RID bindless_uniform_set;
+		// The buffers read through device addresses, declared to the density pass's compute list.
+		const LocalVector<RID> *buffer_dependencies = nullptr;
 	};
 
 	struct VolumetricFogSettings {

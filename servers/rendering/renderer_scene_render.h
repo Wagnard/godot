@@ -274,6 +274,8 @@ public:
 	// A view path traced with p_env shadows its raster transparent pass with rays: of the shadow maps, only the
 	// volumetric fog's are read then.
 	virtual bool environment_pathtracing_replaces_shadow_maps(RID p_env) const { return false; }
+	// Its volumetric fog traces its lights' shadows too (rendering/pathtracing/volumetric_fog_shadows): no shadow map at all.
+	virtual bool environment_pathtracing_fog_traces_shadows(RID p_env) const { return false; }
 	virtual bool pathtracing_is_used(RID p_env, RID p_viewport) const { return false; }
 
 	// Adjustment
