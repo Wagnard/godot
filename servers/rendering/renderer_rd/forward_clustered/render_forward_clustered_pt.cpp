@@ -201,28 +201,36 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 	// The list in three ranges, each in its order, before their instance data is written. First the pathtracing_rasterized
 	// surfaces (opaque and cut-out cards the camera rays leave out): their depth pass and color, before every transparent
 	// surface, as opaque geometry is. Then the other transparent surfaces. Last, with DLSS-RR, its transparency layer's
-	// effects, drawn into a target of their own.
+	// effects, drawn into a target of their own. With rendering/pathtracing/max_transparency_layers, the surfaces the camera
+	// rays peel end the second range: the transparent pass draws only those the TLAS left out.
 	uint32_t rasterized_count = 0;
 	uint32_t rr_layer_from = UINT32_MAX;
+	uint32_t peel_from = UINT32_MAX;
 	{
 		const bool use_layer = raytracing && raytracing->dlss_rr_has_buffers(rb.ptr()) && p_render_data->scene_data->view_count == 1 && rb->get_msaa_3d() == RSE::VIEWPORT_MSAA_DISABLED && _rr_transparency_layer_enabled();
+		// As compute_rt_flags() sets RT_FLAG_TRANSPARENCY_PEELING.
+		const bool use_peeling = raytracing && p_render_data->environment.is_valid() && RenderRaytracing::get_transparency_peel_layers() > 0;
 		LocalVector<GeometryInstanceSurfaceDataCache *> &elements = render_list[RENDER_LIST_ALPHA].elements;
 		thread_local LocalVector<GeometryInstanceSurfaceDataCache *> rasterized;
 		thread_local LocalVector<GeometryInstanceSurfaceDataCache *> lit;
+		thread_local LocalVector<GeometryInstanceSurfaceDataCache *> peeled;
 		thread_local LocalVector<GeometryInstanceSurfaceDataCache *> layer;
 		rasterized.clear();
 		lit.clear();
+		peeled.clear();
 		layer.clear();
 		for (GeometryInstanceSurfaceDataCache *surf : elements) {
 			if (surf->rt_pass_flags & GeometryInstanceSurfaceDataCache::FLAG_PT_RASTERIZED) {
 				rasterized.push_back(surf);
 			} else if (use_layer && _rr_transparency_layer_surface(surf)) {
 				layer.push_back(surf);
+			} else if (use_peeling && RenderRaytracing::is_peel_candidate(surf)) {
+				peeled.push_back(surf);
 			} else {
 				lit.push_back(surf);
 			}
 		}
-		if (!rasterized.is_empty() || !layer.is_empty()) {
+		if (!rasterized.is_empty() || !peeled.is_empty() || !layer.is_empty()) {
 			uint32_t at = 0;
 			for (GeometryInstanceSurfaceDataCache *surf : rasterized) {
 				elements[at++] = surf;
@@ -230,13 +238,19 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 			for (GeometryInstanceSurfaceDataCache *surf : lit) {
 				elements[at++] = surf;
 			}
+			for (GeometryInstanceSurfaceDataCache *surf : peeled) {
+				elements[at++] = surf;
+			}
 			for (GeometryInstanceSurfaceDataCache *surf : layer) {
 				elements[at++] = surf;
 			}
 		}
 		rasterized_count = rasterized.size();
+		if (use_peeling) {
+			peel_from = rasterized.size() + lit.size();
+		}
 		if (use_layer) {
-			rr_layer_from = rasterized.size() + lit.size();
+			rr_layer_from = rasterized.size() + lit.size() + peeled.size();
 		}
 	}
 	_fill_instance_data(RENDER_LIST_ALPHA, render_info);
@@ -705,8 +719,9 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 			RID alpha_framebuffer = rb_data->get_color_pass_fb(transparent_color_pass_flags);
 			const uint32_t alpha_count = render_list[RENDER_LIST_ALPHA].elements.size();
 			const uint32_t lit_count = MIN(rr_layer_from, alpha_count);
+			const uint32_t raster_lit_count = MIN(peel_from, lit_count);
 			// The lit transparent surfaces, after the rasterized cards (drawn apart below).
-			RenderListParameters render_list_params(render_list[RENDER_LIST_ALPHA].elements.ptr() + rasterized_count, render_list[RENDER_LIST_ALPHA].element_info.ptr() + rasterized_count, lit_count - rasterized_count, reverse_cull, PASS_MODE_COLOR, transparent_color_pass_flags, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, rasterized_count, base_specialization);
+			RenderListParameters render_list_params(render_list[RENDER_LIST_ALPHA].elements.ptr() + rasterized_count, render_list[RENDER_LIST_ALPHA].element_info.ptr() + rasterized_count, raster_lit_count - rasterized_count, reverse_cull, PASS_MODE_COLOR, transparent_color_pass_flags, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, rasterized_count, base_specialization);
 			render_list_params.rt_shadow_texture_uniform_set = rt_shadow_texture_set;
 			// The alpha test reads the vertices through their addresses.
 			thread_local LocalVector<RID> rt_shadow_buffers;
@@ -780,8 +795,28 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 					rasterized_guides->process(material_textures[0], material_textures[1], material_textures[2], material_textures[4], rb->get_depth_texture(), guides, rb->get_internal_size(), depth_correction * p_render_data->scene_data->cam_projection, p_render_data->scene_data->cam_transform);
 				}
 			}
-			if (lit_count > rasterized_count) {
+			if (raster_lit_count > rasterized_count) {
 				_render_list_with_draw_list(&render_list_params, alpha_framebuffer, RD::DRAW_DEFAULT_ALL, Vector<Color>(), 0.0f, 0u, p_render_data->render_region);
+			}
+			// rendering/pathtracing/max_transparency_layers: the camera rays peeled these surfaces into the traced image, but
+			// for those the TLAS left out (a hit group still compiling, a shader no hit group can run), drawn here in their
+			// order, after the others.
+			const bool view_peeled = rt_state && (rt_flags & SceneShaderRaytracing::RT_FLAG_TRANSPARENCY_PEELING);
+			const LocalVector<GeometryInstanceSurfaceDataCache *> &alpha_elements = render_list[RENDER_LIST_ALPHA].elements;
+			for (uint32_t from = raster_lit_count; from < lit_count;) {
+				if (view_peeled && raytracing->peeled_in_last_build(alpha_elements[from])) {
+					from++;
+					continue;
+				}
+				uint32_t to = from + 1;
+				while (to < lit_count && !(view_peeled && raytracing->peeled_in_last_build(alpha_elements[to]))) {
+					to++;
+				}
+				RenderListParameters unpeeled_params(render_list[RENDER_LIST_ALPHA].elements.ptr() + from, render_list[RENDER_LIST_ALPHA].element_info.ptr() + from, to - from, reverse_cull, PASS_MODE_COLOR, transparent_color_pass_flags, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, from, base_specialization);
+				unpeeled_params.rt_shadow_texture_uniform_set = rt_shadow_texture_set;
+				unpeeled_params.buffer_dependencies = render_list_params.buffer_dependencies;
+				_render_list_with_draw_list(&unpeeled_params, alpha_framebuffer, RD::DRAW_DEFAULT_ALL, Vector<Color>(), 0.0f, 0u, p_render_data->render_region);
+				from = to;
 			}
 
 			if (rr_layer_from != UINT32_MAX) {

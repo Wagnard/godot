@@ -751,3 +751,188 @@ bool trace_path_ray(inout PathState ps, inout vec3 ray_origin, inout vec3 ray_di
 	ray_dir = next_dir;
 	return true;
 }
+
+#ifdef RT_TRANSPARENCY_PEELING
+// ============================================================================
+// TRANSPARENCY PEELING (rendering/pathtracing/max_transparency_layers)
+// ============================================================================
+// NVIDIA's transparency peeling (49a825dc52 scene_raytracing_raygen.glsl:258-386, its peel hit
+// raytracing_closest_hit_common_inc.glsl:843-915) on this raygen's shading: the camera ray's transparent surfaces, the front
+// layer ones (RT_MASK_FRONT_LAYER), are traced front to back as the closest hits of rays that each start one float step past
+// the last layer (the instances are opaque to traversal unless they cut out). Each layer is lit as an opaque hit is
+// (shade_and_bounce(): emission, direct light, the sky's next event estimation), weighed by its coverage and the light the
+// layers in front let through; one bounce goes on, among the layers' and the opaque hit's, picked in proportion to its
+// throughput (NVIDIA's continuation reservoir), so a pixel still traces one path. The raster transparent pass leaves these
+// surfaces out (RenderForwardClusteredPT).
+
+/// The layers the camera rays peel; 0: none (the front layer is traced for its reflection, as without the variant).
+uint peel_layer_budget() {
+	if (get_rt_param(RT_PARAM_FRONT_LAYER_COUNT) <= 0.0) {
+		return 0u;
+	}
+	return min((uint(get_rt_param(RT_PARAM_FLAGS)) >> RT_PARAM_FLAG_PEEL_LAYERS_SHIFT) & RT_PARAM_FLAG_PEEL_LAYERS_MASK, 64u);
+}
+
+/// The nearest front layer surface along p_dir from p_origin between p_tmin and p_tmax (the opaque surface behind, which the
+/// hit shaders read as DEPTH_TEXTURE). False where there is none.
+bool peel_trace_layer(vec3 p_origin, vec3 p_dir, float p_tmin, float p_tmax, out HitRecord r_layer, out float r_alpha) {
+	payload.packed_bounces_flags = set_front_layer_ray(0u);
+	payload.hit_t = p_tmax;
+	r_alpha = 0.0;
+#ifdef USE_SER
+	// Whether the ray hit, and where, from the hit object, as trace_path_ray() reads them: NVIDIA's Vulkan driver gave the
+	// raygen back the payload fields it wrote before the call (PT-VK-SER-PAYLOAD-WA.md), and the layers flickered in and
+	// out between frames. A miss runs no shader.
+	hitObjectEXT hit_object;
+	hitObjectTraceRayEXT(hit_object, tlas, RT_RAY_FLAGS, RT_MASK_FRONT_LAYER, 0, 0, 0, p_origin, p_tmin, p_dir, p_tmax, 0);
+	if (!hitObjectIsHitEXT(hit_object)) {
+		r_layer = hit_unpack(payload);
+		return false;
+	}
+	hitObjectExecuteShaderEXT(hit_object, 0);
+	r_layer = hit_unpack(payload);
+	r_layer.hit_t = hitObjectGetRayTMaxEXT(hit_object);
+#else
+	traceRayEXT(tlas, RT_RAY_FLAGS, RT_MASK_FRONT_LAYER, 0, 0, 0, p_origin, p_tmin, p_dir, p_tmax, 0);
+	r_layer = hit_unpack(payload);
+	if (is_path_terminated(payload.packed_bounces_flags)) {
+		return false;
+	}
+#endif
+	r_alpha = clamp(hit_unpack_peel_alpha(payload, r_layer), 0.0, 1.0);
+	return true;
+}
+
+/// Where the next peel ray starts: one representable float past the layer, which it would hit again otherwise (NVIDIA's step,
+/// scene_raytracing_raygen.glsl:332-334).
+float peel_next_tmin(float p_t) {
+	return uintBitsToFloat(floatBitsToUint(p_t) + 1u);
+}
+
+/// The blend mode the layer r was put in the TLAS with (build_tlas()).
+uint peel_blend(HitRecord r) {
+	return (geometries[r.geometry_idx].flags >> FLAG_PEEL_BLEND_SHIFT) & FLAG_PEEL_BLEND_MASK;
+}
+
+/// How much the layer r of alpha p_alpha lets through of what is behind it: Mix (and OIT) and premultiplied alpha cover by
+/// their alpha, Add and Subtract cover nothing, Multiply filters by its color (NVIDIA's luminance, per channel here).
+vec3 peel_layer_transmittance(HitRecord r, uint p_blend, float p_alpha) {
+	if (p_blend == PEEL_BLEND_MUL) {
+		return clamp(r.albedo, vec3(0.0), vec3(1.0));
+	}
+	return vec3(p_blend == PEEL_BLEND_ADD || p_blend == PEEL_BLEND_SUB ? 1.0 : 1.0 - p_alpha);
+}
+
+/// Peels the camera ray's transparent layers in front of its first hit, p_opaque_t away (10000 where it missed). ps is the
+/// camera path with that hit shaded (at full throughput), r_origin and r_dir its next ray where p_goes_on; on return, ps holds
+/// the layers' light over the hit's, attenuated by what they cover, and r_origin / r_dir the ray the path goes on with, if it
+/// does (the return value). r_layers: the layers peeled; r_first, r_first_alpha: the nearest one and its coverage (-1: none).
+bool peel_camera_segment(inout PathState ps, inout vec3 r_origin, inout vec3 r_dir, bool p_goes_on, vec3 p_camera_origin, vec3 p_camera_dir, float p_opaque_t, uint p_budget, out uint r_layers, out HitRecord r_first, out float r_first_alpha) {
+	r_layers = 0u;
+	r_first_alpha = -1.0;
+	vec3 transmittance = vec3(1.0);
+	vec3 layers_light = vec3(0.0);
+	// The continuation: one of the bounces offered, kept with a chance proportional to its throughput's largest component;
+	// the kept one's throughput is then divided by that chance (total_weight / chosen_weight).
+	vec3 chosen_throughput = vec3(0.0);
+	uint chosen_flags = 0u;
+	vec3 chosen_origin = r_origin;
+	vec3 chosen_dir = r_dir;
+	float chosen_weight = 0.0;
+	float total_weight = 0.0;
+	bool layer_chosen = false;
+
+	float tmin = 0.001;
+	for (uint l = 0u; l < p_budget && tmin < p_opaque_t && max(transmittance.r, max(transmittance.g, transmittance.b)) > 1.0 / 256.0; l++) {
+		HitRecord r;
+		float alpha;
+		if (!peel_trace_layer(p_camera_origin, p_camera_dir, tmin, p_opaque_t, r, alpha)) {
+			break;
+		}
+		tmin = peel_next_tmin(r.hit_t);
+		if ((r.flags & HIT_FLAG_PASS_THROUGH) != 0u) {
+			continue; // vertex() removed the point.
+		}
+		const uint blend = peel_blend(r);
+		if (r_layers == 0u) {
+			r_first = r;
+			r_first_alpha = blend == PEEL_BLEND_MIX || blend == PEEL_BLEND_PREMUL_ALPHA ? alpha : 0.0;
+		}
+		r_layers++;
+		if (blend != PEEL_BLEND_MUL) {
+			// Its light as raster blends it: by its alpha (Mix, Add, Subtract), whole (premultiplied alpha).
+			PathState ls;
+			ls.radiance = vec3(0.0);
+			ls.throughput = transmittance * (blend == PEEL_BLEND_PREMUL_ALPHA ? 1.0 : alpha);
+			// Not sample zero: the per pixel writes are the opaque hit's.
+			ls.packed_bounces_flags = pack_bounces(0u, 0u);
+			ls.rng_state = ps.rng_state;
+#ifdef NRD_ENABLED
+			nrd_path_init(ls, false);
+#endif
+			vec3 offset_normal;
+			vec3 next_dir;
+			const bool bounced = shade_and_bounce(ls, r, p_camera_origin, p_camera_dir, offset_normal, next_dir);
+			ps.rng_state = ls.rng_state;
+			layers_light += blend == PEEL_BLEND_SUB ? -ls.radiance : ls.radiance;
+			// Subtract takes light away: its bounce is not a continuation.
+			const float weight = max(ls.throughput.r, max(ls.throughput.g, ls.throughput.b));
+			if (bounced && blend != PEEL_BLEND_SUB && weight > 1e-6) {
+				total_weight += weight;
+				if (rand(ps.rng_state) * total_weight < weight) {
+					chosen_throughput = ls.throughput;
+					chosen_flags = ls.packed_bounces_flags;
+					chosen_origin = offset_ray_origin(p_camera_origin + p_camera_dir * r.hit_t, offset_normal);
+					chosen_dir = next_dir;
+					chosen_weight = weight;
+					layer_chosen = true;
+				}
+			}
+		}
+		transmittance *= peel_layer_transmittance(r, blend, alpha);
+	}
+	if (r_layers == 0u) {
+		return p_goes_on;
+	}
+
+	// The opaque hit, behind the layers.
+	ps.radiance = layers_light + transmittance * ps.radiance;
+#ifdef NRD_ENABLED
+	// What NRD denoises is the opaque hit's light; the layers' is not denoised.
+	ps.nrd_emission = layers_light + transmittance * ps.nrd_emission;
+	ps.nrd_diffuse_direct *= transmittance;
+	ps.nrd_specular_direct *= transmittance;
+#endif
+	if (p_goes_on) {
+		const vec3 throughput = ps.throughput * transmittance;
+		const float weight = max(throughput.r, max(throughput.g, throughput.b));
+		if (weight > 1e-6) {
+			total_weight += weight;
+			if (rand(ps.rng_state) * total_weight < weight) {
+				chosen_throughput = throughput;
+				chosen_flags = ps.packed_bounces_flags;
+				chosen_origin = r_origin;
+				chosen_dir = r_dir;
+				chosen_weight = weight;
+				layer_chosen = false;
+			}
+		}
+	}
+	if (chosen_weight <= 0.0) {
+		return false;
+	}
+	ps.throughput = chosen_throughput * (total_weight / chosen_weight);
+	if (layer_chosen) {
+		ps.packed_bounces_flags = chosen_flags | (ps.packed_bounces_flags & SAMPLE_ZERO_FLAG);
+#ifdef NRD_ENABLED
+		// The rest of the path is a layer's light: not denoised.
+		if (nrd_path_stage(ps) != NRD_PATH_PRIMARY) {
+			ps.nrd_state = NRD_PATH_SHADED;
+		}
+#endif
+	}
+	r_origin = chosen_origin;
+	r_dir = chosen_dir;
+	return true;
+}
+#endif // RT_TRANSPARENCY_PEELING

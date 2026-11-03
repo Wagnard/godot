@@ -1585,6 +1585,34 @@ bool RenderRaytracing::_front_layer_skipped(const void *p_surf) {
 			surf->shader->rt_depth_test() != SceneShaderForwardClustered::ShaderData::DEPTH_TEST_ENABLED;
 }
 
+uint32_t RenderRaytracing::get_transparency_peel_layers() {
+	return uint32_t(CLAMP(GLOBAL_GET_CACHED(int, "rendering/pathtracing/max_transparency_layers"), 0, 64));
+}
+
+bool RenderRaytracing::is_peel_candidate(const void *p_surf) {
+	return _front_layer_surface(p_surf) && !_front_layer_skipped(p_surf);
+}
+
+bool RenderRaytracing::peeled_in_last_build(const void *p_surf) const {
+	return tlas_build_serial > 0 && static_cast<const RenderForwardClustered::GeometryInstanceSurfaceDataCache *>(p_surf)->rt_peeled_build == tlas_build_serial;
+}
+
+// The blend mode a front layer surface is peeled with (RT_GEOM_PEEL_BLEND_*, the raygen's peel_blend()): how raster blends it.
+static uint32_t _peel_blend(const SceneShaderForwardClustered::ShaderData *p_shader) {
+	switch (p_shader->rt ? p_shader->rt->blend_mode : p_shader->blend_mode) {
+		case SceneShaderForwardClustered::ShaderData::BLEND_MODE_ADD:
+			return RT_GEOM_PEEL_BLEND_ADD;
+		case SceneShaderForwardClustered::ShaderData::BLEND_MODE_SUB:
+			return RT_GEOM_PEEL_BLEND_SUB;
+		case SceneShaderForwardClustered::ShaderData::BLEND_MODE_MUL:
+			return RT_GEOM_PEEL_BLEND_MUL;
+		case SceneShaderForwardClustered::ShaderData::BLEND_MODE_PREMULTIPLIED_ALPHA:
+			return RT_GEOM_PEEL_BLEND_PREMUL_ALPHA;
+		default:
+			return 0; // Mix, OIT, alpha to coverage.
+	}
+}
+
 // GeometryInstance3D.rt_blas_update, else the shader's rt_blas render mode. RT_BLAS_UPDATE_AUTO keeps each kind of deforming
 // geometry's own policy: refits for skinned and blend shape meshes and merged MultiMeshes, refits with a build every
 // DISPLACED_REBUILD_PERIOD refits for displaced surfaces.
@@ -4408,6 +4436,8 @@ static Transform3D _billboard_transform(const Transform3D &p_model, const Transf
 }
 
 RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data, uint32_t p_rt_flags) {
+	// Before any early return: no surface counts as peeled by a build that put nothing in the TLAS.
+	tlas_build_serial++;
 	if (!p_render_data || !p_render_data->rt_instances) {
 		return nullptr;
 	}
@@ -5085,6 +5115,13 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 				const uint8_t shadow_copy = transparent_shadow ? (RT_INSTANCE_MASK_TRANSPARENT_SHADOW | (instance_mask(inst) & RT_INSTANCE_MASK_DOUBLE_SIDED_SHADOW)) : 0;
 				instance_masks.push_back(RT_INSTANCE_MASK_FRONT_LAYER | shadow_copy);
 				front_layer_instance_count++;
+				if (p_rt_flags & SceneShaderRaytracing::RT_FLAG_TRANSPARENCY_PEELING) {
+					// rendering/pathtracing/max_transparency_layers: the camera rays peel it, by its blend mode, and the raster
+					// transparent pass leaves it out (RenderForwardClusteredPT::_render_scene()). Out of the TLAS (its hit
+					// group compiling, its shader failed), raster draws it.
+					geometry_data[geometry_data.size() - 1].flags |= _peel_blend(surf->shader) << RT_GEOM_PEEL_BLEND_SHIFT;
+					surf->rt_peeled_build = tlas_build_serial;
+				}
 			} else if (surf->rt_pass_flags & RenderForwardClustered::GeometryInstanceSurfaceDataCache::FLAG_PT_RASTERIZED) {
 				// The raster pass draws it over the traced image: hidden from the camera rays, seen by the others.
 				uint8_t mask = instance_mask(inst);
@@ -6440,6 +6477,9 @@ RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderD
 		}
 		if (GLOBAL_GET_CACHED(int, "rendering/pathtracing/decals") == SceneShaderRaytracing::RT_DECAL_MODE_SINGULAR_ONLY) {
 			rt_param_flags |= SceneShaderRaytracing::RT_PARAM_FLAG_DECALS_SINGULAR_ONLY;
+		}
+		if (p_rt_flags & SceneShaderRaytracing::RT_FLAG_TRANSPARENCY_PEELING) {
+			rt_param_flags |= (get_transparency_peel_layers() & SceneShaderRaytracing::RT_PARAM_FLAG_PEEL_LAYERS_MASK) << SceneShaderRaytracing::RT_PARAM_FLAG_PEEL_LAYERS_SHIFT;
 		}
 		rt_ubo.params[SceneShaderRaytracing::RT_PARAM_FLAGS] = float(rt_param_flags);
 		if (p_background_is_color) {

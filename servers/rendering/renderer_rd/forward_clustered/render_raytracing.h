@@ -353,6 +353,13 @@ enum {
 	// Per TLAS instance: the shadow rays' copy of a transparent surface, whose any-hit filters their light
 	// (rendering/pathtracing/transparent_shadows, RT_TRANSPARENT_SHADOWS).
 	RT_GEOM_FLAG_TRANSPARENT_SHADOW = 128u,
+	// Bits 8-10, per TLAS instance: a front layer surface's blend mode, as the raygen peels it
+	// (rendering/pathtracing/max_transparency_layers, RT_TRANSPARENCY_PEELING: FLAG_PEEL_BLEND_* in the shaders).
+	RT_GEOM_PEEL_BLEND_SHIFT = 8u,
+	RT_GEOM_PEEL_BLEND_ADD = 1u,
+	RT_GEOM_PEEL_BLEND_SUB = 2u,
+	RT_GEOM_PEEL_BLEND_MUL = 3u,
+	RT_GEOM_PEEL_BLEND_PREMUL_ALPHA = 4u,
 };
 
 // The facing of the traced triangles of one TLAS instance.
@@ -1032,6 +1039,9 @@ class RenderRaytracing {
 	LocalVector<uint32_t> sbt_offsets; // 0 = default material hit group
 	uint32_t front_layer_instance_count = 0;
 	uint32_t procedural_instance_masks = 0; // RT_INSTANCE_MASK_PROCEDURAL_* bits of this frame's instances.
+	// Counts the build_tlas() calls: a front layer surface the raygen peels is stamped with the build that put it in the TLAS
+	// (GeometryInstanceSurfaceDataCache::rt_peeled_build).
+	uint64_t tlas_build_serial = 0;
 
 	HashMap<RenderSceneBuffersRD *, RTViewportState *> viewport_states;
 
@@ -1205,6 +1215,14 @@ public:
 	RID rt_get_front_layer_texture(RenderSceneBuffersRD *p_render_buffers) const;
 	// Transparent surfaces in the TLAS this frame: the raygen traces their reflections.
 	uint32_t get_front_layer_instance_count() const { return front_layer_instance_count; }
+	// rendering/pathtracing/max_transparency_layers: the layers the camera rays peel, 0 when the raster transparent pass
+	// draws the transparent surfaces (RT_FLAG_TRANSPARENCY_PEELING).
+	static uint32_t get_transparency_peel_layers();
+	// A raster transparent pass surface the raygen peels when get_transparency_peel_layers() is above 0, if the TLAS holds
+	// it (peeled_in_last_build()): a front layer one.
+	static bool is_peel_candidate(const void *p_surf);
+	// Whether the last build_tlas() put p_surf in the TLAS to be peeled: the raster transparent pass then leaves it out.
+	bool peeled_in_last_build(const void *p_surf) const;
 	// Environment.RT_DEBUG_TIMING_HEATMAP's ticks (R32F), made by update_uniform_set() for the RT_FLAG_TIMING_ENABLED
 	// variant and freed once another one traces.
 	bool rt_timing_has_texture(RenderSceneBuffersRD *p_render_buffers) const;

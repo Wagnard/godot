@@ -30,6 +30,9 @@
 #define RT_PARAM_FLAG_LIGHT_SAMPLING_RIS 1u // Bit 0: rendering/pathtracing/light_sampling_ris
 #define RT_PARAM_FLAG_RUSSIAN_ROULETTE 2u // Bit 1: rendering/pathtracing/russian_roulette
 #define RT_PARAM_FLAG_DECALS_SINGULAR_ONLY 4u // Bit 2: rendering/pathtracing/decals Singular Only (RT_DECAL_MODE variant)
+// Bits 8-14: rendering/pathtracing/max_transparency_layers, the layers a camera ray peels (RT_TRANSPARENCY_PEELING variant)
+#define RT_PARAM_FLAG_PEEL_LAYERS_SHIFT 8u
+#define RT_PARAM_FLAG_PEEL_LAYERS_MASK 0x7Fu
 #define RT_PARAM_LIGHT_COUNT 14 // rt_params[3].z - Number of active lights in light buffer
 #define RT_PARAM_FRAME_INDEX 15 // rt_params[3].w - Frame counter for temporal variation
 
@@ -218,6 +221,32 @@ HitRecord hit_unpack(PathPayload p) {
 #endif
 	return r;
 }
+
+#ifdef RT_TRANSPARENCY_PEELING
+// rendering/pathtracing/max_transparency_layers: a front layer ray's hit also returns its alpha, with which the raygen peels
+// it (peel_camera_segment()). In the AO word: the AO and the AO light affect in 8 bits each, the alpha in 16 bits
+// (PT_PAYLOAD_COMPACT: the alpha in the AO's 10 bits, the AO taken as 1).
+void payload_write_peel_alpha(inout PathPayload p, float p_ao, float p_ao_light_affect, float p_alpha) {
+#ifdef PT_PAYLOAD_COMPACT
+	p.geometry_idx_ao = (p.geometry_idx_ao & HIT_GEOMETRY_IDX_MASK) | (pack_unorm_bits(p_alpha, 10u) << 22u);
+#else
+	p.ao_ao_light_affect = (packUnorm4x8(vec4(p_ao, p_ao_light_affect, 0.0, 0.0)) & 0xFFFFu) | (packUnorm2x16(vec2(0.0, p_alpha)) & 0xFFFF0000u);
+#endif
+}
+
+/// A front layer hit's alpha; r_layer's AO is read back from the same word.
+float hit_unpack_peel_alpha(PathPayload p, inout HitRecord r_layer) {
+#ifdef PT_PAYLOAD_COMPACT
+	r_layer.ao = 1.0;
+	return unpack_unorm_bits(p.geometry_idx_ao >> 22u, 10u);
+#else
+	const vec4 ao = unpackUnorm4x8(p.ao_ao_light_affect);
+	r_layer.ao = ao.x;
+	r_layer.ao_light_affect = ao.y;
+	return unpackUnorm2x16(p.ao_ao_light_affect).y;
+#endif
+}
+#endif
 
 /// Converts specular parameter [0..1] to dielectric F0.
 float specular_to_f0(float specular) {

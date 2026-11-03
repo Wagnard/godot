@@ -433,5 +433,10 @@ void hit_pack(HitData h, MaterialResult m) {
 	payload.hit_t = gl_HitTEXT;
 	payload_write_material(payload, h.geometry_normal, m.normal, m.albedo, m.roughness, m.metalness, m.specular, m.emissive, m.backlight, m.ao, m.ao_light_affect,
 			h.geometry_idx, (m.unshaded ? HIT_FLAG_UNSHADED : 0u) | (m.specular_disabled ? HIT_FLAG_SPECULAR_DISABLED : 0u));
+#ifdef RT_TRANSPARENCY_PEELING
+	if (is_front_layer_ray(payload.packed_bounces_flags)) {
+		payload_write_peel_alpha(payload, m.ao, m.ao_light_affect, m.alpha);
+	}
+#endif
 }
 

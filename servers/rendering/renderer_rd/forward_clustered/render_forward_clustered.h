@@ -874,6 +874,9 @@ protected:
 		RID rt_material;
 
 		mutable RID rt_deformed_handle;
+		// RenderRaytracing::tlas_build_serial of the build that put this surface in the TLAS to be peeled
+		// (rendering/pathtracing/max_transparency_layers): the raster transparent pass leaves it out.
+		mutable uint64_t rt_peeled_build = 0;
 
 		uint32_t surface_slot = UINT32_MAX; // Its place in surface_slots.
 

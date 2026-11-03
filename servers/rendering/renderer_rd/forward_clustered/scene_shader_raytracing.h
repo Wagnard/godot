@@ -101,6 +101,10 @@ public:
 		// writes the clock ticks each pixel took (RT_TIMING_ENABLED, binding 46) over normal path tracing. As
 		// RT_FLAG_DEBUG_VIS_ENABLED, a define of its own variant, never baked.
 		RT_FLAG_TIMING_ENABLED = (1 << 9),
+		// rendering/pathtracing/max_transparency_layers above 0 (RT_TRANSPARENCY_PEELING): the camera rays peel the front
+		// layer's transparent surfaces into the image (how many: RT_PARAM_FLAG_PEEL_LAYERS), which the raster transparent pass
+		// then leaves out; 0 keeps the other variants' code unchanged. A project setting too.
+		RT_FLAG_TRANSPARENCY_PEELING = (1 << 10),
 	};
 
 	// rendering/pathtracing/decals: which path vertices receive decals.
@@ -135,6 +139,9 @@ public:
 	static constexpr uint32_t RT_PARAM_FLAG_RUSSIAN_ROULETTE = 1u << 1; // rendering/pathtracing/russian_roulette.
 	// rendering/pathtracing/decals Singular Only, else Skip After Diffuse: read in the RT_FLAG_DECAL_MODE variant only.
 	static constexpr uint32_t RT_PARAM_FLAG_DECALS_SINGULAR_ONLY = 1u << 2;
+	// Bits 8-14: rendering/pathtracing/max_transparency_layers (0-64), read in the RT_FLAG_TRANSPARENCY_PEELING variant only.
+	static constexpr uint32_t RT_PARAM_FLAG_PEEL_LAYERS_SHIFT = 8;
+	static constexpr uint32_t RT_PARAM_FLAG_PEEL_LAYERS_MASK = 0x7Fu;
 	static constexpr int RT_PARAM_LIGHT_COUNT = 14;
 	static constexpr int RT_PARAM_FRAME_INDEX = 15;
 
@@ -649,13 +656,13 @@ public:
 		Vector<String> sources; // Parallel to stages.
 	};
 	// The variants' base programs and hit group 0's opacity micromap bake. p_simple_shadows, p_ser,
-	// p_specular_motion_vectors, p_transparent_shadows and p_decal_mode: the project's
+	// p_specular_motion_vectors, p_transparent_shadows, p_decal_mode and p_transparency_peeling: the project's
 	// rendering/pathtracing/use_simple_shadows, use_shader_execution_reordering, specular_motion_vectors,
-	// transparent_shadows, and decals other than All Hits.
-	void get_bake_programs(bool p_simple_shadows, bool p_ser, bool p_specular_motion_vectors, bool p_transparent_shadows, bool p_decal_mode, LocalVector<BakeProgram> &r_programs);
+	// transparent_shadows, decals other than All Hits, and max_transparency_layers above 0.
+	void get_bake_programs(bool p_simple_shadows, bool p_ser, bool p_specular_motion_vectors, bool p_transparent_shadows, bool p_decal_mode, bool p_transparency_peeling, LocalVector<BakeProgram> &r_programs);
 	// p_material's hit group in every such variant, and its displacement and opacity micromap bake programs; nothing for a
 	// material path traced by hit group 0.
-	void get_material_bake_programs(RID p_material, bool p_simple_shadows, bool p_ser, bool p_specular_motion_vectors, bool p_transparent_shadows, bool p_decal_mode, LocalVector<BakeProgram> &r_programs);
+	void get_material_bake_programs(RID p_material, bool p_simple_shadows, bool p_ser, bool p_specular_motion_vectors, bool p_transparent_shadows, bool p_decal_mode, bool p_transparency_peeling, LocalVector<BakeProgram> &r_programs);
 	static String get_binary_cache_file_name(const String &p_key, const String &p_api);
 	static Vector<uint8_t> make_binary_cache_file(const Vector<uint8_t> &p_binary);
 	// Null when the path tracer's shaders were never initialized (no Forward+ renderer).

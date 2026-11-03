@@ -210,6 +210,26 @@ void debug_transparency_layers(uvec2 p_pixel, vec3 p_origin, vec3 p_direction) {
 		layers += 1.0;
 		ray_origin = offset_ray_origin(hit_pos, p_direction);
 	}
+#ifdef RT_TRANSPARENCY_PEELING
+	// rendering/pathtracing/max_transparency_layers: the layers the camera rays peel (peel_camera_segment()).
+	const uint peel_budget = peel_layer_budget();
+	if (peel_budget > 0u) {
+		vec3 transmittance = vec3(1.0);
+		float tmin = 0.001;
+		for (uint l = 0u; l < peel_budget && tmin < opaque_t && max(transmittance.r, max(transmittance.g, transmittance.b)) > 1.0 / 256.0; l++) {
+			HitRecord r;
+			float alpha;
+			if (!peel_trace_layer(p_origin, p_direction, tmin, opaque_t, r, alpha)) {
+				break;
+			}
+			tmin = peel_next_tmin(r.hit_t);
+			if ((r.flags & HIT_FLAG_PASS_THROUGH) == 0u) {
+				layers += 1.0;
+				transmittance *= peel_layer_transmittance(r, peel_blend(r), alpha);
+			}
+		}
+	} else
+#endif
 	if (get_rt_param(RT_PARAM_FRONT_LAYER_COUNT) > 0.0) {
 		payload.packed_bounces_flags = set_front_layer_ray(0u);
 		payload.hit_t = opaque_t;
@@ -234,6 +254,78 @@ void debug_transparency_layers(uvec2 p_pixel, vec3 p_origin, vec3 p_direction) {
 #endif
 }
 #endif // RT_DEBUG_ENABLED
+
+#ifdef RT_TRANSPARENCY_PEELING
+/// The NDC depth of p_pos, as write_primary_hit_depth() writes it.
+float peel_ndc_depth(vec3 p_pos) {
+	const mat4 view_matrix = transpose(mat4(scene_data_block.data.view_matrix[0],
+			scene_data_block.data.view_matrix[1],
+			scene_data_block.data.view_matrix[2],
+			vec4(0.0, 0.0, 0.0, 1.0)));
+	const vec4 clip = scene_data_block.data.projection_matrix * (view_matrix * vec4(p_pos, 1.0));
+	return clip.z / clip.w;
+}
+
+#ifdef DLSS_RR_ENABLED
+// The coverage from which the nearest peeled layer is the pixel's surface for Ray Reconstruction: the default of NVIDIA's
+// rendering/pathtracing/transparency_dominant_layer_alpha (not a setting here).
+#define PEEL_DOMINANT_ALPHA 0.5
+
+/// Ray Reconstruction's guides where the nearest peeled layer r covers p_alpha >= PEEL_DOMINANT_ALPHA of what is behind it,
+/// as NVIDIA's dlss_rr_composite_peel_guides() (49a825dc52 raytracing_closest_hit_common_inc.glsl:784-811): the albedos
+/// composited over the opaque surface's by its coverage, the normal and roughness blended by it, and the specular hit
+/// distance (or specular motion vectors), motion and depth the layer's, consistent with its normal (DLSS-RR Integration
+/// Guide, 3.4.1). The layer is taken as still. Returns its NDC depth, for the depth guide.
+float peel_write_dominant_guides(HitRecord r, float p_alpha, vec3 p_origin, vec3 p_dir) {
+	const ivec2 pixel = ivec2(gl_LaunchIDEXT.xy);
+	const vec3 hit_pos = p_origin + p_dir * r.hit_t;
+	const vec3 V = -p_dir;
+	const vec3 N = clampShadingNormal(r.normal, r.geometry_normal, V, RT_SHADING_NORMAL_CLAMP_THRESHOLD);
+	const float NdotV = max(dot(N, V), 0.0001);
+	const float behind = 1.0 - p_alpha;
+
+	const vec3 diffuse = imageLoad(dlss_rr_diffuse_albedo, pixel).rgb * behind + DLSSRR_encodeDiffuseAlbedo(DLSSRR_computeDiffuseAlbedo(r.albedo, r.metalness)) * p_alpha;
+	imageStore(dlss_rr_diffuse_albedo, pixel, vec4(diffuse, 1.0));
+	const vec3 layer_specular = DLSSRR_computeSpecularAlbedo(r.albedo, r.metalness, specular_to_f0(r.specular), r.roughness, NdotV);
+	const vec3 specular = imageLoad(dlss_rr_specular_albedo, pixel).rgb * behind + layer_specular * p_alpha;
+	imageStore(dlss_rr_specular_albedo, pixel, vec4(clamp(specular, vec3(0.04), vec3(1.0)), 1.0));
+	const vec4 normal_roughness = imageLoad(dlss_rr_normal_roughness, pixel);
+	vec3 normal = mix(normal_roughness.xyz, N, p_alpha);
+	normal = dot(normal, normal) > 0.0 ? normalize(normal) : N;
+	imageStore(dlss_rr_normal_roughness, pixel, vec4(normal, mix(normal_roughness.w, r.roughness, p_alpha)));
+
+#ifdef DLSS_RR_SPECULAR_MOTION_VECTORS
+	float spec_hit_dist;
+	const vec2 specular_motion_vector = rt_specular_motion_vector(r, r.roughness, p_origin, p_dir, hit_pos, rt_motion_vector(hit_pos, hit_pos), spec_hit_dist);
+	imageStore(dlss_rr_specular_motion_vectors, pixel, vec4(specular_motion_vector, 0.0, 0.0));
+#else
+	// As shade_and_bounce()'s, procedural geometry left out.
+	float spec_hit_dist = -1.0;
+	if (r.roughness < MAX_DENOISER_SPECULAR_HIT_THRESHOLD) {
+		const vec3 spec_dir = reflect(-V, N);
+		rayQueryEXT spec_rq;
+		rayQueryInitializeEXT(spec_rq, tlas, RT_RAY_FLAGS | gl_RayFlagsTerminateOnFirstHitEXT, RT_MASK_BOUNCE, offset_ray_origin(hit_pos, spec_dir), 0.001, spec_dir, 10000.0);
+		while (rayQueryProceedEXT(spec_rq)) {
+			if (rayQueryGetIntersectionTypeEXT(spec_rq, false) == gl_RayQueryCandidateIntersectionTriangleEXT &&
+					ray_query_alpha_test(
+							rayQueryGetIntersectionInstanceCustomIndexEXT(spec_rq, false),
+							rayQueryGetIntersectionPrimitiveIndexEXT(spec_rq, false),
+							rayQueryGetIntersectionBarycentricsEXT(spec_rq, false))) {
+				rayQueryConfirmIntersectionEXT(spec_rq);
+			}
+		}
+		if (rayQueryGetIntersectionTypeEXT(spec_rq, true) != gl_RayQueryCommittedIntersectionNoneEXT) {
+			spec_hit_dist = rayQueryGetIntersectionTEXT(spec_rq, true);
+		}
+	}
+#endif
+	imageStore(dlss_rr_specular_hit_dist, pixel, vec4(spec_hit_dist));
+	// Its motion, with its depth (NVIDIA's dominant layer writes both, raytracing_closest_hit_common_inc.glsl:892-895).
+	imageStore(rt_velocity_image, pixel, vec4(project_uv(hit_pos, prev_vp_unjittered) - project_uv(hit_pos, curr_vp_unjittered), 0.0, 0.0));
+	return peel_ndc_depth(hit_pos);
+}
+#endif // DLSS_RR_ENABLED
+#endif // RT_TRANSPARENCY_PEELING
 
 void main() {
 	if (gl_LaunchSizeEXT.z == 2u) {
@@ -283,6 +375,19 @@ void main() {
 #endif
 
 	const uint max_bounces = RT_GET_MAX_BOUNCES();
+#ifdef RT_TRANSPARENCY_PEELING
+	uint peel_budget = peel_layer_budget();
+#ifdef RT_DEBUG_ENABLED
+	// The other debug views show the opaque surfaces, as without the variant.
+	if (int(get_rt_param(RT_PARAM_VIS_MODE)) != 0) {
+		peel_budget = 0u;
+	}
+#endif
+	// Sample 0's nearest peeled layer (its distance, -1: none), and its coverage when it covers what is behind (-1: not).
+	HitRecord peel_first;
+	float peel_first_t = -1.0;
+	float peel_first_alpha = -1.0;
+#endif
 
 	// TODO: when we have a spp > 0 the first raycast is always identical,
 	// we should move it out of the loop
@@ -306,6 +411,24 @@ void main() {
 			if (sample_idx == 0u && bounce == 0u && goes_on) {
 				opaque_t = hit_t;
 			}
+#ifdef RT_TRANSPARENCY_PEELING
+			// The transparent layers in front of the camera ray's hit (its distance: 0 where it missed).
+			if (bounce == 0u && peel_budget > 0u) {
+				uint layers;
+				HitRecord first;
+				float first_alpha;
+				const bool peeled_goes_on = peel_camera_segment(ps, ray_origin, ray_dir, goes_on, origin.xyz, direction.xyz, hit_t > 0.0 ? hit_t : 10000.0, peel_budget, layers, first, first_alpha);
+				if (sample_idx == 0u && layers > 0u) {
+					peel_first = first;
+					peel_first_t = first.hit_t;
+					peel_first_alpha = first_alpha;
+				}
+				if (!peeled_goes_on) {
+					break;
+				}
+				continue;
+			}
+#endif
 			if (!goes_on) {
 				break;
 			}
@@ -344,6 +467,15 @@ void main() {
 
 	vec3 final_radiance = total_radiance / float(samples_per_pixel);
 
+#ifdef RT_TRANSPARENCY_PEELING
+	// Where the camera ray left the scene behind peeled layers, the depth is the nearest layer's: the raster sky pass draws
+	// where it is the far plane, which would hide them. The sky through them is then the miss shader's (the radiance map), as
+	// NVIDIA's without Environment.pathtracing_sky_shader_enabled.
+	if (peel_first_t > 0.0 && imageLoad(rt_depth_image, ivec2(pixel)).r == 0.0) {
+		imageStore(rt_depth_image, ivec2(pixel), vec4(peel_ndc_depth(origin.xyz + direction.xyz * peel_first_t)));
+	}
+#endif
+
 #ifdef NRD_ENABLED
 	{
 		// The image keeps what is not denoised; each lobe's light goes divided by its albedo guide (the primary hit's, or
@@ -375,6 +507,16 @@ void main() {
 	// Ray Reconstruction's depth guide: the opaque surface's (rt_depth, written by this sample 0's primary hit or miss),
 	// unless a transparent surface in front dominates (below).
 	float rr_depth = imageLoad(rt_depth_image, ivec2(pixel)).r;
+#endif
+#ifdef RT_TRANSPARENCY_PEELING
+	// The peeled layers are in the image: no front layer for the raster transparent pass, which leaves them out.
+	if (peel_budget > 0u) {
+#ifdef DLSS_RR_ENABLED
+		if (peel_first_alpha >= PEEL_DOMINANT_ALPHA) {
+			rr_depth = peel_write_dominant_guides(peel_first, peel_first_alpha, origin.xyz, direction.xyz);
+		}
+#endif
+	} else
 #endif
 	if (get_rt_param(RT_PARAM_FRONT_LAYER_COUNT) > 0.0) {
 		uint front_rng_state = init_rng(pixel, frame_index, samples_per_pixel);

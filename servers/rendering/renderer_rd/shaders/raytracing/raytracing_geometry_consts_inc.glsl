@@ -18,3 +18,13 @@ const uint FLAG_SIDE_CHECK = 64u;
 // The shadow rays' copy of a transparent surface (rendering/pathtracing/transparent_shadows): its any-hit filters their light.
 const uint FLAG_TRANSPARENT_SHADOW = 128u;
 #endif
+#ifdef RT_TRANSPARENCY_PEELING
+// Bits 8-10 of a front layer surface (rendering/pathtracing/max_transparency_layers): its blend mode, as the raygen peels it.
+const uint FLAG_PEEL_BLEND_SHIFT = 8u;
+const uint FLAG_PEEL_BLEND_MASK = 7u;
+const uint PEEL_BLEND_MIX = 0u; // Mix, and OIT.
+const uint PEEL_BLEND_ADD = 1u;
+const uint PEEL_BLEND_SUB = 2u;
+const uint PEEL_BLEND_MUL = 3u;
+const uint PEEL_BLEND_PREMUL_ALPHA = 4u;
+#endif
