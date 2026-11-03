@@ -63,6 +63,7 @@
 #define RB_TEX_DLSS_RR_SPECULAR_HIT_DIST SNAME("specular_hit_dist")
 #define RB_TEX_DLSS_RR_COLOR_BEFORE_TRANSPARENCY SNAME("color_before_transparency")
 #define RB_TEX_DLSS_RR_DEPTH SNAME("rr_depth")
+#define RB_TEX_DLSS_RR_SPECULAR_MOTION_VECTORS SNAME("specular_motion_vectors")
 
 // NRD's inputs the raygen writes (RenderRaytracing::nrd_ensure_buffers()), in the guides' layout of DLSS Ray Reconstruction
 // (bindings 9-11), apart from them: what reads DLSS-RR's scope takes it for Ray Reconstruction.
@@ -1166,6 +1167,11 @@ public:
 	// its reflection dominates. The raster depth buffer keeps the opaque one, which the transparent pass reads.
 	RID dlss_rr_get_depth(RenderSceneBuffersRD *p_render_buffers) const;
 	RID dlss_rr_get_color_before_transparency(RenderSceneBuffersRD *p_render_buffers) const;
+	// Ray Reconstruction's specular motion vectors (RT_FLAG_DLSS_RR_SPECULAR_MOTION_VECTORS, binding 44), RG16F in the
+	// velocity's convention. Made at their first use, freed with the other guides.
+	void dlss_rr_ensure_specular_motion_vectors(RenderSceneBuffersRD *p_render_buffers);
+	bool dlss_rr_has_specular_motion_vectors(RenderSceneBuffersRD *p_render_buffers) const;
+	RID dlss_rr_get_specular_motion_vectors(RenderSceneBuffersRD *p_render_buffers) const;
 
 	// NRD's inputs (PT_DENOISER_NRD_REBLUR, RT_FLAG_NRD_ENABLED): per lobe, the primary surfaces' light divided by the lobe's
 	// albedo with the hit distance of their bounce (bindings 41 and 43), the albedo, normal and roughness guides (9-11) and

@@ -388,6 +388,26 @@ RID RenderRaytracing::dlss_rr_get_depth(RenderSceneBuffersRD *p_render_buffers) 
 	return p_render_buffers->get_texture(RB_SCOPE_DLSS_RR, RB_TEX_DLSS_RR_DEPTH);
 }
 
+void RenderRaytracing::dlss_rr_ensure_specular_motion_vectors(RenderSceneBuffersRD *p_render_buffers) {
+	ERR_FAIL_NULL(p_render_buffers);
+	if (p_render_buffers->has_texture(RB_SCOPE_DLSS_RR, RB_TEX_DLSS_RR_SPECULAR_MOTION_VECTORS)) {
+		return;
+	}
+	// RG16F, the velocity's format: Streamline's ProgrammingGuideDLSS_RR.md, 4.1.8, "RG16_FLOAT or RG32_FLOAT provided at
+	// input resolution".
+	const uint32_t usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT;
+	p_render_buffers->create_texture(RB_SCOPE_DLSS_RR, RB_TEX_DLSS_RR_SPECULAR_MOTION_VECTORS, RD::DATA_FORMAT_R16G16_SFLOAT, usage_bits, RD::TEXTURE_SAMPLES_1);
+}
+
+bool RenderRaytracing::dlss_rr_has_specular_motion_vectors(RenderSceneBuffersRD *p_render_buffers) const {
+	return p_render_buffers && p_render_buffers->has_texture(RB_SCOPE_DLSS_RR, RB_TEX_DLSS_RR_SPECULAR_MOTION_VECTORS);
+}
+
+RID RenderRaytracing::dlss_rr_get_specular_motion_vectors(RenderSceneBuffersRD *p_render_buffers) const {
+	ERR_FAIL_NULL_V(p_render_buffers, RID());
+	return p_render_buffers->get_texture(RB_SCOPE_DLSS_RR, RB_TEX_DLSS_RR_SPECULAR_MOTION_VECTORS);
+}
+
 void RenderRaytracing::nrd_ensure_buffers(RenderSceneBuffersRD *p_render_buffers) {
 	ERR_FAIL_NULL(p_render_buffers);
 
@@ -6317,6 +6337,11 @@ RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderD
 
 		// Binding 39: DLSS RR Depth (the raygen writes it, see dlss_rr_get_depth()).
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 39, dlss_rr_get_depth(rb)));
+
+		// Binding 44: DLSS RR Specular Motion Vectors, in their variant only (dlss_rr_ensure_specular_motion_vectors()).
+		if (p_rt_flags & SceneShaderRaytracing::RT_FLAG_DLSS_RR_SPECULAR_MOTION_VECTORS) {
+			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 44, dlss_rr_get_specular_motion_vectors(rb)));
+		}
 	} else if ((p_rt_flags & SceneShaderRaytracing::RT_FLAG_NRD_ENABLED) && nrd_has_buffers(rb)) {
 		// Bindings 9-11: the same guides for NRD, and 41 / 43 the light of each lobe (nrd_ensure_buffers()).
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 9, nrd_get_texture(rb, RB_TEX_NRD_DIFFUSE_ALBEDO)));

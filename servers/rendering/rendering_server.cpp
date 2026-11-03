@@ -3049,6 +3049,7 @@ void RenderingServer::_bind_methods() {
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_DLSS_RR_NORMAL_ROUGHNESS);
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_DLSS_RR_SPECULAR_HIT_DIST);
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_RECONSTRUCTED_DEPTH);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_DLSS_RR_SPECULAR_MOTION_VECTORS);
 
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_VRS_DISABLED);
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_VRS_TEXTURE);
@@ -3891,6 +3892,7 @@ void RenderingServer::init() {
 	GLOBAL_DEF("rendering/pathtracing/displaced_refit", true);
 	GLOBAL_DEF("rendering/pathtracing/light_sampling_ris", true);
 	GLOBAL_DEF("rendering/pathtracing/russian_roulette", true);
+	GLOBAL_DEF("rendering/pathtracing/specular_motion_vectors", false);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::FLOAT, "rendering/pathtracing/out_of_view_update_distance", PROPERTY_HINT_RANGE, "0,500,0.1,or_greater,suffix:m"), 10.0);
 	GLOBAL_DEF_RST("rendering/pathtracing/opacity_micromaps", true);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/pathtracing/opacity_micromap_subdivision_level", PROPERTY_HINT_RANGE, "1,8,1"), 6);

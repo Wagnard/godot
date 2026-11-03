@@ -38,9 +38,12 @@ using namespace RendererRD;
 PTRasterizedGuides::PTRasterizedGuides() {
 	Vector<String> shader_modes;
 	shader_modes.push_back("");
+	shader_modes.push_back("\n#define SPECULAR_MOTION_VECTORS\n");
 	shader.initialize(shader_modes);
 	shader_version = shader.version_create();
-	pipeline = RD::get_singleton()->compute_pipeline_create(shader.version_get_shader(shader_version, 0));
+	for (int i = 0; i < MODE_MAX; i++) {
+		pipelines[i] = RD::get_singleton()->compute_pipeline_create(shader.version_get_shader(shader_version, i));
+	}
 }
 
 PTRasterizedGuides::~PTRasterizedGuides() {
@@ -76,11 +79,18 @@ void PTRasterizedGuides::process(RID p_albedo, RID p_normal, RID p_orm, RID p_vi
 	RD::Uniform u_normal_roughness(RD::UNIFORM_TYPE_IMAGE, 6, p_guides.normal_roughness);
 	RD::Uniform u_hit_dist(RD::UNIFORM_TYPE_IMAGE, 7, p_guides.specular_hit_dist);
 	RD::Uniform u_rr_depth(RD::UNIFORM_TYPE_IMAGE, 8, p_guides.depth);
-	const RID guides_shader = shader.version_get_shader(shader_version, 0);
+	const Mode mode = p_guides.specular_motion_vectors.is_valid() ? MODE_SPECULAR_MOTION_VECTORS : MODE_DEFAULT;
+	const RID guides_shader = shader.version_get_shader(shader_version, mode);
 
 	RD::ComputeListID compute_list = rd->compute_list_begin();
-	rd->compute_list_bind_compute_pipeline(compute_list, pipeline);
-	rd->compute_list_bind_uniform_set(compute_list, uniform_set_cache->get_cache(guides_shader, 0, u_albedo, u_normal, u_orm, u_depth, u_diffuse, u_specular, u_normal_roughness, u_hit_dist, u_rr_depth, u_view_depth), 0);
+	rd->compute_list_bind_compute_pipeline(compute_list, pipelines[mode]);
+	if (mode == MODE_SPECULAR_MOTION_VECTORS) {
+		RD::Uniform u_velocity(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 10, Vector<RID>({ nearest_sampler, p_guides.velocity }));
+		RD::Uniform u_specular_motion_vectors(RD::UNIFORM_TYPE_IMAGE, 11, p_guides.specular_motion_vectors);
+		rd->compute_list_bind_uniform_set(compute_list, uniform_set_cache->get_cache(guides_shader, 0, u_albedo, u_normal, u_orm, u_depth, u_diffuse, u_specular, u_normal_roughness, u_hit_dist, u_rr_depth, u_view_depth, u_velocity, u_specular_motion_vectors), 0);
+	} else {
+		rd->compute_list_bind_uniform_set(compute_list, uniform_set_cache->get_cache(guides_shader, 0, u_albedo, u_normal, u_orm, u_depth, u_diffuse, u_specular, u_normal_roughness, u_hit_dist, u_rr_depth, u_view_depth), 0);
+	}
 	rd->compute_list_set_push_constant(compute_list, &push_constant, sizeof(PushConstant));
 	rd->compute_list_dispatch_threads(compute_list, p_size.x, p_size.y, 1);
 	rd->compute_list_end();

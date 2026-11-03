@@ -853,6 +853,9 @@
 		<constant name="DEBUG_DRAW_RECONSTRUCTED_DEPTH" value="33" enum="DebugDraw">
 			Displays the depth buffer reconstructed by NVIDIA DLSS Ray Reconstruction after denoising. Only has an effect when DLSS Ray Reconstruction is active.
 		</constant>
+		<constant name="DEBUG_DRAW_DLSS_RR_SPECULAR_MOTION_VECTORS" value="34" enum="DebugDraw">
+			Displays the specular motion vectors provided to NVIDIA DLSS Ray Reconstruction as lines, as [constant DEBUG_DRAW_MOTION_VECTORS] displays the motion vectors, which are drawn over them as shorter lines. Only has an effect when DLSS Ray Reconstruction is active with [member ProjectSettings.rendering/pathtracing/specular_motion_vectors].
+		</constant>
 		<constant name="DEFAULT_CANVAS_ITEM_TEXTURE_FILTER_NEAREST" value="0" enum="DefaultCanvasItemTextureFilter">
 			The texture filter reads from the nearest pixel only. This makes the texture look pixelated from up close, and grainy from a distance (due to mipmaps not being sampled).
 		</constant>

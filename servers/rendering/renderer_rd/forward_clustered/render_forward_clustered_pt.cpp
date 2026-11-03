@@ -276,6 +276,7 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 	// here and reused at trace-dispatch time below so the uniform set and the
 	// pipeline agree on spec-constant values.
 	uint32_t rt_flags = SceneShaderRaytracing::RT_FLAG_NONE;
+	rr_specular_motion_vectors_traced = false;
 	// Captured from build_tlas/update_uniform_set so the trace-dispatch block
 	// below can bind without RenderRaytracing keeping hidden "current" state.
 	RID rt_uniform_set;
@@ -315,13 +316,17 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 			rr_runs = false;
 #endif
 			if (!rr_runs) {
-				rt_flags = (rt_flags & ~SceneShaderRaytracing::RT_FLAG_DLSS_RR_ENABLED) | SceneShaderRaytracing::RT_FLAG_NRD_ENABLED;
+				rt_flags = (rt_flags & ~(SceneShaderRaytracing::RT_FLAG_DLSS_RR_ENABLED | SceneShaderRaytracing::RT_FLAG_DLSS_RR_SPECULAR_MOTION_VECTORS)) | SceneShaderRaytracing::RT_FLAG_NRD_ENABLED;
 			}
 		}
 
 		const bool dlss_rr_enabled = (rt_flags & SceneShaderRaytracing::RT_FLAG_DLSS_RR_ENABLED) != 0;
+		rr_specular_motion_vectors_traced = dlss_rr_enabled && (rt_flags & SceneShaderRaytracing::RT_FLAG_DLSS_RR_SPECULAR_MOTION_VECTORS);
 		if (dlss_rr_enabled) {
 			raytracing->dlss_rr_ensure_buffers(rb.ptr());
+			if (rr_specular_motion_vectors_traced) {
+				raytracing->dlss_rr_ensure_specular_motion_vectors(rb.ptr());
+			}
 			using_depth_reconstruct = true;
 		} else if (raytracing->dlss_rr_has_buffers(rb.ptr())) {
 			raytracing->dlss_rr_free_buffers(rb.ptr());
@@ -764,6 +769,10 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 					guides.normal_roughness = raytracing->dlss_rr_get_normal_roughness(rb.ptr());
 					guides.specular_hit_dist = raytracing->dlss_rr_get_specular_hit_dist(rb.ptr());
 					guides.depth = raytracing->dlss_rr_get_depth(rb.ptr());
+					if (rr_specular_motion_vectors_traced) {
+						guides.velocity = rb->get_velocity_buffer(false);
+						guides.specular_motion_vectors = raytracing->dlss_rr_get_specular_motion_vectors(rb.ptr());
+					}
 					// The projection the depth buffer was rendered with: reversed Z in [0, 1] (RenderSceneDataRD::update_ubo()).
 					Projection depth_correction;
 					depth_correction.set_depth_correction(p_render_data->scene_data->flip_y);
@@ -850,6 +859,9 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 			dlss_rr_guides.specular_albedo = raytracing->dlss_rr_get_specular_albedo(rb.ptr());
 			dlss_rr_guides.normal_roughness = raytracing->dlss_rr_get_normal_roughness(rb.ptr());
 			dlss_rr_guides.specular_hit_dist = raytracing->dlss_rr_get_specular_hit_dist(rb.ptr());
+			if (rr_specular_motion_vectors_traced) {
+				dlss_rr_guides.specular_motion_vectors = raytracing->dlss_rr_get_specular_motion_vectors(rb.ptr());
+			}
 			dlss_rr_guides.color_before_transparency = raytracing->dlss_rr_get_color_before_transparency(rb.ptr());
 			dlss_rr_guides.transparency_layer = rr_transparency_layer;
 			dlss_rr_guides.depth = raytracing->dlss_rr_get_depth(rb.ptr());
@@ -1125,6 +1137,12 @@ void RenderForwardClusteredPT::_render_buffers_debug_draw(const RenderDataRD *p_
 
 		if (get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_DLSS_RR_SPECULAR_HIT_DIST) {
 			copy_effects->copy_to_fb_rect(raytracing->dlss_rr_get_specular_hit_dist(rb.ptr()), fb, Rect2(Vector2(), rtsize), false, true);
+		}
+
+		// As the motion vectors' view, with them over as the shorter lines: where the two differ, the reflection moves apart.
+		if (get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_DLSS_RR_SPECULAR_MOTION_VECTORS && rr_specular_motion_vectors_traced && raytracing->dlss_rr_has_specular_motion_vectors(rb.ptr())) {
+			debug_effects->draw_motion_vectors(raytracing->dlss_rr_get_specular_motion_vectors(rb.ptr()), rb->get_depth_texture(), fb, p_render_data->scene_data->cam_projection, p_render_data->scene_data->cam_transform,
+					p_render_data->scene_data->prev_cam_projection, p_render_data->scene_data->prev_cam_transform, rb->get_internal_size(), rb->get_velocity_buffer(false));
 		}
 	}
 

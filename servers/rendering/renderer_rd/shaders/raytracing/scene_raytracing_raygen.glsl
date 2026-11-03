@@ -66,6 +66,18 @@ layout(set = 0, binding = 3, std430) readonly buffer GeometryBuffer {
 layout(set = 0, binding = 5, std430) readonly buffer MaterialBuffer {
 	MaterialData materials[];
 };
+
+#ifdef DLSS_RR_SPECULAR_MOTION_VECTORS
+// The previous frame's instance transforms, as the closest hit reads them for the velocity: the specular motion vectors
+// move the surfaces their ray queries meet (raytracing_shade_inc.glsl).
+layout(set = 0, binding = 4, std430) readonly buffer MotionIndexBuffer {
+	int motion_indices[];
+};
+
+layout(set = 0, binding = 32, std430) readonly buffer MotionTransforms {
+	InstanceMotionData motion_transforms[];
+};
+#endif
 // clang-format on
 
 #include "raytracing_lights_inc.glsl"
@@ -360,6 +372,13 @@ void main() {
 				if (front_reflectance >= 0.5) {
 					imageStore(dlss_rr_normal_roughness, guide_pixel, vec4(front_normal, roughness));
 					imageStore(dlss_rr_specular_hit_dist, guide_pixel, vec4(front_reflection_t));
+#ifdef DLSS_RR_SPECULAR_MOTION_VECTORS
+					// The motion of the reflection, as the hit distance tells it: the virtual point behind the surface along
+					// the view ray, the surface and what it reflects taken as still (the path traced through it leaves no ray
+					// query to find their motion).
+					const vec3 front_virtual = front_reflection_t < 0.0 ? origin.xyz + direction.xyz * 10000.0 : front_position + direction.xyz * front_reflection_t;
+					imageStore(dlss_rr_specular_motion_vectors, guide_pixel, vec4(rt_motion_vector(front_virtual, front_virtual), 0.0, 0.0));
+#endif
 					const mat4 view_matrix = transpose(mat4(scene_data_block.data.view_matrix[0],
 							scene_data_block.data.view_matrix[1],
 							scene_data_block.data.view_matrix[2],
@@ -458,6 +477,10 @@ void main() {
 				vec2 curr_uv = project_uv(far_world, curr_vp_unjittered);
 				vec2 prev_uv = project_uv(far_world, prev_vp_unjittered);
 				imageStore(rt_velocity_image, pixel, vec4(prev_uv - curr_uv, 0.0, 0.0));
+#ifdef DLSS_RR_SPECULAR_MOTION_VECTORS
+				// The sky reflects nothing: what it shows moves as the sky does.
+				imageStore(dlss_rr_specular_motion_vectors, pixel, vec4(prev_uv - curr_uv, 0.0, 0.0));
+#endif
 			}
 		}
 	}

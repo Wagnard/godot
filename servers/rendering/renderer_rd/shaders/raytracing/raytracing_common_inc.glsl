@@ -7,6 +7,7 @@ layout(constant_id = 0) const uint RT_FLAGS = 0u;
 
 #define RT_FLAG_DLSS_RR_ENABLED (1u << 1)
 #define RT_FLAG_NRD_ENABLED (1u << 2) // NRD_ENABLED: the raygen's split for NRD (PT_DENOISER_NRD_REBLUR).
+// (1u << 6): DLSS_RR_SPECULAR_MOTION_VECTORS, with RT_FLAG_DLSS_RR_ENABLED only.
 
 // The Environment's fog, from the scene data as raster reads it: uniform across the dispatch, so switching it keeps the
 // pipeline and its hit groups.
@@ -74,6 +75,11 @@ layout(set = 0, binding = 11, rgba16f) uniform image2D dlss_rr_normal_roughness;
 layout(set = 0, binding = 12, r16f) uniform image2D dlss_rr_specular_hit_dist;
 // NDC depth for Ray Reconstruction (RenderRaytracing::dlss_rr_get_depth()), written by the raygen.
 layout(set = 0, binding = 39, r32f) uniform image2D dlss_rr_depth;
+#ifdef DLSS_RR_SPECULAR_MOTION_VECTORS
+// Ray Reconstruction's specular motion vectors (rendering/pathtracing/specular_motion_vectors), in rt_velocity_image's
+// convention: written by the raygen (rt_specular_motion_vector()) and, where the camera ray misses, by the miss shader.
+layout(set = 0, binding = 44, rg16f) uniform image2D dlss_rr_specular_motion_vectors;
+#endif
 #endif
 
 // Binding 14 is reserved for GlobalShaderUniformData (declared above).

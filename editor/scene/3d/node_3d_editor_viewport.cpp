@@ -4683,7 +4683,8 @@ void Node3DEditorViewport::_menu_option(int p_option) {
 		case VIEW_DISPLAY_DEBUG_DLSS_RR_SPECULAR_ALBEDO:
 		case VIEW_DISPLAY_DEBUG_DLSS_RR_NORMAL_ROUGHNESS:
 		case VIEW_DISPLAY_DEBUG_DLSS_RR_SPECULAR_HIT_DIST:
-		case VIEW_DISPLAY_DEBUG_RECONSTRUCTED_DEPTH: {
+		case VIEW_DISPLAY_DEBUG_RECONSTRUCTED_DEPTH:
+		case VIEW_DISPLAY_DEBUG_DLSS_RR_SPECULAR_MOTION_VECTORS: {
 			static const int display_options[] = {
 				VIEW_DISPLAY_NORMAL,
 				VIEW_DISPLAY_WIREFRAME,
@@ -4719,6 +4720,7 @@ void Node3DEditorViewport::_menu_option(int p_option) {
 				VIEW_DISPLAY_DEBUG_DLSS_RR_NORMAL_ROUGHNESS,
 				VIEW_DISPLAY_DEBUG_DLSS_RR_SPECULAR_HIT_DIST,
 				VIEW_DISPLAY_DEBUG_RECONSTRUCTED_DEPTH,
+				VIEW_DISPLAY_DEBUG_DLSS_RR_SPECULAR_MOTION_VECTORS,
 				VIEW_MAX
 			};
 			static const Viewport::DebugDraw debug_draw_modes[] = {
@@ -4756,6 +4758,7 @@ void Node3DEditorViewport::_menu_option(int p_option) {
 				Viewport::DEBUG_DRAW_DLSS_RR_NORMAL_ROUGHNESS,
 				Viewport::DEBUG_DRAW_DLSS_RR_SPECULAR_HIT_DIST,
 				Viewport::DEBUG_DRAW_RECONSTRUCTED_DEPTH,
+				Viewport::DEBUG_DRAW_DLSS_RR_SPECULAR_MOTION_VECTORS,
 			};
 
 			for (int idx = 0; display_options[idx] != VIEW_MAX; idx++) {
@@ -6914,6 +6917,8 @@ Node3DEditorViewport::Node3DEditorViewport(Node3DEditor *p_spatial_editor, int p
 			TTRC("Displays the DLSS Ray Reconstruction specular hit distance output buffer. Requires raytracing with DLSS RR enabled."));
 	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("Reconstructed Depth"), VIEW_DISPLAY_DEBUG_RECONSTRUCTED_DEPTH, SupportedRenderingMethods::FORWARD_PLUS,
 			TTRC("Displays the reconstructed full-resolution depth buffer. Requires DLSS RR path tracing with upscaling."));
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("DLSS RR Specular Motion Vectors"), VIEW_DISPLAY_DEBUG_DLSS_RR_SPECULAR_MOTION_VECTORS, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Displays the specular motion vectors given to DLSS Ray Reconstruction, with the motion vectors over them as shorter lines. Requires raytracing with DLSS RR enabled and the rendering/pathtracing/specular_motion_vectors project setting."));
 	view_display_menu->get_popup()->add_submenu_node_item(TTRC("Display Advanced..."), display_submenu, VIEW_DISPLAY_ADVANCED);
 
 	view_display_menu->get_popup()->add_separator();

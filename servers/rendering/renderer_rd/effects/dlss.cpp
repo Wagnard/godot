@@ -170,6 +170,7 @@ struct DLSSCallbackPayload {
 	DLSSResolvedTexture rr_specular_albedo;
 	DLSSResolvedTexture rr_normal_roughness;
 	DLSSResolvedTexture rr_specular_hit_dist;
+	DLSSResolvedTexture rr_specular_motion_vectors;
 	DLSSResolvedTexture rr_color_before_transparency;
 	DLSSResolvedTexture rr_transparency_layer;
 	// The compositor sets the HUD-less color and UI alpha after the 3D pass: they are captured when the frame's
@@ -225,6 +226,7 @@ public:
 	sl::DLSSOptimalSettings currentOptimalSettings;
 	sl::DLSSDOptions currentDlssDOptions; // DLSS Ray Reconstruction options
 	bool hudless_tagged = false; // kBufferTypeHUDLessColor currently tagged on this viewport.
+	bool specular_motion_vectors_tagged = false; // kBufferTypeSpecularMotionVectors, in place of kBufferTypeSpecularHitDistance.
 
 	DLSSContextInner();
 	virtual ~DLSSContextInner();
@@ -346,6 +348,7 @@ DLSSContextInner::~DLSSContextInner() {
 			sl::kBufferTypeSpecularAlbedo,
 			sl::kBufferTypeNormalRoughness,
 			sl::kBufferTypeSpecularHitDistance,
+			sl::kBufferTypeSpecularMotionVectors,
 			sl::kBufferTypeColorBeforeTransparency,
 			sl::kBufferTypeTransparencyLayer,
 			sl::kBufferTypeHUDLessColor,
@@ -515,7 +518,13 @@ void DLSSEffect::upscale(const DLSSContext::Parameters &p_params) {
 		payload->rr_diffuse_albedo = dlss_resolve_texture(p_params.dlss_rr_diffuse_albedo);
 		payload->rr_specular_albedo = dlss_resolve_texture(p_params.dlss_rr_specular_albedo);
 		payload->rr_normal_roughness = dlss_resolve_texture(p_params.dlss_rr_normal_roughness);
-		payload->rr_specular_hit_dist = dlss_resolve_texture(p_params.dlss_rr_specular_hit_dist);
+		// The specular motion vectors when given, else the hit distance: Streamline's ProgrammingGuideDLSS_RR.md, 4.1.8-4.1.9,
+		// the hit distance is "Only needed if Specular Motion Vectors are not provided", and the guide never gives both.
+		if (p_params.dlss_rr_specular_motion_vectors.is_valid()) {
+			payload->rr_specular_motion_vectors = dlss_resolve_texture(p_params.dlss_rr_specular_motion_vectors);
+		} else {
+			payload->rr_specular_hit_dist = dlss_resolve_texture(p_params.dlss_rr_specular_hit_dist);
+		}
 		if (p_params.dlss_rr_color_before_transparency.is_valid()) {
 			payload->rr_color_before_transparency = dlss_resolve_texture(p_params.dlss_rr_color_before_transparency);
 		}
@@ -544,7 +553,9 @@ void DLSSEffect::upscale(const DLSSContext::Parameters &p_params) {
 		if (p_params.dlss_rr_normal_roughness.is_valid()) {
 			res[num_resources++].rid = p_params.dlss_rr_normal_roughness;
 		}
-		if (p_params.dlss_rr_specular_hit_dist.is_valid()) {
+		if (p_params.dlss_rr_specular_motion_vectors.is_valid()) {
+			res[num_resources++].rid = p_params.dlss_rr_specular_motion_vectors;
+		} else if (p_params.dlss_rr_specular_hit_dist.is_valid()) {
 			res[num_resources++].rid = p_params.dlss_rr_specular_hit_dist;
 		}
 		if (p_params.dlss_rr_color_before_transparency.is_valid()) {
@@ -746,8 +757,10 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, DLSSCallbackPaylo
 
 	// Tag resources
 	if (StreamlineContext::get().slSetTag != nullptr) {
-		sl::Resource resources[13]; // Color, output, depth, motion, five DLSS-RR guides, the transparency layer, DLSS-G HUD-less color and UI alpha.
-		sl::ResourceTag resourceTags[13];
+		// Color, output, depth, motion, five DLSS-RR guides, the transparency layer, DLSS-G HUD-less color and UI alpha, and the
+		// null tag of the specular guide not given.
+		sl::Resource resources[14];
+		sl::ResourceTag resourceTags[14];
 		int numResources = 0;
 
 		assignResource(resources, resourceTags, numResources, p_payload.color, sl::kBufferTypeScalingInputColor, sl::ResourceLifecycle::eValidUntilPresent);
@@ -762,7 +775,21 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, DLSSCallbackPaylo
 			assignResource(resources, resourceTags, numResources, p_payload.rr_specular_albedo, sl::kBufferTypeSpecularAlbedo, sl::ResourceLifecycle::eValidUntilPresent);
 			// kBufferTypeNormalRoughness for packed normal+roughness (XYZ=normal, W=roughness)
 			assignResource(resources, resourceTags, numResources, p_payload.rr_normal_roughness, sl::kBufferTypeNormalRoughness, sl::ResourceLifecycle::eValidUntilPresent);
-			assignResource(resources, resourceTags, numResources, p_payload.rr_specular_hit_dist, sl::kBufferTypeSpecularHitDistance, sl::ResourceLifecycle::eValidUntilPresent);
+			// One of the two (see where the payload resolves them). When rendering/pathtracing/specular_motion_vectors
+			// switches, the other's tag is nulled.
+			if (p_payload.rr_specular_motion_vectors.valid) {
+				assignResource(resources, resourceTags, numResources, p_payload.rr_specular_motion_vectors, sl::kBufferTypeSpecularMotionVectors, sl::ResourceLifecycle::eValidUntilPresent);
+				if (!context->specular_motion_vectors_tagged) {
+					resourceTags[numResources++] = sl::ResourceTag(nullptr, sl::kBufferTypeSpecularHitDistance, sl::ResourceLifecycle::eValidUntilPresent);
+					context->specular_motion_vectors_tagged = true;
+				}
+			} else {
+				assignResource(resources, resourceTags, numResources, p_payload.rr_specular_hit_dist, sl::kBufferTypeSpecularHitDistance, sl::ResourceLifecycle::eValidUntilPresent);
+				if (context->specular_motion_vectors_tagged) {
+					resourceTags[numResources++] = sl::ResourceTag(nullptr, sl::kBufferTypeSpecularMotionVectors, sl::ResourceLifecycle::eValidUntilPresent);
+					context->specular_motion_vectors_tagged = false;
+				}
+			}
 			if (p_payload.rr_color_before_transparency.valid) {
 				assignResource(resources, resourceTags, numResources, p_payload.rr_color_before_transparency, sl::kBufferTypeColorBeforeTransparency, sl::ResourceLifecycle::eValidUntilPresent);
 			}

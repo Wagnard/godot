@@ -2883,6 +2883,7 @@ void RenderForwardClustered::_render_3d_upscaling(const RenderDataRD *p_render_d
 				params.dlss_rr_specular_albedo = p_dlss_rr.specular_albedo;
 				params.dlss_rr_normal_roughness = p_dlss_rr.normal_roughness;
 				params.dlss_rr_specular_hit_dist = p_dlss_rr.specular_hit_dist;
+				params.dlss_rr_specular_motion_vectors = p_dlss_rr.specular_motion_vectors;
 				params.dlss_rr_color_before_transparency = p_dlss_rr.color_before_transparency;
 				params.dlss_rr_transparency_layer = p_dlss_rr.transparency_layer;
 				if (p_dlss_rr.depth.is_valid()) {

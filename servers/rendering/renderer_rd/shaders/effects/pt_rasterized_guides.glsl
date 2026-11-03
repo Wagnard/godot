@@ -26,6 +26,12 @@ layout(rgba16f, set = 0, binding = 5) uniform restrict writeonly image2D specula
 layout(rgba16f, set = 0, binding = 6) uniform restrict writeonly image2D normal_roughness;
 layout(r16f, set = 0, binding = 7) uniform restrict writeonly image2D specular_hit_dist;
 layout(r32f, set = 0, binding = 8) uniform restrict writeonly image2D rr_depth;
+#ifdef SPECULAR_MOTION_VECTORS
+// rendering/pathtracing/specular_motion_vectors: the velocity, the cards' own motion vectors included (their color pass
+// wrote them), and Ray Reconstruction's specular motion vectors.
+layout(set = 0, binding = 10) uniform sampler2D velocity_texture;
+layout(rg16f, set = 0, binding = 11) uniform restrict writeonly image2D specular_motion_vectors;
+#endif
 
 layout(push_constant, std430) uniform Params {
 	mat4 inv_projection;
@@ -73,5 +79,9 @@ void main() {
 	imageStore(normal_roughness, pos, vec4(world_normal, roughness));
 	// No reflection ray is traced from a card: as the raygen writes for a rough surface.
 	imageStore(specular_hit_dist, pos, vec4(-1.0));
+#ifdef SPECULAR_MOTION_VECTORS
+	// Likewise the specular motion: the card's own.
+	imageStore(specular_motion_vectors, pos, vec4(texelFetch(velocity_texture, pos, 0).xy, 0.0, 0.0));
+#endif
 	imageStore(rr_depth, pos, vec4(depth));
 }

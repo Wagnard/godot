@@ -75,6 +75,8 @@ public:
 		RID dlss_rr_specular_albedo; // Specular albedo buffer (RGB)
 		RID dlss_rr_normal_roughness; // World-space normal (XYZ) + roughness (W)
 		RID dlss_rr_specular_hit_dist; // Specular hit distance (R16F, -1 = sky)
+		// Specular motion vectors (RG16F, the velocity's convention). When valid, tagged instead of the hit distance.
+		RID dlss_rr_specular_motion_vectors;
 		RID dlss_rr_color_before_transparency; // Noisy color before the transparent pass (optional)
 		RID dlss_rr_transparency_layer; // Unshaded transparent effects, premultiplied RGBA, upscaled but not denoised (optional)
 	} last_parameters;

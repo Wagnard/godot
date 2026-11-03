@@ -63,6 +63,154 @@ void apply_segment_fog(vec3 p_ray_origin, vec3 p_ray_dir, float segment_dist, in
 	throughput *= (1.0 - fog.a);
 }
 
+#ifdef DLSS_RR_SPECULAR_MOTION_VECTORS
+// ============================================================================
+// SPECULAR MOTION VECTORS (DLSS Ray Reconstruction)
+// ============================================================================
+// NVIDIA, Streamline's ProgrammingGuideDLSS_RR.md, 4.1.8: "DLSS-RR uses Specular Motion Vectors to improve Image Quality of
+// Reflections during motion", a "Dense motion vector field for Reflections (Virtually Reflected Geometries)"; the specular
+// hit distance (4.1.9) is "Only needed if Specular Motion Vectors are not provided". In rt_velocity_image's convention.
+// Required bindings: motion_indices[], motion_transforms[] (the raygen declares them with this define).
+
+/// The screen motion of a point from the previous frame, as the closest hit writes the velocity (write_primary_hit_velocity()).
+vec2 rt_motion_vector(vec3 p_pos, vec3 p_prev_pos) {
+	return project_uv(p_prev_pos, prev_vp_unjittered) - project_uv(p_pos, curr_vp_unjittered);
+}
+
+/// Where p_pos, on triangle p_primitive of geometry p_geometry_idx that a ray query met, was in the previous frame: as
+/// write_primary_hit_velocity() finds it in the closest hit (the instance's previous transform, a deformed mesh's previous
+/// vertices, a merged MultiMesh's previous instance transforms).
+vec3 rt_previous_position(uint p_geometry_idx, uint p_primitive, vec2 p_barycentrics, mat4 p_object_to_world, mat4 p_world_to_object, vec3 p_pos) {
+	const GeometryData geom = geometries[p_geometry_idx];
+	const int mi = motion_indices[p_geometry_idx];
+	mat4 prev_model = p_object_to_world;
+	if (mi >= 0) {
+		const InstanceMotionData m = motion_transforms[mi];
+		prev_model = transpose(mat4(
+				vec4(m.prev_xform[0], m.prev_xform[1], m.prev_xform[2], m.prev_xform[3]),
+				vec4(m.prev_xform[4], m.prev_xform[5], m.prev_xform[6], m.prev_xform[7]),
+				vec4(m.prev_xform[8], m.prev_xform[9], m.prev_xform[10], m.prev_xform[11]),
+				vec4(0.0, 0.0, 0.0, 1.0)));
+	}
+	const vec3 obj_pos = (p_world_to_object * vec4(p_pos, 1.0)).xyz;
+	vec3 prev_obj_pos = obj_pos;
+	if ((geom.flags & FLAG_DEFORMED) != 0u) {
+		const uint64_t prev_addr = packUint2x32(uvec2(geom.prev_vertex_address_lo, geom.prev_vertex_address_hi));
+		if (prev_addr != 0ul) {
+			uint i0, i1, i2;
+			get_triangle_indices_ex(geom, p_primitive, i0, i1, i2);
+			const vec3 bary = vec3(1.0 - p_barycentrics.x - p_barycentrics.y, p_barycentrics.x, p_barycentrics.y);
+			FloatBuffer prev_vb = FloatBuffer(prev_addr);
+			const uint stride_floats = geom.position_stride >> 2;
+			const vec3 p0 = vec3(prev_vb.v[i0 * stride_floats + 0u], prev_vb.v[i0 * stride_floats + 1u], prev_vb.v[i0 * stride_floats + 2u]);
+			const vec3 p1 = vec3(prev_vb.v[i1 * stride_floats + 0u], prev_vb.v[i1 * stride_floats + 1u], prev_vb.v[i1 * stride_floats + 2u]);
+			const vec3 p2 = vec3(prev_vb.v[i2 * stride_floats + 0u], prev_vb.v[i2 * stride_floats + 1u], prev_vb.v[i2 * stride_floats + 2u]);
+			prev_obj_pos = bary.x * p0 + bary.y * p1 + bary.z * p2;
+		}
+	} else if (geom.multimesh_previous_offset != geom.multimesh_offset) {
+		uint i0, i1, i2;
+		get_triangle_indices_ex(geom, p_primitive, i0, i1, i2);
+		prev_obj_pos = multimesh_previous_position(geom, i0, obj_pos);
+	}
+	return (prev_model * vec4(prev_obj_pos, 1.0)).xyz;
+}
+
+/// Where the hit r of the ray p_ray_origin + t * p_ray_dir, at p_hit_pos, was in the previous frame. A geometry that did
+/// not move is found from its data alone; one that moved is met again by a ray query along the same ray, kept to that
+/// geometry and to a short interval around the hit, which gives what the closest hit had: its triangle and transforms.
+/// Procedural geometry, which a ray query cannot intersect, is taken as still. Not through the payload: two more fields
+/// written by the closest hit broke the path tracer on NVIDIA's Vulkan driver with SER (no light but the albedo, black
+/// areas), the driver defect of PT-VK-SER-PAYLOAD-WA.md.
+vec3 rt_primary_previous_position(HitRecord r, vec3 p_ray_origin, vec3 p_ray_dir, vec3 p_hit_pos) {
+	const GeometryData geom = geometries[r.geometry_idx];
+	const bool deformed = (geom.flags & FLAG_DEFORMED) != 0u && (geom.prev_vertex_address_lo | geom.prev_vertex_address_hi) != 0u;
+	const bool moved = motion_indices[r.geometry_idx] >= 0 || deformed || geom.multimesh_previous_offset != geom.multimesh_offset;
+	if (!moved || (geom.flags & FLAG_PROCEDURAL) != 0u) {
+		return p_hit_pos;
+	}
+	const float margin = r.hit_t * 1e-3 + 1e-3;
+	rayQueryEXT rq;
+	// Every candidate of the interval comes to the loop (no opaque shortcut), so the hit's own triangle is the one kept.
+	rayQueryInitializeEXT(rq, tlas, RT_RAY_FLAGS | gl_RayFlagsNoOpaqueEXT, RT_MASK_BOUNCE, p_ray_origin, max(r.hit_t - margin, 0.0), p_ray_dir, r.hit_t + margin);
+	while (rayQueryProceedEXT(rq)) {
+		if (rayQueryGetIntersectionTypeEXT(rq, false) == gl_RayQueryCandidateIntersectionTriangleEXT && uint(rayQueryGetIntersectionInstanceCustomIndexEXT(rq, false)) == r.geometry_idx) {
+			rayQueryConfirmIntersectionEXT(rq);
+		}
+	}
+	if (rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionNoneEXT) {
+		return p_hit_pos;
+	}
+	return rt_previous_position(r.geometry_idx, uint(rayQueryGetIntersectionPrimitiveIndexEXT(rq, true)), rayQueryGetIntersectionBarycentricsEXT(rq, true),
+			mat4(rayQueryGetIntersectionObjectToWorldEXT(rq, true)), mat4(rayQueryGetIntersectionWorldToObjectEXT(rq, true)), p_hit_pos);
+}
+
+/// The specular motion vector of the primary hit r of the ray p_ray_origin + t * p_ray_dir, at p_hit_pos, whose own motion
+/// vector is p_surface_motion_vector.
+/// NVIDIA's design (dlss_rr_specular_motion_vector(), raytracing_closest_hit_common_inc.glsl:703-743 at 49a825dc52): the
+/// surface is a mirror plane, whose virtual image of the reflected point lies on the view ray at the reflection's distance
+/// and moves with the mirror, plus the reflected point's own motion mirrored through the plane. Past the roughness of
+/// MAX_DENOISER_SPECULAR_HIT_THRESHOLD the reflection is too blurred to follow: the surface's own motion. With the
+/// geometry normal: the waves of a normal map would scatter the virtual image per pixel. The reflected point is the
+/// closest hit of the reflection ray (NVIDIA's query stopped at the first hit found, a farther one at times). r_hit_dist:
+/// the reflection's distance, -1 where it reaches the sky, as dlss_rr_specular_hit_dist holds it.
+vec2 rt_specular_motion_vector(HitRecord r, float p_roughness, vec3 p_ray_origin, vec3 p_ray_dir, vec3 p_hit_pos, vec2 p_surface_motion_vector, out float r_hit_dist) {
+	r_hit_dist = -1.0;
+	if (p_roughness >= MAX_DENOISER_SPECULAR_HIT_THRESHOLD) {
+		return p_surface_motion_vector;
+	}
+	const vec3 V = -p_ray_dir;
+	const vec3 prev_hit_pos = rt_primary_previous_position(r, p_ray_origin, p_ray_dir, p_hit_pos);
+	const vec3 N = r.geometry_normal;
+	const vec3 spec_dir = reflect(-V, N);
+	const vec3 spec_origin = offset_ray_origin(p_hit_pos, N);
+
+	rayQueryEXT spec_rq;
+	rayQueryInitializeEXT(spec_rq, tlas, RT_RAY_FLAGS, RT_MASK_BOUNCE, spec_origin, 0.001, spec_dir, 10000.0);
+	while (rayQueryProceedEXT(spec_rq)) {
+		if (rayQueryGetIntersectionTypeEXT(spec_rq, false) == gl_RayQueryCandidateIntersectionTriangleEXT &&
+				ray_query_alpha_test(
+						rayQueryGetIntersectionInstanceCustomIndexEXT(spec_rq, false),
+						rayQueryGetIntersectionPrimitiveIndexEXT(spec_rq, false),
+						rayQueryGetIntersectionBarycentricsEXT(spec_rq, false))) {
+			rayQueryConfirmIntersectionEXT(spec_rq);
+		}
+	}
+	bool hit = rayQueryGetIntersectionTypeEXT(spec_rq, true) != gl_RayQueryCommittedIntersectionNoneEXT;
+	float spec_t = hit ? rayQueryGetIntersectionTEXT(spec_rq, true) : 10000.0;
+	vec3 reflected_motion = vec3(0.0);
+	if (hit) {
+		const vec3 reflected_pos = spec_origin + spec_dir * spec_t;
+		const vec3 reflected_prev_pos = rt_previous_position(uint(rayQueryGetIntersectionInstanceCustomIndexEXT(spec_rq, true)),
+				uint(rayQueryGetIntersectionPrimitiveIndexEXT(spec_rq, true)), rayQueryGetIntersectionBarycentricsEXT(spec_rq, true),
+				mat4(rayQueryGetIntersectionObjectToWorldEXT(spec_rq, true)), mat4(rayQueryGetIntersectionWorldToObjectEXT(spec_rq, true)), reflected_pos);
+		reflected_motion = reflected_prev_pos - reflected_pos;
+	}
+#ifdef USE_SER
+	// Procedural geometry, found by its hit group's intersection shader only (see the specular hit distance below): nearer
+	// than the triangles, it is what the reflection shows, taken as still.
+	if ((uint(get_rt_param(RT_PARAM_PROCEDURAL_MASKS)) & RT_MASK_PROCEDURAL_CAMERA) != 0u) {
+		hitObjectEXT spec_hit_object;
+		hitObjectTraceRayEXT(spec_hit_object, tlas, RT_RAY_FLAGS, RT_MASK_PROCEDURAL_CAMERA, 0, 0, 0, spec_origin, 0.001, spec_dir, spec_t, 0);
+		if (hitObjectIsHitEXT(spec_hit_object)) {
+			hit = true;
+			spec_t = hitObjectGetRayTMaxEXT(spec_hit_object);
+			reflected_motion = vec3(0.0);
+		}
+	}
+#endif
+	if (!hit) {
+		// The sky, at infinity: only the camera's rotation moves it, as the velocity of a camera ray that misses.
+		const vec3 far_pos = p_hit_pos - V * 10000.0;
+		return rt_motion_vector(far_pos, far_pos);
+	}
+	r_hit_dist = spec_t;
+	const vec3 reflector_motion = prev_hit_pos - p_hit_pos;
+	const vec3 virtual_pos = p_hit_pos - V * spec_t;
+	const vec3 virtual_prev_pos = virtual_pos + reflector_motion + reflect(reflected_motion - reflector_motion, N);
+	return rt_motion_vector(virtual_pos, virtual_prev_pos);
+}
+#endif // DLSS_RR_SPECULAR_MOTION_VECTORS
+
 // ============================================================================
 // SHADE AND BOUNCE
 // ============================================================================
@@ -141,7 +289,17 @@ bool shade_and_bounce(inout PathState ps, HitRecord r, vec3 p_ray_origin, vec3 p
 
 		imageStore(dlss_rr_normal_roughness, pixel, vec4(N, roughness));
 
-#ifdef DLSS_RR_ENABLED
+#ifdef DLSS_RR_SPECULAR_MOTION_VECTORS
+		// Ray Reconstruction takes the specular motion vectors instead of the hit distance (dlss.cpp), which stays written
+		// for its debug view, from the same reflection ray.
+		float spec_hit_dist;
+		// The surface's own motion vector, which the closest hit wrote to the velocity in this sample's camera ray
+		// (write_primary_hit_velocity()), as the raygen reads its depth back for the depth guides (rt_depth_image).
+		const vec2 surface_motion_vector = imageLoad(rt_velocity_image, pixel).xy;
+		const vec2 specular_motion_vector = rt_specular_motion_vector(r, roughness, p_ray_origin, p_ray_dir, hit_pos, surface_motion_vector, spec_hit_dist);
+		imageStore(dlss_rr_specular_motion_vectors, pixel, vec4(specular_motion_vector, 0.0, 0.0));
+		imageStore(dlss_rr_specular_hit_dist, pixel, vec4(spec_hit_dist));
+#elif defined(DLSS_RR_ENABLED)
 		// Specular hit distance via inline ray query (only for smooth surfaces).
 		float spec_hit_dist = -1.0;
 		if (roughness < MAX_DENOISER_SPECULAR_HIT_THRESHOLD) {

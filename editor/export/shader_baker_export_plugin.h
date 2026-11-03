@@ -101,6 +101,7 @@ protected:
 	bool raytracing_baked = false; // shader_baker/path_tracing, on a device that can path trace.
 	bool raytracing_simple_shadows = false;
 	bool raytracing_ser = false;
+	bool raytracing_specular_motion_vectors = false;
 	RenderingShaderContainerFormat *shader_container_format = nullptr;
 	String shader_container_driver;
 	Vector<Ref<ShaderBakerExportPluginPlatform>> platforms;

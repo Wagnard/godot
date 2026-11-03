@@ -66,6 +66,8 @@ class RenderForwardClusteredPT : public RenderForwardClustered {
 	RendererRD::FiniteLayer *finite_layer = nullptr;
 	// DLSS-RR's guides where the raster pass drew a pathtracing_rasterized card.
 	RendererRD::PTRasterizedGuides *rasterized_guides = nullptr;
+	// The last frame traced the specular motion vectors (RT_FLAG_DLSS_RR_SPECULAR_MOTION_VECTORS), for their debug view.
+	bool rr_specular_motion_vectors_traced = false;
 	// PT_DENOISER_NRD_REBLUR's denoiser, made at its first use where the engine was built with NRD.
 	RendererRD::NRDDenoiser *nrd_denoiser = nullptr;
 	void _warn_non_finite_layer(const RenderDataRD *p_render_data, const RendererRD::FiniteLayer::Report &p_report, uint32_t p_from, uint32_t p_to);

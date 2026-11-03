@@ -48,9 +48,15 @@ class PTRasterizedGuides {
 		int32_t pad[2];
 	};
 
+	enum Mode {
+		MODE_DEFAULT,
+		MODE_SPECULAR_MOTION_VECTORS, // rendering/pathtracing/specular_motion_vectors.
+		MODE_MAX
+	};
+
 	PtRasterizedGuidesShaderRD shader;
 	RID shader_version;
-	RID pipeline;
+	RID pipelines[MODE_MAX];
 
 public:
 	struct Guides {
@@ -59,6 +65,9 @@ public:
 		RID normal_roughness;
 		RID specular_hit_dist;
 		RID depth;
+		// Valid together: the cards' specular motion vectors are their own motion, read from the velocity.
+		RID velocity;
+		RID specular_motion_vectors;
 	};
 
 	/// Writes p_guides where the material pass drew a card (p_albedo's alpha) whose view depth (p_view_depth) is the scene

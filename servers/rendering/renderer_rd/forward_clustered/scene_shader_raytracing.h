@@ -86,6 +86,10 @@ public:
 		// The device has opacity micromaps: rays and ray queries are allowed to meet them (RT_OPACITY_MICROMAPS). A flag,
 		// not a define of every program, so the shader baker bakes both (an editor's device is not the player's).
 		RT_FLAG_OPACITY_MICROMAPS = (1 << 5),
+		// With RT_FLAG_DLSS_RR_ENABLED only: the raygen writes Ray Reconstruction's specular motion vectors
+		// (rendering/pathtracing/specular_motion_vectors, DLSS_RR_SPECULAR_MOTION_VECTORS). A project setting, as
+		// RT_FLAG_RAY_QUERY_SHADOWS_ENABLED: off, the other variants keep their code unchanged.
+		RT_FLAG_DLSS_RR_SPECULAR_MOTION_VECTORS = (1 << 6),
 	};
 
 	// RT pipeline limits (must match GLSL payload/hit attribute struct sizes).
@@ -621,12 +625,13 @@ public:
 		LocalVector<RD::ShaderStage> stages; // In the order the run time compiles them.
 		Vector<String> sources; // Parallel to stages.
 	};
-	// The variants' base programs and hit group 0's opacity micromap bake. p_simple_shadows and p_ser: the project's
-	// rendering/pathtracing/use_simple_shadows and use_shader_execution_reordering.
-	void get_bake_programs(bool p_simple_shadows, bool p_ser, LocalVector<BakeProgram> &r_programs);
+	// The variants' base programs and hit group 0's opacity micromap bake. p_simple_shadows, p_ser and
+	// p_specular_motion_vectors: the project's rendering/pathtracing/use_simple_shadows, use_shader_execution_reordering
+	// and specular_motion_vectors.
+	void get_bake_programs(bool p_simple_shadows, bool p_ser, bool p_specular_motion_vectors, LocalVector<BakeProgram> &r_programs);
 	// p_material's hit group in every such variant, and its displacement and opacity micromap bake programs; nothing for a
 	// material path traced by hit group 0.
-	void get_material_bake_programs(RID p_material, bool p_simple_shadows, bool p_ser, LocalVector<BakeProgram> &r_programs);
+	void get_material_bake_programs(RID p_material, bool p_simple_shadows, bool p_ser, bool p_specular_motion_vectors, LocalVector<BakeProgram> &r_programs);
 	static String get_binary_cache_file_name(const String &p_key, const String &p_api);
 	static Vector<uint8_t> make_binary_cache_file(const Vector<uint8_t> &p_binary);
 	// Null when the path tracer's shaders were never initialized (no Forward+ renderer).

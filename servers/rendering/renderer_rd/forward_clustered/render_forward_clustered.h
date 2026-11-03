@@ -1499,6 +1499,8 @@ protected:
 		RID specular_albedo;
 		RID normal_roughness;
 		RID specular_hit_dist;
+		// rendering/pathtracing/specular_motion_vectors: RR takes them instead of specular_hit_dist.
+		RID specular_motion_vectors;
 		RID color_before_transparency;
 		// The unshaded transparent effects, drawn apart for RR to upscale without denoising (DLSS-RR Integration Guide, 3.4.10).
 		RID transparency_layer;
