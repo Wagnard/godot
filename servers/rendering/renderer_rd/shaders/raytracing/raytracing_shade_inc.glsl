@@ -576,6 +576,97 @@ bool debug_reflection_view(int p_mode, inout PathState ps, HitRecord r, bool p_m
 	}
 	return false;
 }
+
+/// Whether a camera ray sees the triangle p_primitive of the geometry p_geometry_idx that a shadow ray met p_t along
+/// p_direction: an instance the camera rays see, of the same triangles (the shadow rays' own copies, for double-sided
+/// casters and transparent shadows, have their own records over the same vertices), at that distance. NVIDIA's test
+/// (49a825dc52 raytracing_closest_hit_common_inc.glsl:319-327) compared the geometry index, which those copies change.
+bool debug_camera_sees(uint p_geometry_idx, uint p_primitive, vec3 p_origin, vec3 p_direction, float p_t) {
+	const uint64_t vertices = geometries[p_geometry_idx].vertex_address;
+	rayQueryEXT rq;
+	rayQueryInitializeEXT(rq, tlas, gl_RayFlagsNoOpaqueEXT, RT_MASK_CAMERA | RT_MASK_SECONDARY, p_origin, max(p_t - 0.01, 0.0), p_direction, p_t + 0.01);
+	while (rayQueryProceedEXT(rq)) {
+		if (rayQueryGetIntersectionTypeEXT(rq, false) == gl_RayQueryCandidateIntersectionTriangleEXT &&
+				rayQueryGetIntersectionPrimitiveIndexEXT(rq, false) == p_primitive &&
+				geometries[rayQueryGetIntersectionInstanceCustomIndexEXT(rq, false)].vertex_address == vertices) {
+			rayQueryConfirmIntersectionEXT(rq);
+		}
+	}
+	return rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionNoneEXT;
+}
+
+/// View 27 (NVIDIA's, 49a825dc52 raytracing_closest_hit_common_inc.glsl:329-379): from the primary hit toward the first
+/// directional light, against the shadow casters as the shadow rays see them (faces turned to the light culled, cut-outs
+/// alpha tested; procedural geometry, which only its hit group can intersect, left out). White: the light is visible.
+/// Yellow: only transparent casters (rendering/pathtracing/transparent_shadows) in the way, darker with less light through.
+/// Red: an opaque caster the camera rays do not see blocks it. Blue: one they see. Darker: farther. Dark gray: the surface
+/// faces away from the light. Magenta: no directional light.
+vec3 debug_directional_shadow_blocker(vec3 p_hit_pos, vec3 p_geometry_normal) {
+	const uint light_count = uint(get_rt_param(RT_PARAM_LIGHT_COUNT));
+	int sun = -1;
+	for (uint i = 0u; i < light_count; i++) {
+		if (rt_lights[i].type == RT_LIGHT_TYPE_DIRECTIONAL) {
+			sun = int(i);
+			break;
+		}
+	}
+	if (sun < 0) {
+		return vec3(1.0, 0.0, 1.0);
+	}
+	const vec3 to_sun = -normalize(rt_lights[sun].position);
+	if (dot(p_geometry_normal, to_sun) <= 0.0) {
+		return vec3(0.1);
+	}
+
+	const vec3 origin = offset_ray_origin(p_hit_pos, p_geometry_normal);
+	vec3 transmittance = vec3(1.0);
+	rayQueryEXT rq;
+	rayQueryInitializeEXT(rq, tlas, RT_SHADOW_RAY_FLAGS, RT_MASK_SHADOW, origin, 0.001, to_sun, 10000.0);
+	while (rayQueryProceedEXT(rq)) {
+		if (rayQueryGetIntersectionTypeEXT(rq, false) != gl_RayQueryCandidateIntersectionTriangleEXT) {
+			continue;
+		}
+		const uint geometry_idx = rayQueryGetIntersectionInstanceCustomIndexEXT(rq, false);
+		const uint primitive_id = rayQueryGetIntersectionPrimitiveIndexEXT(rq, false);
+		const vec2 bary = rayQueryGetIntersectionBarycentricsEXT(rq, false);
+#ifdef RT_TRANSPARENT_SHADOWS
+		if ((geometries[geometry_idx].flags & FLAG_TRANSPARENT_SHADOW) != 0u) {
+			// Every transparent caster on the way filters the light (shadow_transmittance_filter()), none ends the query.
+			const vec4 color = ray_query_shadow_color(geometry_idx, primitive_id, bary);
+			shadow_transmittance_filter(transmittance, color.rgb, color.a);
+			continue;
+		}
+#endif
+		if (ray_query_alpha_test(geometry_idx, primitive_id, bary)) {
+			rayQueryConfirmIntersectionEXT(rq);
+		}
+	}
+
+	if (rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionNoneEXT) {
+		return transmittance == vec3(1.0) ? vec3(1.0) : vec3(1.0, 1.0, 0.0) * luminance(transmittance);
+	}
+	const float t = rayQueryGetIntersectionTEXT(rq, true);
+	const uint blocker = rayQueryGetIntersectionInstanceCustomIndexEXT(rq, true);
+	const uint blocker_primitive = rayQueryGetIntersectionPrimitiveIndexEXT(rq, true);
+	const float brightness = clamp(1.0 - log2(1.0 + t) / 8.0, 0.25, 1.0);
+	const vec3 color = debug_camera_sees(blocker, blocker_primitive, origin, to_sun, t) ? vec3(0.0, 0.3, 1.0) : vec3(1.0, 0.0, 0.0);
+	return color * brightness;
+}
+
+/// View 27 at the camera ray's hit; its miss shows the sky. False when the view's color is final.
+bool debug_shadow_blocker_view(inout PathState ps, HitRecord r, bool p_missed, inout vec3 ray_origin, vec3 ray_dir) {
+	if (p_missed) {
+		ps.radiance = r.emissive;
+		return false;
+	}
+	const vec3 hit_pos = ray_origin + ray_dir * r.hit_t;
+	if ((r.flags & HIT_FLAG_PASS_THROUGH) != 0u) {
+		ray_origin = offset_ray_origin(hit_pos, ray_dir);
+		return true;
+	}
+	ps.radiance = debug_directional_shadow_blocker(hit_pos, r.geometry_normal);
+	return false;
+}
 #endif // RT_DEBUG_ENABLED
 
 // ============================================================================
@@ -623,6 +714,9 @@ bool trace_path_ray(inout PathState ps, inout vec3 ray_origin, inout vec3 ray_di
 		const int vis_mode = int(get_rt_param(RT_PARAM_VIS_MODE));
 		if (vis_mode == 1 || vis_mode == 13) {
 			return debug_reflection_view(vis_mode, ps, r, missed, ray_origin, ray_dir);
+		}
+		if (vis_mode == RT_VIS_DIRECTIONAL_SHADOW_BLOCKER) {
+			return debug_shadow_blocker_view(ps, r, missed, ray_origin, ray_dir);
 		}
 	}
 #endif

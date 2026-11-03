@@ -21,9 +21,17 @@ layout(push_constant, std430) uniform Params {
 	float inv_length;
 	float detail_spread;
 	uint legacy_blending;
-	uint pad[3];
+	uint pad[3]; // MODE_DEBUG: pad[0] is the debug view.
 }
 params;
+
+#ifdef MODE_DEBUG
+// Environment.RT_DEBUG_VOLUMETRIC_FOG (25) and RT_DEBUG_VOLUMETRIC_FOG_TRANSMITTANCE (26): the fog this pass applies, or its
+// transmittance, instead of the color; 1: either of them where no volumetric fog is bound (magenta).
+#define DEBUG_FOG 25u
+#define DEBUG_FOG_TRANSMITTANCE 26u
+#define DEBUG_NO_FOG 1u
+#endif
 
 void main() {
 	ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
@@ -35,11 +43,21 @@ void main() {
 	if (depth == 0.0) {
 		return;
 	}
+#ifdef MODE_DEBUG
+	if (params.pad[0] == DEBUG_NO_FOG) {
+		imageStore(color_image, pixel, vec4(1.0, 0.0, 1.0, 1.0));
+		return;
+	}
+#endif
 
 	vec2 uv = (vec2(pixel) + 0.5) / vec2(params.size);
 	vec4 view = params.inv_projection * vec4(uv * 2.0 - 1.0, depth, 1.0);
 	vec3 fog_pos = vec3(uv, -view.z / view.w * params.inv_length);
 	if (fog_pos.z < 0.0) {
+#ifdef MODE_DEBUG
+		// Nearer than the froxels: no fog.
+		imageStore(color_image, pixel, vec4(vec3(params.pad[0] == DEBUG_FOG_TRANSMITTANCE ? 1.0 : 0.0), 1.0));
+#endif
 		return;
 	} else if (fog_pos.z < 1.0) {
 		fog_pos.z = pow(fog_pos.z, params.detail_spread);
@@ -51,6 +69,10 @@ void main() {
 	}
 
 	vec4 color = imageLoad(color_image, pixel);
+#ifdef MODE_DEBUG
+	color.rgb = params.pad[0] == DEBUG_FOG_TRANSMITTANCE ? vec3(fog.a) : fog.rgb;
+#else
 	color.rgb = color.rgb * fog.a + fog.rgb;
+#endif
 	imageStore(color_image, pixel, color);
 }

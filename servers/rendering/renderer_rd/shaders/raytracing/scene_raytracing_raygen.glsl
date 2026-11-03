@@ -24,6 +24,20 @@
 #ifdef USE_SER
 #extension GL_EXT_shader_invocation_reorder : enable
 #endif
+#ifdef RT_TIMING_ENABLED
+// Environment.RT_DEBUG_TIMING_HEATMAP (NVIDIA's, 49a825dc52 scene_raytracing_raygen.glsl:9-22), on Vulkan with the device
+// clock (VK_KHR_shader_clock shaderDeviceClock) only, DXIL having no shader clock: the device clock ticks each pixel's
+// raygen took, overlaid after tone mapping (RenderForwardClusteredPT::_render_scene(), copy_to_fb.glsl MODE_TIMING_HEATMAP).
+#extension GL_EXT_shader_realtime_clock : require
+layout(set = 0, binding = 46, r32f) uniform writeonly image2D timing_image;
+
+void store_path_timing(ivec2 p_pixel, uvec2 p_start_clock) {
+	const uvec2 end_clock = clockRealtime2x32EXT();
+	// Subtracted before the conversion to float, with the low word's borrow.
+	const uvec2 elapsed = uvec2(end_clock.x - p_start_clock.x, end_clock.y - p_start_clock.y - uint(end_clock.x < p_start_clock.x));
+	imageStore(timing_image, p_pixel, vec4(float(elapsed.y) * 4294967296.0 + float(elapsed.x)));
+}
+#endif
 
 #define GLSL 1
 #define RT_STAGE_RAYGEN 1
@@ -170,11 +184,65 @@ void trace_probe_ray() {
 	probe_data[at + 1u] = vec4(direction, 0.0);
 }
 
+#ifdef RT_DEBUG_ENABLED
+/// View 23: what transparency costs the camera ray, as NVIDIA's heatmap draws its peeled layers (49a825dc52
+/// scene_raytracing_raygen.glsl:406-413), green (none) to yellow (2) to red (4 or more): its pass-through hits (points a
+/// material's vertex() removed) and the front layer surface (the first transparent surface before the opaque one, whose
+/// reflection is traced). The raster transparent pass draws the transparent surfaces.
+void debug_transparency_layers(uvec2 p_pixel, vec3 p_origin, vec3 p_direction) {
+	float layers = 0.0;
+	float opaque_t = 10000.0;
+	vec3 ray_origin = p_origin;
+	for (uint i = 0u; i < 16u; i++) {
+		// As the camera ray of sample 0: its hit writes the primary depth, motion and guides.
+		payload.packed_bounces_flags = set_sample_zero(0u);
+		payload.hit_t = 0.0;
+		traceRayEXT(tlas, RT_RAY_FLAGS, RT_MASK_CAMERA, 0, 0, 0, ray_origin, 0.001, p_direction, 10000.0, 0);
+		if (is_path_terminated(payload.packed_bounces_flags)) {
+			break;
+		}
+		const HitRecord r = hit_unpack(payload);
+		const vec3 hit_pos = ray_origin + p_direction * r.hit_t;
+		if ((r.flags & HIT_FLAG_PASS_THROUGH) == 0u) {
+			opaque_t = distance(p_origin, hit_pos);
+			break;
+		}
+		layers += 1.0;
+		ray_origin = offset_ray_origin(hit_pos, p_direction);
+	}
+	if (get_rt_param(RT_PARAM_FRONT_LAYER_COUNT) > 0.0) {
+		payload.packed_bounces_flags = set_front_layer_ray(0u);
+		payload.hit_t = opaque_t;
+		traceRayEXT(tlas, RT_RAY_FLAGS, RT_MASK_FRONT_LAYER, 0, 0, 0, p_origin, 0.001, p_direction, max(opaque_t, 0.001), 0);
+		if (!is_path_terminated(payload.packed_bounces_flags) && (hit_unpack(payload).flags & HIT_FLAG_PASS_THROUGH) == 0u) {
+			layers += 1.0;
+		}
+	}
+	const float heat_x = clamp(layers * 0.25, 0.0, 1.0);
+	const vec3 heat = heat_x < 0.5 ? mix(vec3(0.0, 1.0, 0.0), vec3(1.0, 1.0, 0.0), heat_x * 2.0) : mix(vec3(1.0, 1.0, 0.0), vec3(1.0, 0.0, 0.0), heat_x * 2.0 - 1.0);
+	const ivec2 pixel = ivec2(p_pixel);
+	imageStore(image, pixel, vec4(heat, 1.0));
+	imageStore(front_layer_image, pixel, vec4(0.0));
+#ifdef NRD_ENABLED
+	// Nothing for NRD to add back (raytracing_nrd_composite.glsl).
+	imageStore(nrd_diffuse_image, pixel, vec4(0.0));
+	imageStore(nrd_specular_image, pixel, vec4(0.0));
+	imageStore(nrd_view_z_image, pixel, vec4(NRD_SKY_VIEW_Z));
+#endif
+#ifdef DLSS_RR_ENABLED
+	imageStore(dlss_rr_depth, pixel, imageLoad(rt_depth_image, pixel));
+#endif
+}
+#endif // RT_DEBUG_ENABLED
+
 void main() {
 	if (gl_LaunchSizeEXT.z == 2u) {
 		trace_probe_ray();
 		return;
 	}
+#ifdef RT_TIMING_ENABLED
+	const uvec2 start_clock = clockRealtime2x32EXT();
+#endif
 
 	uvec2 pixel = gl_LaunchIDEXT.xy;
 	const vec2 pixel_center = vec2(pixel) + vec2(0.5);
@@ -189,6 +257,12 @@ void main() {
 	vec4 target = scene_data_block.data.inv_projection_matrix * vec4(d.x, d.y, 1.0, 1.0);
 	vec4 origin = inv_view * vec4(0.0, 0.0, 0.0, 1.0);
 	vec4 direction = inv_view * vec4(normalize(target.xyz), 0);
+#ifdef RT_DEBUG_ENABLED
+	if (int(get_rt_param(RT_PARAM_VIS_MODE)) == RT_VIS_TRANSPARENCY_LAYERS) {
+		debug_transparency_layers(pixel, origin.xyz, direction.xyz);
+		return;
+	}
+#endif
 
 	// Sample count from specialization constant, frame index from uniform
 	const uint samples_per_pixel = RT_GET_SAMPLE_COUNT();
@@ -403,6 +477,9 @@ void main() {
 	imageStore(front_layer_image, ivec2(pixel), front_layer);
 #ifdef DLSS_RR_ENABLED
 	imageStore(dlss_rr_depth, ivec2(pixel), vec4(rr_depth));
+#endif
+#ifdef RT_TIMING_ENABLED
+	store_path_timing(ivec2(pixel), start_clock);
 #endif
 }
 
@@ -742,7 +819,8 @@ void main() {
 #ifdef RT_DEBUG_ENABLED
 	{
 		int VIS_MODE = int(get_rt_param(RT_PARAM_VIS_MODE));
-		if (VIS_MODE != 0 && VIS_MODE != 1 && VIS_MODE != 13) { // 1 and 13: the material, for the raygen's reflection views.
+		// 1, 13, 23 and 27: the material, for the views the raygen draws.
+		if (VIS_MODE != 0 && VIS_MODE != 1 && VIS_MODE != 13 && VIS_MODE != RT_VIS_TRANSPARENCY_LAYERS && VIS_MODE != RT_VIS_DIRECTIONAL_SHADOW_BLOCKER) {
 			vec3 V = -gl_WorldRayDirectionEXT;
 			float NdotV = max(dot(m.normal, V), 0.0001);
 			vec3 orm = vec3(1.0, m.roughness, m.metalness);
@@ -901,7 +979,8 @@ void main() {
 #ifdef RT_DEBUG_ENABLED
 	{
 		int VIS_MODE = int(get_rt_param(RT_PARAM_VIS_MODE));
-		if (VIS_MODE != 0 && VIS_MODE != 1 && VIS_MODE != 13) { // 1 and 13: the material, for the raygen's reflection views.
+		// 1, 13, 23 and 27: the material, for the views the raygen draws.
+		if (VIS_MODE != 0 && VIS_MODE != 1 && VIS_MODE != 13 && VIS_MODE != RT_VIS_TRANSPARENCY_LAYERS && VIS_MODE != RT_VIS_DIRECTIONAL_SHADOW_BLOCKER) {
 			vec3 V = -gl_WorldRayDirectionEXT;
 			float NdotV = max(dot(m.normal, V), 0.0001);
 			debug_visualize(VIS_MODE, h.geometry_normal, m.normal, tangent_space_normal,

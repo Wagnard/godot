@@ -71,7 +71,7 @@ struct GeometryData {
 	// A merged BLAS's first instance in the buffer's previous transforms (motion vectors); multimesh_offset when its instances
 	// did not move, and for one instance, whose motion is the TLAS instance's.
 	uint multimesh_previous_offset;
-	uint multimesh_pad0;
+	uint multimesh_pad0; // RT_GeometryData::debug_state: Environment.RT_DEBUG_DYNAMIC_GEOMETRY's state, 0 otherwise.
 	uint multimesh_pad1;
 	uint multimesh_pad2;
 };

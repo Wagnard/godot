@@ -67,7 +67,7 @@
 			If a material is assigned to this property, it will be used instead of any material set in any material slot of the mesh.
 		</member>
 		<member name="rt_blas_update" type="int" setter="set_rt_blas_update" getter="get_rt_blas_update" enum="GeometryInstance3D.RTBlasUpdate" default="0">
-			How the path tracer updates the bottom-level acceleration structure of this instance's dynamic geometry (vertex-captured surfaces, camera-facing MultiMeshes and GPU particles) after its first build. [constant RT_BLAS_UPDATE_AUTO] follows the shader's [code]rt_blas[/code] render mode. Changes of structure, such as a new instance count, always rebuild.
+			How the path tracer updates the bottom-level acceleration structure of this instance's dynamic geometry (skinned and blend shape meshes, surfaces moved by their material's [code]vertex()[/code] function, and [MultiMesh]es merged into one structure: those displaced by their material near the camera, or all of them on a device whose top-level instances the GPU cannot write) after its first build. [constant RT_BLAS_UPDATE_AUTO] follows the shader's [code]rt_blas[/code] render mode. Changes of structure, such as a new instance count, another mesh or level of detail, and the changes a refit cannot follow (a material's [code]vertex()[/code] turning points on or off), always rebuild, and so does every update while [member ProjectSettings.rendering/pathtracing/displaced_refit] is off. Static meshes and the other [MultiMesh]es (one top-level instance per instance, sharing their mesh's structure) are never updated, so this has no effect on them.
 		</member>
 		<member name="shadow_renderers" type="int" setter="set_shadow_renderers" getter="get_shadow_renderers" enum="RenderingServer.ShadowRenderer" is_bitfield="true" default="3">
 			The renderers that draw this geometry's shadow while [member cast_shadow] is not [constant SHADOW_CASTING_SETTING_OFF]. Unticking [b]Rasterizer[/b] keeps the geometry out of shadow maps. Unticking [b]Path Tracer[/b] keeps it out of the path tracer's shadow rays. [constant SHADOW_CASTING_SETTING_SHADOWS_ONLY] still hides the geometry from the camera in both renderers.
@@ -116,13 +116,13 @@
 			The path tracer casts this object's shadows only onto objects that also use [constant SHADOW_CASTING_SETTING_SELF_SHADOWING], such as the parts of a first-person weapon and arms. The object still receives shadows from everything, and still appears in reflections and indirect lighting. The rasterizer casts no shadows from it, like [constant SHADOW_CASTING_SETTING_OFF].
 		</constant>
 		<constant name="RT_BLAS_UPDATE_AUTO" value="0" enum="RTBlasUpdate">
-			Follows the shader's [code]rt_blas[/code] render mode; refits with a periodic rebuild (see [member ProjectSettings.rendering/pathtracing/dynamic_rebuild_interval_frames]) when the shader doesn't set one.
+			Follows the shader's [code]rt_blas[/code] render mode. When the shader doesn't set one, each kind of geometry keeps the path tracer's own choice: skinned and blend shape meshes and merged [MultiMesh]es refit; surfaces moved by their material's [code]vertex()[/code] function refit with a rebuild every 60 refits.
 		</constant>
 		<constant name="RT_BLAS_UPDATE_REFIT" value="1" enum="RTBlasUpdate">
 			Only refits, never rebuilds periodically. Cheapest; suited to geometry that sways around its rest pose, such as foliage in the wind.
 		</constant>
 		<constant name="RT_BLAS_UPDATE_REBUILD" value="2" enum="RTBlasUpdate">
-			Only rebuilds, never refits. Suited to geometry whose primitives move far apart, such as particles, where refits degrade tracing performance quickly. Updates are held while the [member ProjectSettings.rendering/pathtracing/dynamic_blas_build_triangle_budget] is spent.
+			Only rebuilds, never refits. Suited to geometry whose primitives move far apart, where refits degrade tracing performance quickly. Out of view and far, updates still wait for their turn (see [member ProjectSettings.rendering/pathtracing/out_of_view_update_distance] and [member ProjectSettings.rendering/pathtracing/displacement_update_distance]).
 		</constant>
 		<constant name="GI_MODE_DISABLED" value="0" enum="GIMode">
 			Disabled global illumination mode. Use for dynamic objects that do not contribute to global illumination (such as characters). When using [VoxelGI] and SDFGI, the geometry will [i]receive[/i] indirect lighting and reflections but the geometry will not be considered in GI baking.

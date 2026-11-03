@@ -47,6 +47,7 @@
 #include "servers/rendering/renderer_rd/forward_clustered/rt_alpha_dependencies.h"
 #include "servers/rendering/renderer_rd/renderer_compositor_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
+#include "servers/rendering/rendering_server.h"
 #include "servers/rendering/rendering_server_globals.h"
 #include "servers/rendering/storage/environment_storage.h"
 
@@ -1293,7 +1294,15 @@ uint32_t SceneShaderRaytracing::compute_rt_flags(RID p_environment) {
 	if (p_environment.is_valid()) {
 		RendererEnvironmentStorage *env_storage = RendererEnvironmentStorage::get_singleton();
 
-		if (env_storage->environment_get_pathtracing_debug_mode(p_environment) != 0) {
+		const int debug_mode = env_storage->environment_get_pathtracing_debug_mode(p_environment);
+		if (debug_mode == RS::PT_DEBUG_TIMING_HEATMAP) {
+			// Normal path tracing, timed (NVIDIA's compute_rt_flags(), 49a825dc52 scene_shader_raytracing.cpp:719-725).
+			if (RD::get_singleton()->has_feature(RD::SUPPORTS_SHADER_DEVICE_CLOCK)) {
+				flags |= RT_FLAG_TIMING_ENABLED;
+			} else {
+				WARN_PRINT_ONCE("The path tracing timing heatmap needs a shader device clock (Vulkan's VK_KHR_shader_clock shaderDeviceClock; D3D12 has none). Rendering normal path tracing.");
+			}
+		} else if (debug_mode != 0) {
 			flags |= RT_FLAG_DEBUG_VIS_ENABLED;
 		}
 
@@ -1484,6 +1493,9 @@ bool SceneShaderRaytracing::_build_variant_compile_context(uint32_t p_rt_flags, 
 
 	if (p_rt_flags & RT_FLAG_DEBUG_VIS_ENABLED) {
 		inject_define(sources, "#define RT_DEBUG_ENABLED\n");
+	}
+	if (p_rt_flags & RT_FLAG_TIMING_ENABLED) {
+		inject_define(sources, "#define RT_TIMING_ENABLED\n");
 	}
 
 	// Procedural templates come from intersection stage; strip from base HG0 path.

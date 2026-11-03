@@ -5715,43 +5715,43 @@
 			Total triangles processed by BLAS refits this frame (ray tracing only).
 		</constant>
 		<constant name="VIEWPORT_RENDER_INFO_RT_DYNAMIC_REBAKES" value="8" enum="ViewportRenderInfo">
-			Number of camera-dependent or animated entries (billboards, particles) whose ray tracing vertices were regenerated this frame (ray tracing only).
+			Number of entries whose ray tracing vertices were regenerated this frame (ray tracing only): the merged [MultiMesh]es (traced as one bottom-level acceleration structure holding all their instances) whose instances changed or that were built for the first time. Billboards turn with their top-level acceleration structure instance and are not counted.
 		</constant>
 		<constant name="VIEWPORT_RENDER_INFO_RT_DYNAMIC_REBAKE_VERTICES" value="9" enum="ViewportRenderInfo">
 			Total vertices written by [constant VIEWPORT_RENDER_INFO_RT_DYNAMIC_REBAKES] this frame (ray tracing only).
 		</constant>
 		<constant name="VIEWPORT_RENDER_INFO_RT_CAPTURED_MESHES" value="10" enum="ViewportRenderInfo">
-			Number of meshes whose vertex shader output was captured for ray tracing this frame (ray tracing only). Meshes keeping an earlier capture aren't counted.
+			Number of surfaces and merged [MultiMesh]es whose material's [code]vertex()[/code] function was evaluated for ray tracing this frame, because it moves their vertices (ray tracing only). Those keeping an earlier evaluation (unchanged, or far out of view and waiting for their turn, see [constant VIEWPORT_RENDER_INFO_RT_DYNAMIC_HELD]) aren't counted.
 		</constant>
 		<constant name="VIEWPORT_RENDER_INFO_RT_CAPTURED_VERTICES" value="11" enum="ViewportRenderInfo">
 			Total vertices written by [constant VIEWPORT_RENDER_INFO_RT_CAPTURED_MESHES] this frame (ray tracing only).
 		</constant>
 		<constant name="VIEWPORT_RENDER_INFO_RT_DYNAMIC_UPDATED" value="12" enum="ViewportRenderInfo">
-			Number of dynamic ray tracing entries whose BLAS was built or refit this frame (ray tracing only).
+			Number of dynamic ray tracing entries (skinned and blend shape meshes, surfaces moved by their material's [code]vertex()[/code] function, merged [MultiMesh]es) whose BLAS was built or refit this frame (ray tracing only).
 		</constant>
 		<constant name="VIEWPORT_RENDER_INFO_RT_DYNAMIC_HELD" value="13" enum="ViewportRenderInfo">
-			Number of dynamic ray tracing entries that kept last frame's BLAS because they are barely visible (ray tracing only).
+			Number of dynamic ray tracing entries that kept the BLAS of their last update this frame because they are out of view and far, waiting for their turn (ray tracing only). See [member ProjectSettings.rendering/pathtracing/out_of_view_update_distance] and [member ProjectSettings.rendering/pathtracing/displacement_update_distance].
 		</constant>
 		<constant name="VIEWPORT_RENDER_INFO_RT_DYNAMIC_BUDGET_LIMITED" value="14" enum="ViewportRenderInfo">
-			Number of dynamic ray tracing entries whose BLAS update was deferred by the per-frame budgets (ray tracing only).
+			Number of dynamic ray tracing entries whose BLAS update was deferred by the per-frame budgets (ray tracing only): the merged [MultiMesh]es kept at the level of detail they are built with because [member ProjectSettings.rendering/pathtracing/multimesh_lod_switch_triangles_per_frame] is spent.
 		</constant>
 		<constant name="VIEWPORT_RENDER_INFO_RT_PENDING_SURFACES" value="15" enum="ViewportRenderInfo">
-			Number of surfaces left out of the ray tracing scene this frame because their hit shaders are still compiling (ray tracing only). Zero once every visible material is ready.
+			Number of surfaces whose hit shaders are still compiling this frame (ray tracing only): left out of the ray tracing scene, or traced with a stand-in material until then. Zero once every visible material is ready.
 		</constant>
 		<constant name="VIEWPORT_RENDER_INFO_RT_SCRATCH_USED_KB" value="16" enum="ViewportRenderInfo">
-			Most scratch memory, in kilobytes, that this frame's acceleration structure builds used at once (ray tracing only).
+			Scratch memory, in kilobytes, that this frame's bottom-level acceleration structure and opacity micromap builds used, all at once (ray tracing only). Each build takes a range of its own, freed when the GPU finished the frame. Top-level acceleration structures keep a scratch buffer of their own, not counted.
 		</constant>
 		<constant name="VIEWPORT_RENDER_INFO_RT_SCRATCH_SIZE_KB" value="17" enum="ViewportRenderInfo">
-			Size, in kilobytes, of the scratch buffer shared by acceleration structure builds (ray tracing only). It grows up to [member ProjectSettings.rendering/rendering_device/acceleration_structure/max_scratch_buffer_size_mb].
+			Size, in kilobytes, of the scratch memory the current frame's builds take their ranges from (ray tracing only). It grows by a new buffer whenever the builds need more, and shrinks when it stays mostly unused; [member ProjectSettings.rendering/rendering_device/acceleration_structure/max_scratch_buffer_size_mb] does not limit it.
 		</constant>
 		<constant name="VIEWPORT_RENDER_INFO_RT_SCRATCH_ROLLOVERS" value="18" enum="ViewportRenderInfo">
-			Number of barriers this frame's acceleration structure builds needed because the scratch buffer was full at its maximum size (ray tracing only). Raise [member ProjectSettings.rendering/rendering_device/acceleration_structure/max_scratch_buffer_size_mb] if this is often above zero.
+			Number of barriers this frame's acceleration structure builds needed because the scratch memory was full (ray tracing only). Always zero: the path tracer's builds never reuse scratch memory within a frame (see [constant VIEWPORT_RENDER_INFO_RT_SCRATCH_SIZE_KB]).
 		</constant>
 		<constant name="VIEWPORT_RENDER_INFO_RT_CAPTURE_ARENA_USED_KB" value="19" enum="ViewportRenderInfo">
-			Memory, in kilobytes, taken by this frame's vertex captures in the capture arena (ray tracing only).
+			Memory, in kilobytes, written this frame by the evaluations of [constant VIEWPORT_RENDER_INFO_RT_CAPTURED_MESHES] in the surfaces' displaced vertex buffers (ray tracing only). Merged [MultiMesh]es are displaced in their own merged buffers, not counted.
 		</constant>
 		<constant name="VIEWPORT_RENDER_INFO_RT_CAPTURE_ARENA_SIZE_KB" value="20" enum="ViewportRenderInfo">
-			Size, in kilobytes, of the vertex capture arena (ray tracing only).
+			Size, in kilobytes, of all the surfaces' displaced vertex buffers, which hold what their material's [code]vertex()[/code] function made of them (ray tracing only).
 		</constant>
 		<constant name="VIEWPORT_RENDER_INFO_MAX" value="21" enum="ViewportRenderInfo">
 			Represents the size of the [enum ViewportRenderInfo] enum.
@@ -6296,7 +6296,7 @@
 			The path tracer casts the object's shadows only onto objects that also use [constant SHADOW_CASTING_SETTING_SELF_SHADOWING]. The object still receives shadows from everything, and still appears in reflections and indirect lighting. The rasterizer casts no shadows from it, like [constant SHADOW_CASTING_SETTING_OFF].
 		</constant>
 		<constant name="RT_BLAS_UPDATE_AUTO" value="0" enum="RTBlasUpdate">
-			For instances, follows the shader's [code]rt_blas[/code] render mode. For shaders, refits with a periodic rebuild.
+			For instances, follows the shader's [code]rt_blas[/code] render mode. For shaders, the path tracer's own choice per kind of geometry: refits for skinned and blend shape meshes and merged [MultiMesh]es, refits with a periodic rebuild for surfaces moved by their material's [code]vertex()[/code] function.
 		</constant>
 		<constant name="RT_BLAS_UPDATE_REFIT" value="1" enum="RTBlasUpdate">
 			Only refits after the first build, never rebuilds periodically.
@@ -6560,13 +6560,13 @@
 			Rendering pipelines are compiling in the background. Until they finish, surfaces may be drawn with slower fallback pipelines.
 		</constant>
 		<constant name="RENDERING_NOT_READY_RT_SHADER_COMPILATION" value="2" enum="RenderingNotReadyReason" is_bitfield="true">
-			Path tracing hit shaders or pipelines are compiling in the background.
+			Path tracing hit shaders or pipelines are compiling in the background, or the programs that evaluate a material's [code]vertex()[/code] function or bake its cut-out for the path tracer (see [method pathtracing_get_pending_hit_group_count]).
 		</constant>
 		<constant name="RENDERING_NOT_READY_RT_PENDING_SURFACES" value="4" enum="RenderingNotReadyReason" is_bitfield="true">
-			The last frame did not path trace some surfaces because their hit shaders were not compiled yet.
+			The last frame did not path trace some surfaces with their own material, leaving them out or using a stand-in, because their hit shaders were not compiled yet (see [constant VIEWPORT_RENDER_INFO_RT_PENDING_SURFACES]).
 		</constant>
 		<constant name="RENDERING_NOT_READY_RT_STALE_GEOMETRY" value="8" enum="RenderingNotReadyReason" is_bitfield="true">
-			The last frame path traced some dynamic geometry (particles, billboards) at an older state because of the dynamic update budgets.
+			The last frame path traced some dynamic geometry at an older state: skinned, blend shape or displaced meshes and merged [MultiMesh]es out of view and far, waiting for their turn, or merged [MultiMesh]es kept at their level of detail by the per-frame budget (see [constant VIEWPORT_RENDER_INFO_RT_DYNAMIC_HELD] and [constant VIEWPORT_RENDER_INFO_RT_DYNAMIC_BUDGET_LIMITED]).
 		</constant>
 		<constant name="PIPELINE_SOURCE_CANVAS" value="0" enum="PipelineSource">
 			Pipeline compilation that was triggered by the 2D canvas renderer.

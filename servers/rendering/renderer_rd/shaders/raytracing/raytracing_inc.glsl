@@ -33,6 +33,11 @@
 #define RT_PARAM_LIGHT_COUNT 14 // rt_params[3].z - Number of active lights in light buffer
 #define RT_PARAM_FRAME_INDEX 15 // rt_params[3].w - Frame counter for temporal variation
 
+// RT_PARAM_VIS_MODE values (Environment.PathtracingDebugMode) of debug views the raygen draws: the closest hit returns the
+// material for them, as for 1 and 13 (debug_reflection_view()).
+#define RT_VIS_TRANSPARENCY_LAYERS 23
+#define RT_VIS_DIRECTIONAL_SHADOW_BLOCKER 27
+
 // ============================================================================
 // PATHTRACING PAYLOAD: the hit's material (48 bytes, fp16/unorm-packed; 40 with PT_PAYLOAD_COMPACT)
 // ============================================================================

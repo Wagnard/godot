@@ -30,6 +30,7 @@
 
 #include "render_forward_clustered_pt.h"
 
+#include "core/config/project_settings.h"
 #include "core/os/os.h"
 #include "core/templates/hash_set.h"
 #include "servers/rendering/renderer_rd/environment/fog.h"
@@ -883,6 +884,20 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 
 	_render_buffers_post_process_and_tonemap(p_render_data);
 
+	if ((rt_flags & SceneShaderRaytracing::RT_FLAG_TIMING_ENABLED) && raytracing->rt_timing_has_texture(rb.ptr())) {
+		// Environment.RT_DEBUG_TIMING_HEATMAP over the tone mapped image, as NVIDIA's (49a825dc52
+		// render_forward_clustered_pt.cpp:640-651): the denoiser, the exposure and their histories saw the path tracer's own
+		// output.
+		RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
+		const RID render_target = rb->get_render_target();
+		copy_effects->copy_timing_heatmap_to_fb(raytracing->rt_timing_get_texture(rb.ptr()),
+				texture_storage->render_target_get_rd_framebuffer(render_target),
+				Rect2i(Point2i(), texture_storage->render_target_get_size(render_target)),
+				GLOBAL_GET("rendering/pathtracing/debug_heatmap_max_ticks"),
+				GLOBAL_GET("rendering/pathtracing/debug_heatmap_opacity"),
+				texture_storage->render_target_is_using_hdr(render_target));
+	}
+
 	_render_buffers_debug_draw(p_render_data);
 }
 
@@ -1058,6 +1073,14 @@ void RenderForwardClusteredPT::update() {
 
 uint32_t RenderForwardClusteredPT::pathtracing_get_pending_hit_group_count() const {
 	return rt_pending_hit_groups.get();
+}
+
+BitField<RSE::RenderingNotReadyReason> RenderForwardClusteredPT::get_not_ready_reasons() {
+	BitField<RSE::RenderingNotReadyReason> reasons = RenderForwardClustered::get_not_ready_reasons();
+	if (raytracing) {
+		reasons.set_flag(raytracing->get_not_ready_reasons());
+	}
+	return reasons;
 }
 
 void RenderForwardClusteredPT::_age_out_motion_vectors(const RenderDataRD *p_render_data) {

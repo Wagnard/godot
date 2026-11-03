@@ -97,6 +97,10 @@ public:
 		// vertices the mode keeps (RT_PARAM_FLAG_DECALS_SINGULAR_ONLY picks which); All Hits keeps the other variants'
 		// code unchanged. A project setting too.
 		RT_FLAG_DECAL_MODE = (1 << 8),
+		// Environment.RT_DEBUG_TIMING_HEATMAP where the device has a shader clock (Vulkan's shaderDeviceClock): the raygen
+		// writes the clock ticks each pixel took (RT_TIMING_ENABLED, binding 46) over normal path tracing. As
+		// RT_FLAG_DEBUG_VIS_ENABLED, a define of its own variant, never baked.
+		RT_FLAG_TIMING_ENABLED = (1 << 9),
 	};
 
 	// rendering/pathtracing/decals: which path vertices receive decals.

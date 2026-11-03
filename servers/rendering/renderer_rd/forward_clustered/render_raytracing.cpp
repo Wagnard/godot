@@ -42,6 +42,7 @@
 #include "servers/rendering/renderer_rd/storage_rd/mesh_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
+#include "servers/rendering/rendering_server.h"
 #include "servers/rendering/rendering_server_globals.h"
 #include "servers/rendering/storage/environment_storage.h"
 
@@ -95,10 +96,13 @@ void RenderRaytracing::initialize(RenderForwardClustered *p_owner) {
 
 	Vector<String> fog_modes;
 	fog_modes.push_back("\n");
+	fog_modes.push_back("\n#define MODE_DEBUG\n"); // Environment.RT_DEBUG_VOLUMETRIC_FOG and RT_DEBUG_VOLUMETRIC_FOG_TRANSMITTANCE.
 	volumetric_fog_shader.shader.initialize(fog_modes);
 	volumetric_fog_shader.version = volumetric_fog_shader.shader.version_create();
 	volumetric_fog_shader.version_shader = volumetric_fog_shader.shader.version_get_shader(volumetric_fog_shader.version, 0);
 	volumetric_fog_shader.pipeline = RD::get_singleton()->compute_pipeline_create(volumetric_fog_shader.version_shader);
+	volumetric_fog_shader.debug_version_shader = volumetric_fog_shader.shader.version_get_shader(volumetric_fog_shader.version, 1);
+	volumetric_fog_shader.debug_pipeline = RD::get_singleton()->compute_pipeline_create(volumetric_fog_shader.debug_version_shader);
 
 	Vector<String> sky_guide_modes;
 	sky_guide_modes.push_back("\n");
@@ -292,6 +296,15 @@ void RenderRaytracing::rt_ensure_textures(RenderSceneBuffersRD *p_render_buffers
 	if (!p_render_buffers->has_texture(RB_SCOPE_RAYTRACING, RB_TEX_RT_FRONT_LAYER)) {
 		p_render_buffers->create_texture(RB_SCOPE_RAYTRACING, RB_TEX_RT_FRONT_LAYER, RD::DATA_FORMAT_R16G16B16A16_SFLOAT, usage_bits, RD::TEXTURE_SAMPLES_1);
 	}
+}
+
+bool RenderRaytracing::rt_timing_has_texture(RenderSceneBuffersRD *p_render_buffers) const {
+	return p_render_buffers && p_render_buffers->has_texture(RB_SCOPE_RT_TIMING, RB_TEX_RT_TIMING);
+}
+
+RID RenderRaytracing::rt_timing_get_texture(RenderSceneBuffersRD *p_render_buffers) const {
+	ERR_FAIL_NULL_V(p_render_buffers, RID());
+	return p_render_buffers->get_texture(RB_SCOPE_RT_TIMING, RB_TEX_RT_TIMING);
 }
 
 bool RenderRaytracing::rt_has_texture(RenderSceneBuffersRD *p_render_buffers) const {
@@ -597,6 +610,7 @@ void RenderRaytracing::cleanup_caches() {
 			if (e->displaced_vb.is_valid()) {
 				rd->free_rid(e->displaced_vb);
 				e->displaced_vb = RID();
+				displaced_vb_bytes -= e->displaced_vb_capacity;
 			}
 			deformed_pool.free(live[i]);
 		}
@@ -865,6 +879,7 @@ void RenderRaytracing::prepare_frame() {
 			if (e->displaced_vb.is_valid()) {
 				rd->free_rid(e->displaced_vb);
 				e->displaced_vb = RID();
+				displaced_vb_bytes -= e->displaced_vb_capacity;
 			}
 			deformed_pool.free(live[i]);
 		}
@@ -1217,9 +1232,11 @@ RTSurfaceData *RenderRaytracing::process_deformed_surface(
 				static_cast<uint32_t>(p_source.cache_key), entry.ptr, r_dirty_blas_list, entry.omm_micromap, entry.omm_level);
 		entry.blas_built_once = entry.ptr->blas.is_valid();
 		entry.built_omm_micromap = entry.omm_micromap;
+		render_info_counters.dynamic_updated++;
 	} else if (data_changed) {
 		cache_misses++;
-		if (p_source.force_rebuild) {
+		render_info_counters.dynamic_updated++;
+		if (p_source.force_rebuild || p_source.rebuild_only) {
 			r_dirty_blas_list.push_back(entry.ptr->blas);
 		} else {
 			r_dirty_blas_update_list.push_back(entry.ptr->blas);
@@ -1568,6 +1585,16 @@ bool RenderRaytracing::_front_layer_skipped(const void *p_surf) {
 			surf->shader->rt_depth_test() != SceneShaderForwardClustered::ShaderData::DEPTH_TEST_ENABLED;
 }
 
+// GeometryInstance3D.rt_blas_update, else the shader's rt_blas render mode. RT_BLAS_UPDATE_AUTO keeps each kind of deforming
+// geometry's own policy: refits for skinned and blend shape meshes and merged MultiMeshes, refits with a build every
+// DISPLACED_REBUILD_PERIOD refits for displaced surfaces.
+static RSE::RTBlasUpdate _rt_blas_update(const RenderGeometryInstanceBase *p_instance, const SceneShaderForwardClustered::ShaderData *p_shader) {
+	if (p_instance->rt_blas_update != RSE::RT_BLAS_UPDATE_AUTO) {
+		return p_instance->rt_blas_update;
+	}
+	return p_shader ? p_shader->rt_blas_update : RSE::RT_BLAS_UPDATE_AUTO;
+}
+
 // ---------------------------------------------------------------------------
 // Displacement by material vertex() code
 // ---------------------------------------------------------------------------
@@ -1702,11 +1729,14 @@ void RenderRaytracing::_displace_surfaces(const RenderDataRD *p_render_data) {
 			if (entry->displaced_vb_capacity < size) {
 				if (entry->displaced_vb.is_valid()) {
 					rd->free_rid(entry->displaced_vb);
+					displaced_vb_bytes -= entry->displaced_vb_capacity;
 				}
+				entry->displaced_vb_capacity = 0;
 				entry->displaced_vb = rd->storage_buffer_create(size, Vector<uint8_t>(), 0, RD::BUFFER_CREATION_DEVICE_ADDRESS_BIT);
 				ERR_CONTINUE(!entry->displaced_vb.is_valid());
 				rd->set_resource_name(entry->displaced_vb, "RT displaced VB");
 				entry->displaced_vb_capacity = size;
+				displaced_vb_bytes += size;
 				evaluate = true;
 				reshaped = true;
 			}
@@ -1716,8 +1746,11 @@ void RenderRaytracing::_displace_surfaces(const RenderDataRD *p_render_data) {
 			// and every DISPLACED_REBUILD_PERIOD refits built again, as the BVH of a refit keeps the topology of its build.
 			// The refit keeps the triangles' state (raytracing_displace.glsl); a vertex turning on or off sets the guard,
 			// which builds the BLAS again a frame later (DXR and Vulkan: an update cannot change a primitive's active
-			// state). rendering/pathtracing/displaced_refit off builds again every time.
-			const bool rebuild = !displaced_refit || refit_switched || reshaped || entry->displaced_guard_rebuild || entry->displaced_refits >= DISPLACED_REBUILD_PERIOD ||
+			// state). rendering/pathtracing/displaced_refit off builds again every time. GeometryInstance3D.rt_blas_update (or
+			// the shader's rt_blas render mode): REBUILD builds again every time, REFIT leaves out the periodic builds.
+			const RSE::RTBlasUpdate blas_update = _rt_blas_update(inst, surf->shader);
+			const bool periodic_rebuild = blas_update != RSE::RT_BLAS_UPDATE_REFIT && entry->displaced_refits >= DISPLACED_REBUILD_PERIOD;
+			const bool rebuild = !displaced_refit || blas_update == RSE::RT_BLAS_UPDATE_REBUILD || refit_switched || reshaped || entry->displaced_guard_rebuild || periodic_rebuild ||
 					!entry->ptr || !rd->acceleration_structure_is_valid(entry->ptr->blas) || !entry->blas_built_once ||
 					!entry->owned_vb_full.is_valid() || entry->cached_vertex_count != vertex_count || entry->omm_micromap != entry->built_omm_micromap;
 			entry->displaced_frame = current_frame;
@@ -1738,6 +1771,7 @@ void RenderRaytracing::_displace_surfaces(const RenderDataRD *p_render_data) {
 			entry->displaced_deferred = false;
 			displaced_evaluated++;
 			displaced_vertices += vertex_count;
+			render_info_counters.captured_bytes += size;
 			entry->displaced_slot = mat_data->rt_sbt_offset;
 			entry->displaced_material_counter = material_counter;
 			entry->displaced_instance_uniforms_hash = instance_uniforms_hash;
@@ -3768,6 +3802,7 @@ bool RenderRaytracing::_build_merged_mm_blas(
 		uint32_t p_lod,
 		bool p_displace,
 		bool p_reevaluate,
+		bool p_rebuild_only,
 		RTMaterialData *p_mat_data,
 		RID p_material,
 		uint16_t p_material_counter,
@@ -4237,17 +4272,24 @@ bool RenderRaytracing::_build_merged_mm_blas(
 	}
 
 	if (needs_rebake || displace_now) {
-		if (!entry.blas_built_once) {
+		// RT_BLAS_UPDATE_REBUILD: built again instead of refit (the merge wrote every vertex and index up to the capacity at
+		// the first build, so a build reads defined data).
+		if (!entry.blas_built_once || p_rebuild_only) {
 			r_dirty_blas_list.push_back(entry.blas);
 			entry.blas_built_once = true;
 		} else {
 			r_dirty_blas_update_list.push_back(entry.blas);
 		}
+		render_info_counters.dynamic_updated++;
 	}
 	if (needs_rebake) {
 		entry.cached_mm_last_change = mm_last_change;
+		render_info_counters.rebakes++;
+		render_info_counters.rebake_vertices += used_vertices;
 	}
 	if (displace_now) {
+		render_info_counters.captured++;
+		render_info_counters.captured_vertices += uint64_t(p_mm_count) * vertex_count;
 		MMDisplaceRequest request;
 		request.merged_vtx_buffer = entry.merged_vtx_buffer;
 		request.merged_prev_buffer = entry.merged_prev_buffer;
@@ -4389,6 +4431,8 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 	SceneShaderRaytracing *rt_shader_singleton = SceneShaderRaytracing::get_singleton();
 	rt_shader_singleton->ensure_pipeline_bundle(p_rt_flags);
 
+	render_info_counters = RenderInfoCounters();
+	merged_displaced_records.clear();
 	_displace_surfaces(p_render_data);
 	const uint32_t current_frame = RSG::rasterizer->get_frame_number();
 
@@ -4430,7 +4474,6 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 		return (current_frame + uint32_t(p_key)) % period == 0;
 	};
 
-#ifdef TOOLS_ENABLED
 	uint32_t tlas_instance_count = 0;
 	uint32_t tlas_primitive_count = 0;
 	uint32_t rt_blas_builds = 0;
@@ -4438,7 +4481,6 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 	uint32_t rt_triangles_built = 0;
 	uint32_t rt_triangles_refit = 0;
 	const bool collect_render_info = (p_render_data->render_info != nullptr);
-#endif
 
 	// Which rays see an instance, from its cast_shadow setting.
 	auto instance_mask = [](const RenderGeometryInstanceBase *p_instance) -> uint8_t {
@@ -4479,6 +4521,7 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 		const RTLodView *lod_view;
 		bool displace; // Its material's vertex() moves it and it is near enough.
 		bool reevaluate; // That vertex() reads the time or the camera.
+		bool rebuild_only; // RT_BLAS_UPDATE_REBUILD (_rt_blas_update()).
 		uint16_t material_counter; // Its parameters' version: a change evaluates vertex() again.
 		Transform3D instance_transform;
 		Transform3D prev_instance_transform;
@@ -4527,20 +4570,17 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 			}
 			if (!rt_shader->is_hg_ready_in_bundle(hg_index, p_rt_flags)) {
 				request_hit_group(hg_index, inst->transformed_aabb);
+				render_info_counters.pending_surfaces++;
 				continue;
 			}
 
 			if (ps->dirty) {
-#ifdef TOOLS_ENABLED
 				uint32_t pre_proc_build_size = dirty_blas_list.size();
-#endif
 				update_procedural_blas(ps, dirty_blas_list);
 				ps->dirty = false;
-#ifdef TOOLS_ENABLED
 				if (collect_render_info) {
 					rt_blas_builds += dirty_blas_list.size() - pre_proc_build_size;
 				}
-#endif
 			}
 
 			if (ps->blas.is_valid()) {
@@ -4658,6 +4698,7 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 				if (mat_data->rt_sbt_offset > 0 &&
 						!rt_shader_singleton->is_hg_ready_in_bundle(mat_data->rt_sbt_offset, p_rt_flags)) {
 					mm_material_ready = false;
+					render_info_counters.pending_surfaces++;
 					request_hit_group(mat_data->rt_sbt_offset, inst->transformed_aabb);
 					const SceneShaderForwardClustered::ShaderData *cut_shader = mm_surf->shader;
 					mat_data = _compiling_material_fallback(mat_data, cut_shader && (cut_shader->uses_alpha || cut_shader->uses_blend_alpha || cut_shader->uses_alpha_clip || cut_shader->uses_alpha_antialiasing || cut_shader->uses_discard));
@@ -4751,6 +4792,7 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 						const uint32_t switch_indices = lod_view ? lod_view->index_count : mesh_storage->mesh_surface_get_index_count(mesh_surface, 0);
 						const uint64_t switch_triangles = uint64_t(mm_count) * (switch_indices > 0 ? switch_indices : mesh_storage->mesh_surface_get_vertex_count(mesh_surface)) / 3;
 						if (lod_switch_triangles > 0 && lod_switch_triangles + switch_triangles > LOD_SWITCH_TRIANGLES_PER_FRAME) {
+							render_info_counters.budget_limited++;
 							lod = built_lod;
 							lod_view = lod > 0 ? _get_lod_view(mesh_surface, lod) : nullptr;
 							if (lod > 0 && !lod_view) {
@@ -4784,6 +4826,7 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 				pending.lod_view = lod_view;
 				pending.displace = displace;
 				pending.reevaluate = reevaluate;
+				pending.rebuild_only = _rt_blas_update(inst, mm_surf->shader) == RSE::RT_BLAS_UPDATE_REBUILD;
 				pending.material_counter = material_counter;
 				pending.instance_transform = instance_transform;
 				pending.prev_instance_transform = prev_instance_transform;
@@ -4818,10 +4861,8 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 			void *mesh_surface = surf->surface;
 			uint32_t surface_counter = mesh_storage->mesh_surface_get_rt_invalidation_counter(mesh_surface);
 
-#ifdef TOOLS_ENABLED
 			uint32_t pre_build_size = dirty_blas_list.size();
 			uint32_t pre_refit_size = dirty_blas_update_list.size();
-#endif
 
 			// MeshInstance skinning/blend shapes provide a deformed vertex buffer.
 			RTSurfaceData *surf_data = nullptr;
@@ -4838,6 +4879,7 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 					src.cache_key = (static_cast<uint64_t>(mi_index) << 16) | (surf->surface_index & 0xFFFFu);
 					src.surface_counter = surface_counter;
 					src.defer_update = !update_turn(inst->transformed_aabb, mi_index);
+					src.rebuild_only = _rt_blas_update(inst, surf->shader) == RSE::RT_BLAS_UPDATE_REBUILD;
 					src.no_duplicate_any_hit = transparent_shadow;
 					surf_data = process_deformed_surface(surf, mesh_surface, src, dirty_blas_list, dirty_blas_update_list);
 				}
@@ -4907,6 +4949,7 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 			if (mat_data->rt_sbt_offset > 0 &&
 					!rt_shader_singleton->is_hg_ready_in_bundle(mat_data->rt_sbt_offset, p_rt_flags)) {
 				material_ready = false;
+				render_info_counters.pending_surfaces++;
 				request_hit_group(mat_data->rt_sbt_offset, inst->transformed_aabb);
 				if (front_layer) {
 					surf = surf->next;
@@ -4967,7 +5010,6 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 				motion_indices.push_back(-1);
 			}
 
-#ifdef TOOLS_ENABLED
 			if (collect_render_info) {
 				tlas_instance_count++;
 				uint32_t vertices = mesh_storage->mesh_surface_get_vertices_drawn_count(mesh_surface);
@@ -4980,7 +5022,6 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 				rt_triangles_built += prim_count * build_delta;
 				rt_triangles_refit += prim_count * refit_delta;
 			}
-#endif
 
 			sbt_offsets.push_back(mat_data->rt_sbt_offset);
 			material_data.push_back(mat_data->data);
@@ -5065,21 +5106,22 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 	RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
 
 	for (const PendingMMSurface &pending : pending_mm_surfaces) {
-#ifdef TOOLS_ENABLED
 		uint32_t mm_pre_build_size = dirty_blas_list.size();
 		uint32_t mm_pre_refit_size = dirty_blas_update_list.size();
-#endif
 		RTSurfaceData merged_sd;
 		bool use_merged = !pending.per_instance && pending.mm_gpu_buffer.is_valid() &&
 				_build_merged_mm_blas(pending.mm_rid, pending.mm_gpu_buffer, pending.mesh_surface,
 						pending.mm_count, pending.surface_index, pending.surface_counter, pending.lod,
-						pending.displace, pending.reevaluate, pending.mat_data, pending.material_rid, pending.material_counter,
+						pending.displace, pending.reevaluate, pending.rebuild_only, pending.mat_data, pending.material_rid, pending.material_counter,
 						pending.material_ready && !(pending.inst_flags & RD::ACCELERATION_STRUCTURE_INSTANCE_FORCE_OPAQUE_BIT),
 						pending.instance_transform, pending.prev_instance_transform,
 						uint32_t(pending.mm_surf->owner->shader_uniforms_offset),
 						compute_list, dirty_blas_list, dirty_blas_update_list, &merged_sd);
 
 		if (use_merged) {
+			if (pending.displace) {
+				merged_displaced_records.push_back(geometry_data.size());
+			}
 			blass.push_back(merged_sd.blas);
 			blas_transforms.push_back(pending.instance_transform);
 			geometry_data.push_back(merged_sd.geometry);
@@ -5102,7 +5144,6 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 			geometry_data[geometry_data.size() - 1].flags |= facing.geometry_flags;
 			instance_flags.push_back(pending.inst_flags | facing.instance_flags);
 			instance_masks.push_back(instance_mask(pending.mm_surf->owner));
-#ifdef TOOLS_ENABLED
 			if (collect_render_info) {
 				tlas_instance_count++;
 				uint32_t prim_count = merged_sd.geometry.primitive_count;
@@ -5114,7 +5155,6 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 				rt_triangles_built += prim_count * build_delta;
 				rt_triangles_refit += prim_count * refit_delta;
 			}
-#endif
 		} else if (tlas_expand_supported && pending.mm_gpu_buffer.is_valid()) {
 			// One TLAS instance per instance, sharing the mesh's BLAS, written on the GPU from the MultiMesh buffer
 			// (_build_tlas_with_expanded_multimeshes()): no copy of the instances to the CPU, no work per instance here.
@@ -5168,7 +5208,6 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 			job.mask = instance_mask(pending.mm_surf->owner);
 			tlas_expand_jobs.push_back(job);
 
-#ifdef TOOLS_ENABLED
 			if (collect_render_info) {
 				tlas_instance_count += pending.mm_count;
 				uint32_t vertices = mesh_storage->mesh_surface_get_vertices_drawn_count(pending.mesh_surface);
@@ -5178,7 +5217,6 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 				rt_blas_builds += build_delta;
 				rt_triangles_built += prim_count * build_delta;
 			}
-#endif
 		} else {
 			// Without the standard instance layout: the instances read back to the CPU, one TLAS instance each.
 			const float *mm_data = mesh_storage->multimesh_get_local_data_ptr_async(pending.mm_rid);
@@ -5262,7 +5300,6 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 				instance_masks.push_back(instance_mask(pending.mm_surf->owner));
 			}
 
-#ifdef TOOLS_ENABLED
 			if (collect_render_info) {
 				tlas_instance_count += pending.mm_count;
 				uint32_t vertices = mesh_storage->mesh_surface_get_vertices_drawn_count(pending.mesh_surface);
@@ -5275,7 +5312,6 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 				rt_triangles_built += prim_count * build_delta;
 				rt_triangles_refit += prim_count * refit_delta;
 			}
-#endif
 		}
 	}
 
@@ -5351,7 +5387,6 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 	}
 
 	// Phase 3: BLAS / TLAS build.
-#ifdef TOOLS_ENABLED
 	if (collect_render_info) {
 		p_render_data->render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_VISIBLE][RSE::VIEWPORT_RENDER_INFO_OBJECTS_IN_FRAME] += tlas_instance_count;
 		p_render_data->render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_VISIBLE][RSE::VIEWPORT_RENDER_INFO_PRIMITIVES_IN_FRAME] += tlas_primitive_count;
@@ -5361,7 +5396,6 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 		p_render_data->render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_VISIBLE][RSE::VIEWPORT_RENDER_INFO_RT_TRIANGLES_BUILT] += rt_triangles_built;
 		p_render_data->render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_VISIBLE][RSE::VIEWPORT_RENDER_INFO_RT_TRIANGLES_REFIT] += rt_triangles_refit;
 	}
-#endif
 
 #ifdef TOOLS_ENABLED
 	// GODOT_RT_LOG_CACHES=1: the size of every cache and of the frame's work every 600 frames, to see what grows over a
@@ -5421,13 +5455,108 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 	// After the merges: the displaced positions overwrite the merged ones before the BLAS builds read them.
 	_displace_merged_multimeshes();
 
+	if (p_render_data->environment.is_valid() &&
+			RendererEnvironmentStorage::get_singleton()->environment_get_pathtracing_debug_mode(p_render_data->environment) == RS::PT_DEBUG_DYNAMIC_GEOMETRY) {
+		_annotate_dynamic_geometry(dirty_blas_list, dirty_blas_update_list);
+	} else if (dynamic_geometry_debug.get_tracked_count() > 0) {
+		dynamic_geometry_debug.clear();
+	}
+
 	// The records first: the instances written on the GPU add theirs after these.
 	finalize_buffers(state);
 	// The cut-outs baked into opacity micromaps and the micromaps built, before the BLASes that use them.
 	_omm_dispatch_bakes();
 	build_acceleration_structures(state, dirty_blas_list, dirty_blas_update_list);
 
+	_record_render_info(p_render_data);
+
 	return state;
+}
+
+void RenderRaytracing::_record_render_info(const RenderDataRD *p_render_data) {
+	const RenderInfoCounters &c = render_info_counters;
+	// Out of view and far: deforming geometry kept at the state of its last update, for its turn
+	// (out_of_view_update_distance, displacement_update_distance); LOD switches waiting for the frame's budget.
+	const uint32_t held = out_of_view_deferred + displaced_deferred;
+	if (held > 0 || c.budget_limited > 0) {
+		_flag_not_ready(RSE::RENDERING_NOT_READY_RT_STALE_GEOMETRY);
+	}
+	if (c.pending_surfaces > 0) {
+		_flag_not_ready(RSE::RENDERING_NOT_READY_RT_PENDING_SURFACES);
+	}
+	if (!p_render_data->render_info) {
+		return;
+	}
+	const auto kb = [](uint64_t p_bytes) {
+		return int(MIN((p_bytes + 999) / 1000, uint64_t(INT32_MAX)));
+	};
+	const auto clamp_int = [](uint64_t p_value) {
+		return int(MIN(p_value, uint64_t(INT32_MAX)));
+	};
+	int *info = p_render_data->render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_VISIBLE];
+	info[RSE::VIEWPORT_RENDER_INFO_RT_DYNAMIC_REBAKES] += int(c.rebakes);
+	info[RSE::VIEWPORT_RENDER_INFO_RT_DYNAMIC_REBAKE_VERTICES] += clamp_int(c.rebake_vertices);
+	info[RSE::VIEWPORT_RENDER_INFO_RT_CAPTURED_MESHES] += int(displaced_evaluated + c.captured);
+	info[RSE::VIEWPORT_RENDER_INFO_RT_CAPTURED_VERTICES] += clamp_int(displaced_vertices + c.captured_vertices);
+	info[RSE::VIEWPORT_RENDER_INFO_RT_DYNAMIC_UPDATED] += int(c.dynamic_updated);
+	info[RSE::VIEWPORT_RENDER_INFO_RT_DYNAMIC_HELD] += int(held);
+	info[RSE::VIEWPORT_RENDER_INFO_RT_DYNAMIC_BUDGET_LIMITED] += int(c.budget_limited);
+	info[RSE::VIEWPORT_RENDER_INFO_RT_PENDING_SURFACES] += int(c.pending_surfaces);
+	// The frame's scratch so far (the views before this one included), from the RenderingDevice's own bookkeeping.
+	const RD::AccelerationStructureScratchUsage scratch = RD::get_singleton()->acceleration_structure_get_frame_scratch_usage();
+	info[RSE::VIEWPORT_RENDER_INFO_RT_SCRATCH_USED_KB] = kb(scratch.used);
+	info[RSE::VIEWPORT_RENDER_INFO_RT_SCRATCH_SIZE_KB] = kb(scratch.size);
+	info[RSE::VIEWPORT_RENDER_INFO_RT_SCRATCH_ROLLOVERS] = int(scratch.rollovers);
+	info[RSE::VIEWPORT_RENDER_INFO_RT_CAPTURE_ARENA_USED_KB] += kb(c.captured_bytes);
+	info[RSE::VIEWPORT_RENDER_INFO_RT_CAPTURE_ARENA_SIZE_KB] = kb(displaced_vb_bytes);
+}
+
+void RenderRaytracing::_flag_not_ready(RSE::RenderingNotReadyReason p_reason) {
+	const uint64_t frame = RSG::rasterizer->get_frame_number();
+	if (not_ready_frame != frame) {
+		not_ready_frame = frame;
+		frame_not_ready_reasons = 0;
+	}
+	frame_not_ready_reasons.set_flag(p_reason);
+}
+
+BitField<RSE::RenderingNotReadyReason> RenderRaytracing::get_not_ready_reasons() const {
+	BitField<RSE::RenderingNotReadyReason> reasons = not_ready_frame == RSG::rasterizer->get_frame_number() ? frame_not_ready_reasons : BitField<RSE::RenderingNotReadyReason>(0);
+	if (shader && shader->get_pending_hit_group_count() > 0) {
+		reasons.set_flag(RSE::RENDERING_NOT_READY_RT_SHADER_COMPILATION);
+	}
+	return reasons;
+}
+
+void RenderRaytracing::_annotate_dynamic_geometry(const LocalVector<RID> &p_built, const LocalVector<RID> &p_refit) {
+	dynamic_geometry_debug.begin_frame(RSG::rasterizer->get_frame_number());
+	for (const RID &blas : p_built) {
+		dynamic_geometry_debug.record_build(blas);
+	}
+	for (const RID &blas : p_refit) {
+		dynamic_geometry_debug.record_refit(blas);
+	}
+	// One geometry record per TLAS instance. Captured: displaced by its material's vertex() (a surface, or a merged
+	// MultiMesh). Dynamic (settles on a "built idle" color): deformed (skinned, blend shapes, displaced) or merged.
+	LocalVector<uint8_t> merged_displaced;
+	merged_displaced.resize_initialized(blass.size());
+	for (uint32_t record : merged_displaced_records) {
+		merged_displaced[record] = 1;
+	}
+	for (uint32_t i = 0; i < blass.size(); i++) {
+		RT_GeometryData &geometry = geometry_data[i];
+		const bool captured = (geometry.flags & RT_GEOM_FLAG_DISPLACED) || merged_displaced[i];
+		const bool merged = (geometry.multimesh_address_lo | geometry.multimesh_address_hi) != 0 && geometry.multimesh_vertex_count != UINT32_MAX;
+		const bool dynamic = (geometry.flags & RT_GEOM_FLAG_DEFORMED) || merged;
+		geometry.debug_state = RTDynamicGeometryDebug::pack(dynamic_geometry_debug.observe(blass[i], captured, motion_indices[i] >= 0, dynamic));
+	}
+	// The MultiMeshes whose instances the GPU writes share their mesh's BLAS: moved when the node or its instances did.
+	for (uint32_t i = 0; i < tlas_expand_jobs.size(); i++) {
+		const TlasExpandJob &job = tlas_expand_jobs[i];
+		RT_GeometryData &geometry = tlas_expand_geometry_templates[job.data.template_index];
+		const bool moved = job.data.mm_prev_offset != job.data.mm_offset || memcmp(job.data.node, job.data.prev_node, sizeof(job.data.node)) != 0;
+		geometry.debug_state = RTDynamicGeometryDebug::pack(dynamic_geometry_debug.observe(job.blas, false, moved, false));
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -6565,6 +6694,16 @@ RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderD
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 45, owner->light_projectors_get_sampler(rb->get_samplers())));
 	}
 
+	// Binding 46: Environment.RT_DEBUG_TIMING_HEATMAP's ticks, in its variant only.
+	if (p_rt_flags & SceneShaderRaytracing::RT_FLAG_TIMING_ENABLED) {
+		if (!rb->has_texture(RB_SCOPE_RT_TIMING, RB_TEX_RT_TIMING)) {
+			rb->create_texture(RB_SCOPE_RT_TIMING, RB_TEX_RT_TIMING, RD::DATA_FORMAT_R32_SFLOAT, RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT, RD::TEXTURE_SAMPLES_1);
+		}
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 46, rb->get_texture(RB_SCOPE_RT_TIMING, RB_TEX_RT_TIMING)));
+	} else if (rb->has_texture(RB_SCOPE_RT_TIMING, RB_TEX_RT_TIMING)) {
+		rb->clear_context(RB_SCOPE_RT_TIMING);
+	}
+
 	RID shader_rd = shader ? shader->get_pipeline_shader_rd(p_rt_flags) : RID();
 
 	RID result;
@@ -6685,10 +6824,27 @@ void RenderRaytracing::get_buffers_read_by_address(LocalVector<RID> &r_buffers) 
 void RenderRaytracing::apply_volumetric_fog(const RenderDataRD *p_render_data, bool p_legacy_blending) {
 	Ref<RenderSceneBuffersRD> rb = p_render_data->render_buffers;
 	ERR_FAIL_COND(rb.is_null());
-	if (!rb->has_custom_data(RB_SCOPE_FOG) || !rt_has_texture(rb.ptr()) || !rt_has_depth_texture(rb.ptr())) {
+	// Environment.RT_DEBUG_VOLUMETRIC_FOG and RT_DEBUG_VOLUMETRIC_FOG_TRANSMITTANCE: the fog this pass applies, instead of the
+	// color; magenta without volumetric fog.
+	static constexpr int DEBUG_VOLUMETRIC_FOG = 25; // Environment::RT_DEBUG_VOLUMETRIC_FOG.
+	static constexpr int DEBUG_VOLUMETRIC_FOG_TRANSMITTANCE = 26; // Environment::RT_DEBUG_VOLUMETRIC_FOG_TRANSMITTANCE.
+	uint32_t debug_view = 0;
+	if (p_render_data->environment.is_valid()) {
+		const int debug_mode = RendererEnvironmentStorage::get_singleton()->environment_get_pathtracing_debug_mode(p_render_data->environment);
+		if (debug_mode == DEBUG_VOLUMETRIC_FOG || debug_mode == DEBUG_VOLUMETRIC_FOG_TRANSMITTANCE) {
+			debug_view = uint32_t(debug_mode);
+		} else if (debug_mode != 0 && debug_mode != RS::PT_DEBUG_TIMING_HEATMAP) {
+			// The other debug views show what the rays meet, without the fog (as NVIDIA's, whose fog is the path's).
+			return;
+		}
+	}
+	if ((!rb->has_custom_data(RB_SCOPE_FOG) && debug_view == 0) || !rt_has_texture(rb.ptr()) || !rt_has_depth_texture(rb.ptr())) {
 		return;
 	}
-	Ref<RendererRD::Fog::VolumetricFog> fog = rb->get_custom_data(RB_SCOPE_FOG);
+	Ref<RendererRD::Fog::VolumetricFog> fog;
+	if (rb->has_custom_data(RB_SCOPE_FOG)) {
+		fog = rb->get_custom_data(RB_SCOPE_FOG);
+	}
 
 	// The same parameters as the scene shader's (RenderForwardClustered::_setup_environment()).
 	VolumetricFogShader::PushConstant push_constant = {};
@@ -6696,19 +6852,21 @@ void RenderRaytracing::apply_volumetric_fog(const RenderDataRD *p_render_data, b
 	const Size2i size = rb->get_internal_size();
 	push_constant.size[0] = size.width;
 	push_constant.size[1] = size.height;
-	push_constant.inv_length = fog->length > 0.0 ? 1.0 / fog->length : 1.0;
-	push_constant.detail_spread = fog->spread > 0.0 ? 1.0 / fog->spread : 1.0;
+	push_constant.inv_length = fog.is_valid() && fog->length > 0.0 ? 1.0 / fog->length : 1.0;
+	push_constant.detail_spread = fog.is_valid() && fog->spread > 0.0 ? 1.0 / fog->spread : 1.0;
 	push_constant.legacy_blending = p_legacy_blending;
+	push_constant.pad[0] = fog.is_valid() ? debug_view : 1u; // 1: raytracing_volumetric_fog.glsl's DEBUG_NO_FOG.
 
 	RD::Uniform color(RD::UNIFORM_TYPE_IMAGE, 0, rt_get_texture(rb.ptr()));
 	RD::Uniform depth(RD::UNIFORM_TYPE_IMAGE, 1, rt_get_depth_texture(rb.ptr()));
-	RD::Uniform fog_map(RD::UNIFORM_TYPE_TEXTURE, 2, fog->fog_map);
+	RD::Uniform fog_map(RD::UNIFORM_TYPE_TEXTURE, 2, fog.is_valid() ? fog->fog_map : RendererRD::TextureStorage::get_singleton()->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_3D_WHITE));
 	RD::Uniform sampler(RD::UNIFORM_TYPE_SAMPLER, 3, RendererRD::MaterialStorage::get_singleton()->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED));
 
+	const RID shader_version = debug_view != 0 ? volumetric_fog_shader.debug_version_shader : volumetric_fog_shader.version_shader;
 	RD *rd = RD::get_singleton();
 	RD::ComputeListID compute_list = rd->compute_list_begin();
-	rd->compute_list_bind_compute_pipeline(compute_list, volumetric_fog_shader.pipeline);
-	rd->compute_list_bind_uniform_set(compute_list, UniformSetCacheRD::get_singleton()->get_cache(volumetric_fog_shader.version_shader, 0, color, depth, fog_map, sampler), 0);
+	rd->compute_list_bind_compute_pipeline(compute_list, debug_view != 0 ? volumetric_fog_shader.debug_pipeline : volumetric_fog_shader.pipeline);
+	rd->compute_list_bind_uniform_set(compute_list, UniformSetCacheRD::get_singleton()->get_cache(shader_version, 0, color, depth, fog_map, sampler), 0);
 	rd->compute_list_set_push_constant(compute_list, &push_constant, sizeof(VolumetricFogShader::PushConstant));
 	rd->compute_list_dispatch_threads(compute_list, size.width, size.height, 1);
 	rd->compute_list_end();

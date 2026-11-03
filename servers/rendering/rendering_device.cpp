@@ -1214,6 +1214,15 @@ RenderingDevice::AccelerationStructureScratchUsage RenderingDevice::acceleration
 	return { acceleration_structure_scratch.batch_peak, acceleration_structure_scratch.size, acceleration_structure_scratch.batch_rollovers };
 }
 
+RenderingDevice::AccelerationStructureScratchUsage RenderingDevice::acceleration_structure_get_frame_scratch_usage() const {
+	const AccelerationStructureFrameScratch &scratch = frames[frame].acceleration_structure_scratch;
+	uint64_t capacity = 0;
+	for (uint64_t size : scratch.chunk_sizes) {
+		capacity += size;
+	}
+	return { scratch.used, capacity, 0 };
+}
+
 void RenderingDevice::untracked_barrier() {
 	ERR_RENDER_THREAD_GUARD();
 	ERR_FAIL_COND_MSG(_any_list_active(), "Barriers can't be recorded while a draw, compute or raytracing list is being created.");

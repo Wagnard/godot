@@ -1626,6 +1626,10 @@ public:
 		uint32_t rollovers = 0;
 	};
 	AccelerationStructureScratchUsage acceleration_structure_get_scratch_usage() const;
+	// The current frame slot's scratch of the tracked builds (AccelerationStructureFrameScratch): the bytes its ranges took
+	// so far (never reused within the frame, so all at once), its chunks' capacity, and no rollovers (a full chunk is
+	// followed by a new one, never waited on).
+	AccelerationStructureScratchUsage acceleration_structure_get_frame_scratch_usage() const;
 	void untracked_barrier();
 #ifdef DEV_ENABLED
 	void tlas_get_stale_blases(RID p_tlas, LocalVector<RID> &r_stale);

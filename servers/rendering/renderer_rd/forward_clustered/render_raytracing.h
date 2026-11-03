@@ -33,12 +33,14 @@
 #include "core/math/projection.h"
 #include "core/math/transform_3d.h"
 #include "core/string/string_name.h"
+#include "core/templates/bit_field.h"
 #include "core/templates/hash_map.h"
 #include "core/templates/hash_set.h"
 #include "core/templates/local_vector.h"
 #include "core/templates/rid_owner.h"
 #include "core/templates/vector.h"
 #include "servers/rendering/renderer_rd/bindless_block.h"
+#include "servers/rendering/renderer_rd/forward_clustered/render_raytracing_debug.h"
 #include "servers/rendering/renderer_rd/shaders/raytracing/multimesh_merge.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/raytracing/raytracing_lod_compact.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/raytracing/raytracing_nrd_composite.glsl.gen.h"
@@ -55,6 +57,10 @@
 #define RB_TEX_RAYTRACING SNAME("raytracing")
 #define RB_TEX_RT_DEPTH SNAME("rt_depth")
 #define RB_TEX_RT_FRONT_LAYER SNAME("rt_front_layer")
+
+// Environment.RT_DEBUG_TIMING_HEATMAP: the device clock ticks of each pixel's raygen (RT_FLAG_TIMING_ENABLED, binding 46).
+#define RB_SCOPE_RT_TIMING SNAME("rt_timing")
+#define RB_TEX_RT_TIMING SNAME("ticks")
 
 #define RB_SCOPE_DLSS_RR SNAME("dlss_rr")
 #define RB_TEX_DLSS_RR_DIFFUSE_ALBEDO SNAME("diffuse_albedo")
@@ -130,7 +136,10 @@ struct alignas(16) RT_GeometryData {
 	// A merged BLAS's first instance in the buffer's previous transforms (motion vectors); multimesh_offset when its instances
 	// did not move, and for one instance, whose motion is the TLAS instance's.
 	uint32_t multimesh_previous_offset;
-	uint32_t multimesh_pad[3];
+	// Environment.RT_DEBUG_DYNAMIC_GEOMETRY only: RTDynamicGeometryDebug::pack() of the BLAS's recent work (multimesh_pad0
+	// in GLSL), 0 otherwise.
+	uint32_t debug_state;
+	uint32_t multimesh_pad[2];
 };
 static_assert(sizeof(RT_GeometryData) == 176, "RT_GeometryData must be 176 bytes for std430");
 
@@ -514,6 +523,7 @@ struct RTDeformedGeometrySource {
 	uint32_t cache_version = 0; ///< Changes when the resource behind `cache_key` is recycled.
 	uint32_t surface_counter = 0; ///< Changes when the underlying mesh surface changes.
 	bool force_rebuild = false; ///< Rebuild instead of refitting when the data changed.
+	bool rebuild_only = false; ///< RT_BLAS_UPDATE_REBUILD: as force_rebuild, the update still waiting for its turn (defer_update).
 	uint32_t prev_offset = UINT32_MAX; ///< When set and the data changed: previous positions read from `prev_vb` there.
 	bool defer_update = false; ///< A change of `current_vb` waits for a later frame (out of view and far): the BLAS keeps the positions it has.
 	bool no_duplicate_any_hit = false; ///< The BLAS needs RTSurfaceData::no_duplicate_any_hit (kept once built with it).
@@ -841,6 +851,28 @@ class RenderRaytracing {
 	uint32_t displaced_guard_rebuilds = 0; // BLASes the NaN guard asked to build again, since the previous log.
 	// The frame's BLAS updates of deforming geometry waiting for their turn out of view (out_of_view_update_distance).
 	uint32_t out_of_view_deferred = 0;
+	// What a build_tlas() call did, for its view's Viewport.RENDER_INFO_RT_* counters: counted on the CPU where the work is
+	// decided (no readback). Later views of a frame count what they do themselves (the first one updates shared entries).
+	struct RenderInfoCounters {
+		uint32_t rebakes = 0; // Merged MultiMeshes whose vertices were merged again from their instances.
+		uint64_t rebake_vertices = 0;
+		uint32_t captured = 0; // Merged MultiMeshes whose material's vertex() was evaluated (surfaces: displaced_evaluated).
+		uint64_t captured_vertices = 0;
+		uint64_t captured_bytes = 0; // Written to the surfaces' displaced vertex buffers.
+		uint32_t dynamic_updated = 0; // Deforming geometry (skinned, blend shapes, displaced, merged) whose BLAS was built or refit.
+		uint32_t budget_limited = 0; // Merged MultiMeshes kept at the LOD they are built with by the LOD switch budget.
+		uint32_t pending_surfaces = 0; // Surfaces whose hit group is still compiling: left out, or traced with a stand-in.
+	} render_info_counters;
+	uint64_t displaced_vb_bytes = 0; // The capacity of every surface's displaced vertex buffer.
+	// What the frame not_ready_frame traced at an older state (RenderingServer.get_rendering_not_ready_reasons()).
+	uint64_t not_ready_frame = UINT64_MAX;
+	BitField<RSE::RenderingNotReadyReason> frame_not_ready_reasons = 0;
+	void _flag_not_ready(RSE::RenderingNotReadyReason p_reason);
+	void _record_render_info(const RenderDataRD *p_render_data);
+	// Environment.RT_DEBUG_DYNAMIC_GEOMETRY: each instance's recent BLAS work, in RT_GeometryData::debug_state.
+	RTDynamicGeometryDebug dynamic_geometry_debug;
+	LocalVector<uint32_t> merged_displaced_records; // This build's records of merged MultiMeshes displaced by vertex().
+	void _annotate_dynamic_geometry(const LocalVector<RID> &p_built, const LocalVector<RID> &p_refit);
 	LocalVector<RD::Uniform> _displace_frame_uniforms(RID p_job_buffer);
 	void _displace_merged_multimeshes();
 
@@ -852,12 +884,15 @@ class RenderRaytracing {
 			float inv_length;
 			float detail_spread;
 			uint32_t legacy_blending;
-			uint32_t pad[3];
+			uint32_t pad[3]; // The debug variant's view in pad[0] (raytracing_volumetric_fog.glsl MODE_DEBUG).
 		};
 		RaytracingVolumetricFogShaderRD shader;
 		RID version;
 		RID version_shader;
 		RID pipeline;
+		// Environment.RT_DEBUG_VOLUMETRIC_FOG and RT_DEBUG_VOLUMETRIC_FOG_TRANSMITTANCE: the fog instead of the color.
+		RID debug_version_shader;
+		RID debug_pipeline;
 	} volumetric_fog_shader;
 
 	// DLSS Ray Reconstruction's diffuse albedo where the camera rays missed, from the drawn background.
@@ -1107,6 +1142,7 @@ class RenderRaytracing {
 			uint32_t p_lod,
 			bool p_displace,
 			bool p_reevaluate,
+			bool p_rebuild_only, // RT_BLAS_UPDATE_REBUILD: every update is a build.
 			RTMaterialData *p_mat_data,
 			RID p_material,
 			uint16_t p_material_counter,
@@ -1169,6 +1205,10 @@ public:
 	RID rt_get_front_layer_texture(RenderSceneBuffersRD *p_render_buffers) const;
 	// Transparent surfaces in the TLAS this frame: the raygen traces their reflections.
 	uint32_t get_front_layer_instance_count() const { return front_layer_instance_count; }
+	// Environment.RT_DEBUG_TIMING_HEATMAP's ticks (R32F), made by update_uniform_set() for the RT_FLAG_TIMING_ENABLED
+	// variant and freed once another one traces.
+	bool rt_timing_has_texture(RenderSceneBuffersRD *p_render_buffers) const;
+	RID rt_timing_get_texture(RenderSceneBuffersRD *p_render_buffers) const;
 
 	// DLSS Ray Reconstruction guide buffers (stored on the render buffers).
 	void dlss_rr_ensure_buffers(RenderSceneBuffersRD *p_render_buffers);
@@ -1211,6 +1251,10 @@ public:
 	}
 
 	SceneShaderRaytracing *get_shader() const { return shader; }
+
+	// RenderingServer.get_rendering_not_ready_reasons(): what the last traced frame left out or traced at an older state,
+	// and RT_SHADER_COMPILATION while hit groups or programs compile.
+	BitField<RSE::RenderingNotReadyReason> get_not_ready_reasons() const;
 
 	RID get_bindless_uniform_set() const { return bindless_uniform_set; }
 	RID get_bindless_array_uniform_set() const { return bindless_array_uniform_set; }

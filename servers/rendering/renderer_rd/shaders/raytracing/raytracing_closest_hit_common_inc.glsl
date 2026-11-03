@@ -257,6 +257,38 @@ void write_primary_hit_velocity(vec3 hit_pos) {
 // ============================================================================
 
 #ifdef RT_DEBUG_ENABLED
+// Environment.RT_DEBUG_DYNAMIC_GEOMETRY (NVIDIA's view, 49a825dc52 raytracing_closest_hit_common_inc.glsl:383-411): the
+// instance's recent BLAS work, RTDynamicGeometryDebug::pack() in its geometry record (multimesh_pad0). Must match
+// RTDynamicGeometryDebug.
+#define RT_VIS_DYNAMIC_GEOMETRY 29
+#define RT_DYNAMIC_GEOMETRY_CATEGORY_MAX 7u
+#define RT_DYNAMIC_GEOMETRY_CATEGORY_MASK 15u
+#define RT_DYNAMIC_GEOMETRY_REST_SHIFT 4u
+#define RT_DYNAMIC_GEOMETRY_AGE_SHIFT 8u
+#define RT_DYNAMIC_GEOMETRY_FADE_FRAMES 60.0
+
+// Indexed by RTDynamicGeometryDebug::Category: static, moved, refit, build, captured refit, captured build, built idle,
+// captured built idle.
+const vec3 RT_DYNAMIC_GEOMETRY_COLORS[8] = vec3[](vec3(0.0), vec3(0.0, 1.0, 0.0), vec3(1.0, 1.0, 0.0), vec3(1.0, 0.0, 0.0), vec3(0.05, 0.15, 1.0), vec3(1.0, 0.0, 1.0),
+		vec3(0.25, 0.015, 0.015), vec3(0.22, 0.015, 0.22));
+const float RT_DYNAMIC_GEOMETRY_STRENGTH[8] = float[](0.0, 0.4, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0);
+
+// The color of the category packed at p_shift, over p_base.
+vec3 debug_dynamic_geometry_tint(uint p_state, uint p_shift, vec3 p_base, float p_recency) {
+	const uint category = min((p_state >> p_shift) & RT_DYNAMIC_GEOMETRY_CATEGORY_MASK, RT_DYNAMIC_GEOMETRY_CATEGORY_MAX);
+	return mix(p_base, RT_DYNAMIC_GEOMETRY_COLORS[category], RT_DYNAMIC_GEOMETRY_STRENGTH[category] * p_recency);
+}
+
+// The category's color over the rest category's, itself over dim grayscale shading. This frame's work (age 0) is opaque;
+// earlier work starts well below that and fades out over RT_DYNAMIC_GEOMETRY_FADE_FRAMES.
+vec3 debug_dynamic_geometry(uint p_state, vec3 p_albedo, float p_NdotV) {
+	const uint age = p_state >> RT_DYNAMIC_GEOMETRY_AGE_SHIFT;
+	const vec3 gray = vec3((0.02 + 0.13 * luminance(p_albedo)) * (0.3 + 0.7 * p_NdotV));
+	const vec3 rest = debug_dynamic_geometry_tint(p_state, RT_DYNAMIC_GEOMETRY_REST_SHIFT, gray, 1.0);
+	const float recency = age == 0u ? 1.0 : mix(0.6, 0.1, float(age) / RT_DYNAMIC_GEOMETRY_FADE_FRAMES);
+	return debug_dynamic_geometry_tint(p_state, 0u, rest, recency);
+}
+
 void debug_visualize(
 		int vis_mode,
 		vec3 geometry_normal,
@@ -323,6 +355,8 @@ void debug_visualize(
 		ps.radiance = vec3(d);
 	} else if (vis_mode == 21) {
 		ps.radiance = emissive;
+	} else if (vis_mode == RT_VIS_DYNAMIC_GEOMETRY) {
+		ps.radiance = debug_dynamic_geometry(geometries[gl_InstanceCustomIndexEXT].multimesh_pad0, albedo, NdotV);
 	} else if (vis_mode == 22) {
 		// BRDF below-hemisphere fallback visualization. Reflects the two-layer
 		// recovery applied in shade_and_bounce:
