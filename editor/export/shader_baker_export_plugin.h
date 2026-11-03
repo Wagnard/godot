@@ -103,6 +103,7 @@ protected:
 	bool raytracing_ser = false;
 	bool raytracing_specular_motion_vectors = false;
 	bool raytracing_transparent_shadows = false;
+	bool raytracing_decal_mode = false; // rendering/pathtracing/decals other than All Hits.
 	RenderingShaderContainerFormat *shader_container_format = nullptr;
 	String shader_container_driver;
 	Vector<Ref<ShaderBakerExportPluginPlatform>> platforms;

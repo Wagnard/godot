@@ -3272,6 +3272,10 @@
 		<member name="rendering/pathtracing/async_shader_compilation" type="bool" setter="" getter="" default="true">
 			If [code]true[/code], path tracing ray hit shaders are compiled asynchronously in the background. This avoids frame stalls when new shader variants are first encountered during rendering. While a shader is compiling, a fallback shader may be used, which can cause temporary visual artifacts. Disable this if you require fully deterministic rendering from the first frame at the cost of potential stalls on shader warm-up.
 		</member>
+		<member name="rendering/pathtracing/decals" type="int" setter="" getter="" default="0">
+			Which path vertices the path tracer projects [Decal]s onto. [b]All Hits[/b] applies them everywhere, matching the rasterizer. [b]Skip After Diffuse[/b] stops once the path has bounced diffusely, where decals rarely change the result. [b]Singular Only[/b] applies them to camera hits and mirror-like reflections only (roughness up to [code]0.05[/code]), excluding rough specular bounces as well. Leaving decals out of the later bounces makes those hits cheaper, but their indirect light then ignores the decals (an emissive decal no longer lights its surroundings through them, for example).
+			[b]Note:[/b] Switching between [b]All Hits[/b] and another mode builds the path tracer's ray tracing pipeline again, as [member rendering/pathtracing/use_simple_shadows] does; switching between the other two does not.
+		</member>
 		<member name="rendering/pathtracing/deformed_mesh_cache_ttl_frames" type="int" setter="" getter="" default="60">
 			Number of frames a skinned or vertex-displaced deformed-mesh BLAS is kept alive in the path tracer cache after its last visible frame. Once this threshold is exceeded the BLAS and its associated buffers are freed. Increase this value if deformed meshes flicker back into view after brief occlusion; decrease it to reclaim GPU memory sooner.
 			[b]Note:[/b] Requires a restart to take effect.

@@ -592,7 +592,7 @@
 			Traces from the primary hit toward the first [DirectionalLight3D] against every shadow caster, as volumetric fog does. White: the light is visible. Yellow: only transparent casters are in the way, darker with lower transmittance. Red: an opaque caster the camera does not see blocks it (the rasterizer ignores such casters). Blue: an opaque caster the camera sees blocks it. Red and blue get darker the farther away the blocker is. Dark gray: the surface faces away from the light. Magenta: no directional light.
 		</constant>
 		<constant name="RT_DEBUG_DECAL_OVERLAP" value="28" enum="PathtracingDebugMode">
-			Shows how many [Decal]s cover each primary hit. Black: none. Green, yellow, orange and red: 1 to 4 decals. Magenta: more than 4, so the bottom-most decals are dropped. Requires [member ProjectSettings.rendering/pathtracing/max_decals] to be greater than [code]0[/code].
+			Shows how many [Decal]s cover each primary hit (those that blend over it: in their box and cull mask, not faded out). Black: none. Green, yellow, orange and red: 1 to 4 decals. Magenta: more than 4. Every one of them is applied; many overlapping decals make the hit slower to shade.
 		</constant>
 		<constant name="RT_DEBUG_DYNAMIC_GEOMETRY" value="29" enum="PathtracingDebugMode">
 			Shows which geometry costs per-frame acceleration structure work, over dim grayscale shading. Red: its bottom-level acceleration structure (BLAS) was rebuilt. Yellow: its BLAS was refit. Magenta and blue: the same for a BLAS built or refit from a vertex capture. Faint green: only its transform in the top-level acceleration structure changed this frame. Gray: static.

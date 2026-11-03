@@ -6309,6 +6309,9 @@ RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderD
 		if (GLOBAL_GET_CACHED(bool, "rendering/pathtracing/russian_roulette")) {
 			rt_param_flags |= SceneShaderRaytracing::RT_PARAM_FLAG_RUSSIAN_ROULETTE;
 		}
+		if (GLOBAL_GET_CACHED(int, "rendering/pathtracing/decals") == SceneShaderRaytracing::RT_DECAL_MODE_SINGULAR_ONLY) {
+			rt_param_flags |= SceneShaderRaytracing::RT_PARAM_FLAG_DECALS_SINGULAR_ONLY;
+		}
 		rt_ubo.params[SceneShaderRaytracing::RT_PARAM_FLAGS] = float(rt_param_flags);
 		if (p_background_is_color) {
 			rt_ubo.params[SceneShaderRaytracing::RT_PARAM_BACKGROUND_COLOR + 0] = p_background_color.r;

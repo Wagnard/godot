@@ -29,6 +29,7 @@
 #define RT_PARAM_FLAGS 13 // rt_params[3].y - RT_PARAM_FLAG_* bits, runtime switches (a later one takes the next bit)
 #define RT_PARAM_FLAG_LIGHT_SAMPLING_RIS 1u // Bit 0: rendering/pathtracing/light_sampling_ris
 #define RT_PARAM_FLAG_RUSSIAN_ROULETTE 2u // Bit 1: rendering/pathtracing/russian_roulette
+#define RT_PARAM_FLAG_DECALS_SINGULAR_ONLY 4u // Bit 2: rendering/pathtracing/decals Singular Only (RT_DECAL_MODE variant)
 #define RT_PARAM_LIGHT_COUNT 14 // rt_params[3].z - Number of active lights in light buffer
 #define RT_PARAM_FRAME_INDEX 15 // rt_params[3].w - Frame counter for temporal variation
 
@@ -353,6 +354,17 @@ uint set_unextended(uint packed) {
 bool is_unextended(uint packed) {
 	return (packed & UNEXTENDED_FLAG) != 0u;
 }
+
+#ifdef RT_DECAL_MODE
+// Non-singular path flag (bit 30): the path has bounced off a diffuse lobe or a specular one rougher than mirror-like, as
+// NVIDIA's NON_SINGULAR_PATH_FLAG (49a825dc52, raytracing_inc.glsl:153-158). rendering/pathtracing/decals Singular Only
+// leaves the decals out of the hits that come after.
+const uint NON_SINGULAR_PATH_FLAG = (1u << 30);
+#define SINGULAR_ROUGHNESS_MAX 0.05
+bool is_singular_path(uint packed) {
+	return (packed & NON_SINGULAR_PATH_FLAG) == 0u;
+}
+#endif
 
 const uint PATH_TERMINATED_FLAG = (1u << 26);
 uint set_path_terminated(uint packed) {

@@ -79,6 +79,16 @@ void rt_apply_decals(HitData h, vec3 p_geo_normal, inout MaterialResult m) {
 	if (get_rt_param(RT_PARAM_DECAL_COUNT) <= 0.0) {
 		return;
 	}
+#ifdef RT_DECAL_MODE
+	// rendering/pathtracing/decals, as NVIDIA's rt_decals_enabled_for_path() (49a825dc52, raytracing_decals_inc.glsl:168-
+	// 180): Skip After Diffuse leaves them out once the path has bounced off a diffuse lobe, Singular Only once it has
+	// bounced off anything but a mirror-like one. The raygen keeps the path's flags (in payload.packed_bounces_flags).
+	const uint path_flags = payload.packed_bounces_flags;
+	const bool singular_only = (uint(get_rt_param(RT_PARAM_FLAGS)) & RT_PARAM_FLAG_DECALS_SINGULAR_ONLY) != 0u;
+	if (singular_only ? !is_singular_path(path_flags) : get_diffuse_bounces(path_flags) != 0u) {
+		return;
+	}
+#endif
 	vec3 pos = h.hit_pos;
 	ivec3 cell = ivec3(floor(pos * uintBitsToFloat(rt_decal_grid[0])));
 	uint global_end = 4u + rt_decal_grid[2];
@@ -159,3 +169,45 @@ void rt_apply_decals(HitData h, vec3 p_geo_normal, inout MaterialResult m) {
 		}
 	}
 }
+
+#ifdef RT_DEBUG_ENABLED
+#define RT_VIS_DECAL_OVERLAP 28 // Environment.RT_DEBUG_DECAL_OVERLAP.
+
+/// Environment.RT_DEBUG_DECAL_OVERLAP: the number of decals rt_apply_decals() blends over the hit (in its box, its cull
+/// mask, a fade above zero), in NVIDIA's colors (49a825dc52, raytracing_decals_inc.glsl:183-192): black none; green,
+/// yellow, orange and red 1 to 4; magenta more than 4. Theirs drops the bottom-most decals past 4; these are all applied.
+void rt_decal_debug_overlap(HitData h, vec3 p_geo_normal) {
+	uint count = 0u;
+	if (get_rt_param(RT_PARAM_DECAL_COUNT) > 0.0) {
+		const vec4 pos4 = vec4(h.hit_pos, 1.0);
+		const ivec3 cell = ivec3(floor(h.hit_pos * uintBitsToFloat(rt_decal_grid[0])));
+		const uint global_end = 4u + rt_decal_grid[2];
+		const uint bucket = global_end + (rt_decal_grid_hash(cell) & rt_decal_grid[1]);
+		const uint layer_mask = geometries[h.geometry_idx].layer_mask;
+		// The global list, then the cell's bucket: they hold no decal twice.
+		const uvec2 lists[2] = uvec2[2](uvec2(4u, global_end), uvec2(rt_decal_grid[bucket], rt_decal_grid[bucket + 1u]));
+		for (uint l = 0u; l < 2u; l++) {
+			for (uint i = lists[l].x; i < lists[l].y; i++) {
+				const uint idx = rt_decal_grid[i];
+				if ((rt_decals[idx].mask & layer_mask) == 0u) {
+					continue;
+				}
+				const vec3 uv_local = vec3(dot(rt_decals[idx].xform[0], pos4), dot(rt_decals[idx].xform[1], pos4), dot(rt_decals[idx].xform[2], pos4));
+				if (any(lessThan(uv_local, vec3(0.0, -1.0, 0.0))) || any(greaterThan(uv_local, vec3(1.0)))) {
+					continue;
+				}
+				float fade = pow(1.0 - abs(uv_local.y), uv_local.y > 0.0 ? rt_decals[idx].upper_fade : rt_decals[idx].lower_fade);
+				if (rt_decals[idx].normal_fade > 0.0) {
+					fade *= smoothstep(rt_decals[idx].normal_fade, 1.0, dot(p_geo_normal, rt_decals[idx].normal) * 0.5 + 0.5);
+				}
+				if (fade > 0.0) {
+					count++;
+				}
+			}
+		}
+	}
+	const vec3 colors[5] = vec3[5](vec3(0.0), vec3(0.0, 1.0, 0.0), vec3(1.0, 1.0, 0.0), vec3(1.0, 0.5, 0.0), vec3(1.0, 0.0, 0.0));
+	payload.hit_t = gl_HitTEXT;
+	payload_write_light(payload, count > 4u ? vec3(1.0, 0.0, 1.0) : colors[count], HIT_FLAG_DEBUG);
+}
+#endif // RT_DEBUG_ENABLED

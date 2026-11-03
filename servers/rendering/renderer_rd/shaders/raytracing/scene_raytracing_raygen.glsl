@@ -140,6 +140,9 @@ void trace_probe_ray() {
 	// As the ray a traced surface sends after its diffuse bounce, so the probe gets the indirect light such a surface there
 	// would: no per pixel writes (they are the primary ray's), and a miss takes the Environment's ambient light.
 	ps.packed_bounces_flags = pack_bounces(1u, 1u);
+#ifdef RT_DECAL_MODE
+	ps.packed_bounces_flags |= NON_SINGULAR_PATH_FLAG;
+#endif
 	ps.rng_state = init_rng(uvec2(ray, probe), uint(get_rt_param(RT_PARAM_FRAME_INDEX)), 0x5052u);
 #ifdef NRD_ENABLED
 	nrd_path_init(ps, false);
@@ -328,6 +331,11 @@ void main() {
 			// As deep as a camera path; not sample zero: no primary writes. Along the transparent surface's specular lobe:
 			// a miss takes the reflected light, as the raster transparent pass reflects.
 			rs.packed_bounces_flags = set_specular_lobe(pack_bounces(0u, 0u), true);
+#ifdef RT_DECAL_MODE
+			if (fr.roughness > SINGULAR_ROUGHNESS_MAX) {
+				rs.packed_bounces_flags |= NON_SINGULAR_PATH_FLAG;
+			}
+#endif
 			rs.rng_state = front_rng_state;
 #ifdef NRD_ENABLED
 			nrd_path_init(rs, false);
@@ -723,6 +731,12 @@ void main() {
 		}
 	}
 
+#ifdef RT_DEBUG_ENABLED
+	if (int(get_rt_param(RT_PARAM_VIS_MODE)) == RT_VIS_DECAL_OVERLAP) {
+		rt_decal_debug_overlap(h, rt_geo_normal);
+		return;
+	}
+#endif
 	rt_apply_decals(h, rt_geo_normal, m);
 
 #ifdef RT_DEBUG_ENABLED
@@ -876,6 +890,12 @@ void main() {
 	}
 	m.specular_disabled = (mat.flags & MAT_FLAG_SPECULAR_DISABLED) != 0u;
 
+#ifdef RT_DEBUG_ENABLED
+	if (int(get_rt_param(RT_PARAM_VIS_MODE)) == RT_VIS_DECAL_OVERLAP) {
+		rt_decal_debug_overlap(h, h.geometry_normal);
+		return;
+	}
+#endif
 	rt_apply_decals(h, h.geometry_normal, m);
 
 #ifdef RT_DEBUG_ENABLED

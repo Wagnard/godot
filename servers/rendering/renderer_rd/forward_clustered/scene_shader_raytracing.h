@@ -93,6 +93,17 @@ public:
 		// Transparent surfaces filter the light of the shadow rays (rendering/pathtracing/transparent_shadows,
 		// RT_TRANSPARENT_SHADOWS): their any-hit shaders and the shadow rays carry a transmittance. A project setting too.
 		RT_FLAG_TRANSPARENT_SHADOWS = (1 << 7),
+		// rendering/pathtracing/decals is not All Hits (RT_DECAL_MODE): the closest hits leave the decals out past the path
+		// vertices the mode keeps (RT_PARAM_FLAG_DECALS_SINGULAR_ONLY picks which); All Hits keeps the other variants'
+		// code unchanged. A project setting too.
+		RT_FLAG_DECAL_MODE = (1 << 8),
+	};
+
+	// rendering/pathtracing/decals: which path vertices receive decals.
+	enum RTDecalMode {
+		RT_DECAL_MODE_ALL_HITS = 0, // Every hit, as raster applies them wherever it shades (the default).
+		RT_DECAL_MODE_SKIP_AFTER_DIFFUSE = 1, // Until the path's first diffuse bounce.
+		RT_DECAL_MODE_SINGULAR_ONLY = 2, // Camera hits and mirror-like reflections only (SINGULAR_ROUGHNESS_MAX).
 	};
 
 	// RT pipeline limits (must match GLSL payload/hit attribute struct sizes).
@@ -118,6 +129,8 @@ public:
 	static constexpr int RT_PARAM_FLAGS = 13;
 	static constexpr uint32_t RT_PARAM_FLAG_LIGHT_SAMPLING_RIS = 1u << 0; // rendering/pathtracing/light_sampling_ris.
 	static constexpr uint32_t RT_PARAM_FLAG_RUSSIAN_ROULETTE = 1u << 1; // rendering/pathtracing/russian_roulette.
+	// rendering/pathtracing/decals Singular Only, else Skip After Diffuse: read in the RT_FLAG_DECAL_MODE variant only.
+	static constexpr uint32_t RT_PARAM_FLAG_DECALS_SINGULAR_ONLY = 1u << 2;
 	static constexpr int RT_PARAM_LIGHT_COUNT = 14;
 	static constexpr int RT_PARAM_FRAME_INDEX = 15;
 
@@ -632,12 +645,13 @@ public:
 		Vector<String> sources; // Parallel to stages.
 	};
 	// The variants' base programs and hit group 0's opacity micromap bake. p_simple_shadows, p_ser,
-	// p_specular_motion_vectors and p_transparent_shadows: the project's rendering/pathtracing/use_simple_shadows,
-	// use_shader_execution_reordering, specular_motion_vectors and transparent_shadows.
-	void get_bake_programs(bool p_simple_shadows, bool p_ser, bool p_specular_motion_vectors, bool p_transparent_shadows, LocalVector<BakeProgram> &r_programs);
+	// p_specular_motion_vectors, p_transparent_shadows and p_decal_mode: the project's
+	// rendering/pathtracing/use_simple_shadows, use_shader_execution_reordering, specular_motion_vectors,
+	// transparent_shadows, and decals other than All Hits.
+	void get_bake_programs(bool p_simple_shadows, bool p_ser, bool p_specular_motion_vectors, bool p_transparent_shadows, bool p_decal_mode, LocalVector<BakeProgram> &r_programs);
 	// p_material's hit group in every such variant, and its displacement and opacity micromap bake programs; nothing for a
 	// material path traced by hit group 0.
-	void get_material_bake_programs(RID p_material, bool p_simple_shadows, bool p_ser, bool p_specular_motion_vectors, bool p_transparent_shadows, LocalVector<BakeProgram> &r_programs);
+	void get_material_bake_programs(RID p_material, bool p_simple_shadows, bool p_ser, bool p_specular_motion_vectors, bool p_transparent_shadows, bool p_decal_mode, LocalVector<BakeProgram> &r_programs);
 	static String get_binary_cache_file_name(const String &p_key, const String &p_api);
 	static Vector<uint8_t> make_binary_cache_file(const Vector<uint8_t> &p_binary);
 	// Null when the path tracer's shaders were never initialized (no Forward+ renderer).
