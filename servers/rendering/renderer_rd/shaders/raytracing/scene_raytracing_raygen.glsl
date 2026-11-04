@@ -1078,10 +1078,8 @@ void main() {
 		}
 		emissive = ((mat.flags & MAT_FLAG_EMISSION_ADD) != 0u ? mat.emission_color + emission_tex : mat.emission_color * emission_tex) * mat.emission_strength;
 		emissive *= scene_data_block.data.emissive_exposure_normalization;
-		// emission_indirect_energy (EMISSION_INDIRECT), after the path's first diffuse bounce.
-		if (get_diffuse_bounces(payload.packed_bounces_flags) != 0u) {
-			emissive *= mat.emission_indirect;
-		}
+		// emission_indirect_energy (MaterialData.emission_indirect) is applied by the raygen (trace_path_ray()): this hit
+		// group reads nothing from the payload (PT-VK-SER-HG0-PAYLOAD-READ-WA.md).
 	}
 
 	// Build MaterialResult.

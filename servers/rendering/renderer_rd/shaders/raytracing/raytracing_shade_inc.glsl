@@ -704,7 +704,7 @@ bool trace_path_ray(inout PathState ps, inout vec3 ray_origin, inout vec3 ray_di
 	traceRayEXT(tlas, RT_RAY_FLAGS, mask, 0, 0, 0, ray_origin, 0.001, ray_dir, 10000.0, 0);
 
 	const bool missed = is_path_terminated(payload.packed_bounces_flags);
-	const HitRecord r = hit_unpack(payload);
+	HitRecord r = hit_unpack(payload);
 #endif
 	r_hit_t = r.hit_t;
 #ifdef RT_DEBUG_ENABLED
@@ -739,6 +739,12 @@ bool trace_path_ray(inout PathState ps, inout vec3 ray_origin, inout vec3 ray_di
 	if ((r.flags & HIT_FLAG_PASS_THROUGH) != 0u) {
 		ray_origin = offset_ray_origin(hit_pos, ray_dir);
 		return true;
+	}
+	// BaseMaterial3D's emission_indirect_energy (EMISSION_INDIRECT) after the path's first diffuse bounce: here rather than in
+	// hit group 0, which would have to read the path's bounces from the payload (PT-VK-SER-HG0-PAYLOAD-READ-WA.md). 1.0 for the
+	// other shaders, whose hit groups apply their own EMISSION_INDIRECT.
+	if (get_diffuse_bounces(ps.packed_bounces_flags) != 0u && any(greaterThan(r.emissive, vec3(0.0)))) {
+		r.emissive *= materials[r.geometry_idx].emission_indirect;
 	}
 	vec3 offset_normal;
 	vec3 next_dir;
