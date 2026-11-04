@@ -3813,18 +3813,10 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 		mat.uv1_offset_z = o.z;
 	}
 
-	// BaseMaterial3D's triplanar mapping and billboard modes are shader features, not parameters: read them from its
-	// generated code.
-	mat_data->billboard_mode = RT_BILLBOARD_DISABLED;
-	mat_data->billboard_keep_scale = false;
+	// BaseMaterial3D's triplanar mapping and the like are shader features, not parameters: read them from its generated
+	// code. Its billboard modes are render modes, which build_tlas() reads from the shader (RenderingBillboard).
 	if (!mat_data->is_custom_shader) {
 		const String code = material_storage->material_get_shader_code_rt(p_material_rid);
-		if (code.contains("// Billboard Mode: Enabled")) {
-			mat_data->billboard_mode = RT_BILLBOARD_ENABLED;
-		} else if (code.contains("// Billboard Mode: Y-Billboard")) {
-			mat_data->billboard_mode = RT_BILLBOARD_FIXED_Y;
-		}
-		mat_data->billboard_keep_scale = code.contains("// Billboard Keep Scale: Enabled");
 		if (code.contains(", unshaded")) {
 			mat.flags |= RT_MAT_FLAG_UNSHADED;
 		}
@@ -4873,24 +4865,15 @@ _FORCE_INLINE_ static uint32_t _rt_indices_to_primitives(RSE::PrimitiveType p_pr
 	return (p_indices - subtractor[p_primitive]) / divisor[p_primitive];
 }
 
-// The instance transform BaseMaterial3D's billboard modes give in vertex() (MODELVIEW_MATRIX without the view).
-static Transform3D _billboard_transform(const Transform3D &p_model, const Transform3D &p_camera, RTBillboardMode p_mode, bool p_keep_scale) {
-	Basis basis = p_camera.basis;
-	if (p_mode == RT_BILLBOARD_FIXED_Y) {
-		const Vector3 up(0, 1, 0);
-		const Vector3 x = up.cross(p_camera.basis.get_column(2));
-		const Vector3 z = p_camera.basis.get_column(0).cross(up);
-		if (x.length_squared() < CMP_EPSILON2 || z.length_squared() < CMP_EPSILON2) {
-			return p_model; // Camera looking straight up or down: raster divides by zero there.
-		}
-		basis.set_column(0, x.normalized());
-		basis.set_column(1, up);
-		basis.set_column(2, z.normalized());
-	}
-	if (p_keep_scale) {
-		basis = basis * Basis::from_scale(p_model.basis.get_scale_abs());
-	}
-	return Transform3D(basis, p_model.origin);
+// The camera the billboard and fixed_size render modes face, as NVIDIA's _rt_billboard_camera() (render_raytracing.cpp:233
+// @49a825dc52): raster's billboard_inc.glsl takes the main camera's (MAIN_CAM_INV_VIEW_MATRIX) for every pass, so every
+// ray meets the billboard the camera sees, shadow rays too.
+static RenderingBillboard::Camera _billboard_camera(const Transform3D &p_transform, const Projection &p_projection) {
+	RenderingBillboard::Camera camera;
+	camera.transform = p_transform;
+	camera.orthogonal = p_projection.is_orthogonal();
+	camera.projection_y_scale = p_projection.columns[1][1];
+	return camera;
 }
 
 RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data, uint32_t p_rt_flags) {
@@ -5526,9 +5509,14 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 
 			// Compute or reuse cached final transform (instance * aabb_transform for compressed meshes).
 			Transform3D final_transform;
-			const bool billboard = mat_data->billboard_mode != RT_BILLBOARD_DISABLED;
+			// The billboard and fixed_size render modes (BaseMaterial3D's billboard modes and fixed_size, Sprite3D, Label3D,
+			// and any shader declaring them), which raster applies to MODELVIEW_MATRIX (billboard_inc.glsl): the TLAS
+			// instance takes the world transform they give (RenderingBillboard, its CPU mirror). A single instance has no
+			// INSTANCE_CUSTOM: billboard_particles turns by 0.
+			const RenderingBillboard::Settings billboard_settings = surf->shader ? surf->shader->billboard : RenderingBillboard::Settings();
+			const bool billboard = billboard_settings.is_camera_dependent();
 			if (billboard) {
-				final_transform = _billboard_transform(instance_transform, p_render_data->scene_data->cam_transform, mat_data->billboard_mode, mat_data->billboard_keep_scale);
+				final_transform = RenderingBillboard::compute_world_transform(billboard_settings, instance_transform, _billboard_camera(p_render_data->scene_data->cam_transform, p_render_data->scene_data->cam_projection));
 				if (surf_data->is_compressed) {
 					final_transform = final_transform * surf_data->aabb_transform;
 				}
@@ -5553,7 +5541,7 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 				// Turning with the camera is motion too.
 				motion_indices.push_back((int32_t)motion_transforms.size());
 				RT_InstanceMotionData motion = {};
-				Transform3D prev_final = _billboard_transform(prev_instance_transform, p_render_data->scene_data->prev_cam_transform, mat_data->billboard_mode, mat_data->billboard_keep_scale);
+				Transform3D prev_final = RenderingBillboard::compute_world_transform(billboard_settings, prev_instance_transform, _billboard_camera(p_render_data->scene_data->prev_cam_transform, p_render_data->scene_data->prev_cam_projection));
 				if (surf_data->is_compressed) {
 					prev_final = prev_final * surf_data->aabb_transform;
 				}

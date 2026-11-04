@@ -562,17 +562,8 @@ struct RTDeformedGeometrySource {
 	bool no_duplicate_any_hit = false; ///< The BLAS needs RTSurfaceData::no_duplicate_any_hit (kept once built with it).
 };
 
-// BaseMaterial3D's billboard modes, which place the instance in vertex().
-enum RTBillboardMode : uint8_t {
-	RT_BILLBOARD_DISABLED,
-	RT_BILLBOARD_ENABLED,
-	RT_BILLBOARD_FIXED_Y,
-};
-
 struct RTMaterialData {
 	alignas(16) RT_MaterialData data = {};
-	RTBillboardMode billboard_mode = RT_BILLBOARD_DISABLED;
-	bool billboard_keep_scale = false;
 	uint32_t global_buffer_index = UINT32_MAX;
 	uint32_t rt_sbt_offset = 0;
 	bool is_custom_shader = false;
