@@ -92,6 +92,7 @@ protected:
 	virtual void _free_rt_viewport_state(RenderSceneBuffersRD *p_render_buffers) override;
 
 public:
+	virtual bool pathtracing_is_used(RID p_env, RID p_viewport) const override;
 	virtual bool environment_pathtracing_replaces_shadow_maps(RID p_env) const override;
 	virtual bool environment_pathtracing_fog_traces_shadows(RID p_env) const override;
 	virtual void update() override;

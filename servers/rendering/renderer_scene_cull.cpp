@@ -3511,7 +3511,7 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 
 	if (p_reflection_probe.is_null()) {
 		//no rendering code here, this is only to set up what needs to be done, request regions, etc.
-		scene_render->sdfgi_update(p_render_buffers, p_environment, camera_position); //update conditions for SDFGI (whether its used or not)
+		scene_render->sdfgi_update(p_render_buffers, p_environment, p_viewport, camera_position); //update conditions for SDFGI (whether its used or not)
 	}
 
 	RENDER_TIMESTAMP("Update Visibility Dependencies");
@@ -3554,7 +3554,7 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 
 	// RT: build wider AABB cull volume for TLAS and light gathering.
 	// The same test as the path tracer's own (RenderForwardClusteredPT::_render_scene()): reflection probes are rasterized.
-	cull.rt_enabled = p_reflection_probe.is_null() && p_environment.is_valid() && scene_render->environment_get_pathtracing_enabled(p_environment);
+	cull.rt_enabled = p_reflection_probe.is_null() && scene_render->pathtracing_is_used(p_environment, p_viewport);
 	if (cull.rt_enabled) {
 		float z_far = p_camera_data->main_projection.get_z_far();
 		Vector3 cam_origin = p_camera_data->main_transform.origin;

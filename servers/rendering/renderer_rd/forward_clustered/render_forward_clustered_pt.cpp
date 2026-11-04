@@ -61,9 +61,7 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 	}
 	bool is_reflection_probe = p_render_data->reflection_probe.is_valid();
 
-	const bool use_rt = !is_reflection_probe && p_render_data->environment.is_valid() &&
-			RendererEnvironmentStorage::get_singleton()->environment_get_pathtracing_enabled(p_render_data->environment) &&
-			_setup_rt();
+	const bool use_rt = !is_reflection_probe && pathtracing_is_used(p_render_data->environment, p_render_data->viewport) && _setup_rt();
 	if (!use_rt) {
 		_age_out_motion_vectors(p_render_data);
 
@@ -1044,6 +1042,12 @@ bool RenderForwardClusteredPT::_transparent_pass_traces_shadows() {
 	// GODOT_RT_TRANSPARENT_SHADOWS=0: the shadow maps instead, rendered for every light again (comparisons).
 	static const bool off = OS::get_singleton()->get_environment("GODOT_RT_TRANSPARENT_SHADOWS") == "0";
 	return RD::get_singleton()->has_feature(RD::SUPPORTS_RAY_QUERY) && !off;
+}
+
+bool RenderForwardClusteredPT::pathtracing_is_used(RID p_env, RID p_viewport) const {
+	// Viewport.use_pathtracing = false: that viewport rasterizes even when its environment path traces.
+	return p_env.is_valid() && environment_get_pathtracing_enabled(p_env) &&
+			(p_viewport.is_null() || RSG::viewport->viewport_get_use_pathtracing(p_viewport));
 }
 
 bool RenderForwardClusteredPT::environment_pathtracing_replaces_shadow_maps(RID p_env) const {
