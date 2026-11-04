@@ -623,7 +623,7 @@ struct RTDeformedCacheEntry {
 	uint32_t displaced_instance_uniforms_hash = 0; // The instance uniforms vertex() was evaluated with.
 	bool displaced_deferred = false; // A change waits for the surface's next update frame (far from the camera).
 	Transform3D displaced_transform;
-	uint64_t displaced_deformation = 0; // A captured skinned surface's: the skinning output it was captured from.
+	uint64_t displaced_deformation = 0; // A skinned surface's: the skinning output it was evaluated from.
 	// Last evaluated by a vertex capture (rt_capture_inc.glsl), which leaves the previous positions' section out: the
 	// previous positions are then the last evaluation's (process_deformed_surface()).
 	bool displaced_captured = false;

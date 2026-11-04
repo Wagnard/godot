@@ -3381,7 +3381,7 @@
 		</member>
 		<member name="rendering/pathtracing/vertex_capture_mode" type="int" setter="" getter="" default="2">
 			Controls which mesh surfaces the path tracer vertex-captures: their material's raster vertex shader runs over every vertex and stores where [code]vertex()[/code] put it, and the surface is traced with that geometry. Without a capture, a surface whose [code]vertex()[/code] function writes [code]VERTEX[/code] or [code]MODELVIEW_MATRIX[/code] is evaluated by the path tracer's own compute pass (the same vertices, from the material's code compiled for ray tracing). Read every frame. Both are updated as often (see [member rendering/pathtracing/displacement_update_distance]).
-			- [b]Automatic[/b] ([code]0[/code]): Captures every such surface. Also captures skinned and blend shape meshes whose material writes [code]VERTEX[/code] in [code]vertex()[/code], which the compute pass leaves at their skinned pose.
+			- [b]Automatic[/b] ([code]0[/code]): Captures every such surface, skinned and blend shape meshes included.
 			- [b]Opt-in[/b] ([code]1[/code]): Only captures the surfaces of shaders with [code]render_mode rt_vertex_dynamic[/code] or [code]rt_vertex_frozen[/code]; the compute pass evaluates the others.
 			- [b]Disabled[/b] ([code]2[/code]): Never captures; the compute pass evaluates every such surface.
 			[code]render_mode rt_vertex_static[/code] leaves a surface undeformed in every mode, and [code]rt_vertex_frozen[/code] evaluates it only when its mesh or shader changes.

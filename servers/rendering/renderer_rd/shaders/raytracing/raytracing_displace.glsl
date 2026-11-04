@@ -46,7 +46,9 @@ struct DisplaceJob {
 	mat4 inv_model_matrix;
 	mat4 prev_model_matrix; // The current one for a teleported instance, as raster's motion vectors.
 	mat4 prev_inv_model_matrix;
-	GeometryData geom; // The mesh surface as stored (possibly compressed).
+	// The mesh surface as stored (possibly compressed). A skinned or blend shape surface's: its skinning output (this
+	// frame's at vertex_address, the previous frame's at prev_vertex_address), uncompressed, as raster's vertex input.
+	GeometryData geom;
 	uint64_t material_address;
 	uint tbn_words; // 0, 1 (normal) or 2 (normal and tangent) per vertex.
 	uint instance_uniforms_ofs;
@@ -108,6 +110,18 @@ layout(set = 3, binding = 6, std430) restrict buffer GuardCounts {
 	uint v[];
 }
 guard_counts;
+
+// Bound so the graph orders the skinning of this frame (MeshStorage::update_mesh_instances()) before this pass; read
+// through the job's addresses.
+layout(set = 3, binding = 7, std430) restrict readonly buffer DeformedVertices {
+	uint v[];
+}
+deformed_vertices;
+
+layout(set = 3, binding = 8, std430) restrict readonly buffer DeformedPreviousVertices {
+	uint v[];
+}
+deformed_previous_vertices;
 
 layout(push_constant, std430) uniform Params {
 	uint job_index;
@@ -221,7 +235,7 @@ void main() {
 		float value = global_shader_uniforms.data[0].x + scene_data_block.data.time;
 		value += texelFetch(sampler2D(bindless_textures[nonuniformEXT(index)], SAMPLER_NEAREST_CLAMP), ivec2(0), 0).r;
 		value += texelFetch(sampler2DArray(bindless_texture_arrays[nonuniformEXT(index)], SAMPLER_NEAREST_CLAMP), ivec3(0), 0).r;
-		dst.v[0] = material_dependency.v[0] + floatBitsToUint(value) + floatBitsToUint(mm_transforms.v[0]) + mm_remap.v[0] + blas_positions.v[0];
+		dst.v[0] = material_dependency.v[0] + floatBitsToUint(value) + floatBitsToUint(mm_transforms.v[0]) + mm_remap.v[0] + blas_positions.v[0] + deformed_vertices.v[0] + deformed_previous_vertices.v[0];
 		mm_previous.v[0] = 0u;
 		guard_counts.v[0] = 0u;
 	}
@@ -307,8 +321,20 @@ void main() {
 	rt_instance_uniforms_ofs = job.instance_uniforms_ofs;
 
 	// As raster computes motion vectors: vertex() again with the previous frame's time, camera and transform (the
-	// uniforms stay current), for the motion of the previous position.
-	vec3 previous = displace_vertex(job, rest_position, tbn, index, true);
+	// uniforms stay current), for the motion of the previous position; on the previous frame's skinning output for a
+	// skinned or blend shape surface (raster's previous vertex attributes).
+	vec3 previous_rest_position = rest_position;
+	TBNResult previous_tbn = tbn;
+	const uint64_t previous_address = packUint2x32(uvec2(geom.prev_vertex_address_lo, geom.prev_vertex_address_hi));
+	if (previous_address != 0ul) {
+		GeometryData previous_geom = geom;
+		previous_geom.vertex_address = previous_address;
+		previous_rest_position = fetch_position(previous_geom, index);
+		if (geom.normal_byte_offset != OFFSET_NONE) {
+			previous_tbn = (geom.flags & FLAG_COMPRESSED) != 0u ? fetch_tbn_compressed_vertex(previous_geom, index) : fetch_tbn_uncompressed_vertex(previous_geom, index);
+		}
+	}
+	vec3 previous = displace_vertex(job, previous_rest_position, previous_tbn, index, true);
 	vec3 displaced = displace_vertex(job, rest_position, tbn, index, false);
 
 	// A refit may not turn a triangle on or off: DXR "Inactive primitives and instances" (inactive primitives may not

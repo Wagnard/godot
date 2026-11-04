@@ -1678,7 +1678,7 @@ void RenderRaytracing::_schedule_dynamic_updates(const RenderDataRD *p_render_da
 	const uint32_t current_frame = p_turns.frame;
 
 	// Skinned and blend shape surfaces whose deformed buffer changed: build_tlas() refits their BLAS (builds it again with
-	// RT_BLAS_UPDATE_REBUILD). Those displaced further by a vertex capture are candidates of _displace_surfaces().
+	// RT_BLAS_UPDATE_REBUILD). Those displaced further by vertex() are candidates of _displace_surfaces().
 	const PagedArray<RenderGeometryInstance *> &rt_instances = *p_render_data->rt_instances;
 	for (uint32_t i = 0; i < (uint32_t)rt_instances.size(); i++) {
 		const RenderForwardClustered::GeometryInstanceForwardClustered *inst =
@@ -1832,9 +1832,12 @@ void RenderRaytracing::_displace_surfaces(const RenderDataRD *p_render_data, con
 		RTDeformedCacheEntry *entry = nullptr;
 		RID handle;
 		RID shader;
-		RID pipeline; // RID() for a capture that has no compute fallback (skinned, or its program still compiles).
+		RID pipeline; // RID() for a capture that has no compute fallback (its program still compiles).
 		RID material_buffer;
 		RID blas_positions; // A refit's: the positions its BLAS has.
+		// A skinned or blend shape surface's skinning output, this frame's and the previous one's: vertex()'s input.
+		RID deformed_vb;
+		RID deformed_prev_vb;
 		uint32_t vertex_count = 0;
 		uint32_t capture = UINT32_MAX; // Its vertex capture request, if any.
 	};
@@ -1849,6 +1852,7 @@ void RenderRaytracing::_displace_surfaces(const RenderDataRD *p_render_data, con
 		RTMaterialData *mat_data = nullptr;
 		RID program_shader;
 		RID pipeline;
+		RID deformed_vb;
 		void *mesh_surface = nullptr;
 		uint64_t format = 0;
 		uint64_t deformation = 0;
@@ -1878,10 +1882,11 @@ void RenderRaytracing::_displace_surfaces(const RenderDataRD *p_render_data, con
 	for (uint32_t i = 0; i < (uint32_t)rt_instances.size(); i++) {
 		const RenderForwardClustered::GeometryInstanceForwardClustered *inst =
 				static_cast<const RenderForwardClustered::GeometryInstanceForwardClustered *>(rt_instances[i]);
-		// MultiMesh and procedural geometry are not covered. Skinned and blend shape meshes have their own deformed buffer:
-		// only a vertex capture moves them further, from that buffer, as raster's vertex shader.
+		// MultiMesh and procedural geometry are not covered. Skinned and blend shape meshes have their own deformed buffer,
+		// raster's vertex input (MeshStorage::_mesh_surface_generate_version_for_input_mask()): vertex() moves them further
+		// from it, as raster's vertex shader.
 		const bool skinned = inst && inst->mesh_instance.is_valid();
-		if (!inst || !inst->data || inst->rt_procedural || inst->data->base_type == RSE::INSTANCE_MULTIMESH || (skinned && capture_mode == VERTEX_CAPTURE_DISABLED)) {
+		if (!inst || !inst->data || inst->rt_procedural || inst->data->base_type == RSE::INSTANCE_MULTIMESH) {
 			continue;
 		}
 
@@ -1912,12 +1917,13 @@ void RenderRaytracing::_displace_surfaces(const RenderDataRD *p_render_data, con
 			}
 			const bool frozen = rt_vertex == ForwardShaderData::RT_VERTEX_FROZEN;
 			const bool capture = surf->shader && (capture_mode == VERTEX_CAPTURE_AUTOMATIC || (capture_mode == VERTEX_CAPTURE_OPT_IN && (rt_vertex == ForwardShaderData::RT_VERTEX_DYNAMIC || frozen)));
-			if (skinned && !capture) {
+			// Not skinned yet: traced as without vertex() (build_tlas()).
+			const RID deformed_vb = skinned ? mesh_storage->mesh_instance_get_vertex_buffer(inst->mesh_instance, surf->surface_index) : RID();
+			if (skinned && !deformed_vb.is_valid()) {
 				continue;
 			}
 			RID program_shader;
-			// The compute program evaluates the mesh at rest: never a skinned surface's.
-			const RID pipeline = skinned ? RID() : rt_shader->get_displace_pipeline(mat_data->rt_sbt_offset, program_shader);
+			const RID pipeline = rt_shader->get_displace_pipeline(mat_data->rt_sbt_offset, program_shader);
 			if (!pipeline.is_valid() && !capture) {
 				continue;
 			}
@@ -1935,7 +1941,7 @@ void RenderRaytracing::_displace_surfaces(const RenderDataRD *p_render_data, con
 			// An instance uniform animated by a script (a wall growing out of the ground) moves the geometry too.
 			const uint32_t instance_uniforms_hash = material_storage->global_shader_parameters_instance_hash(inst->shader_uniforms_offset);
 			const bool first = entry->displaced_frame == 0;
-			// A captured skinned surface follows its skinning (its deformed buffer is the vertex shader's input).
+			// A skinned surface follows its skinning (its deformed buffer is vertex()'s input).
 			const uint64_t deformation = skinned ? mesh_storage->mesh_instance_get_last_change(inst->mesh_instance, surf->surface_index) : 0;
 			// rt_vertex_frozen: only what changes the surface or its shader evaluates it again.
 			bool reshaped = first || entry->displaced_slot != mat_data->rt_sbt_offset || (!frozen && entry->displaced_transform != inst->transform);
@@ -2016,6 +2022,7 @@ void RenderRaytracing::_displace_surfaces(const RenderDataRD *p_render_data, con
 			evaluation.mat_data = mat_data;
 			evaluation.program_shader = program_shader;
 			evaluation.pipeline = pipeline;
+			evaluation.deformed_vb = deformed_vb;
 			evaluation.mesh_surface = mesh_surface;
 			evaluation.format = format;
 			evaluation.deformation = deformation;
@@ -2088,8 +2095,23 @@ void RenderRaytracing::_displace_surfaces(const RenderDataRD *p_render_data, con
 		RT_DisplaceJob data = {};
 		RTSurfaceData source;
 		RID vertex_buffer, attribute_buffer;
-		_fill_surface_geometry_data(mesh_surface, false, &source, &vertex_buffer, &attribute_buffer);
+		// The skinning output is uncompressed (MeshStorage::_mesh_surface_generate_vertex_format(), instanced surface), as the
+		// deformed path reads it (process_deformed_surface()).
+		_fill_surface_geometry_data(mesh_surface, evaluation.skinned, &source, &vertex_buffer, &attribute_buffer);
 		data.geometry = source.geometry;
+		RID deformed_prev_vb;
+		if (evaluation.skinned) {
+			// Raster's vertex shader runs vertex() on this frame's skinning output and, for its motion vectors, on the
+			// previous frame's (scene_forward_clustered.glsl, main()).
+			vertex_buffer = evaluation.deformed_vb;
+			deformed_prev_vb = mesh_storage->mesh_instance_get_prev_vertex_buffer(inst->mesh_instance, surf->surface_index);
+			if (!deformed_prev_vb.is_valid()) {
+				deformed_prev_vb = vertex_buffer;
+			}
+			const uint64_t prev_address = rd->buffer_get_device_address(deformed_prev_vb);
+			data.geometry.prev_vertex_buffer_address_lo = static_cast<uint32_t>(prev_address & 0xFFFFFFFFULL);
+			data.geometry.prev_vertex_buffer_address_hi = static_cast<uint32_t>(prev_address >> 32);
+		}
 		if (vertex_buffer.is_valid()) {
 			data.geometry.vertex_buffer_address = rd->buffer_get_device_address(vertex_buffer);
 		}
@@ -2118,6 +2140,10 @@ void RenderRaytracing::_displace_surfaces(const RenderDataRD *p_render_data, con
 		job.pipeline = evaluation.pipeline;
 		job.material_buffer = mat_data->uniform_buffer.is_valid() ? mat_data->uniform_buffer : mat_ubo_pool_buffer;
 		job.vertex_count = vertex_count;
+		if (evaluation.skinned) {
+			job.deformed_vb = vertex_buffer;
+			job.deformed_prev_vb = deformed_prev_vb;
+		}
 		if (evaluation.capture) {
 			job.capture = captures.size();
 			RenderForwardClustered::RTVertexCaptureRequest request;
@@ -2151,7 +2177,7 @@ void RenderRaytracing::_displace_surfaces(const RenderDataRD *p_render_data, con
 	}
 
 	// The captures, drawn by the raster renderer. Those not drawn (their shader variant or pipeline still compiles) are
-	// evaluated by the compute pass instead, or, without a compute program (skinned), traced as if not displaced.
+	// evaluated by the compute pass instead, or, while its program compiles too, traced as if not displaced.
 	if (!captures.is_empty()) {
 		if (vertex_capture_params_capacity < capture_draws.size()) {
 			if (vertex_capture_params_buffer.is_valid()) {
@@ -2272,7 +2298,9 @@ void RenderRaytracing::_displace_surfaces(const RenderDataRD *p_render_data, con
 		RD::Uniform mm_previous(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, displace_dummy_buffer);
 		RD::Uniform blas_positions(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, job.blas_positions.is_valid() ? job.blas_positions : lod_view_dummy_buffer);
 		RD::Uniform guard_counts(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, displace_guard_buffer);
-		const RID job_set = rd->uniform_set_create(Vector<RD::Uniform>{ output, material, mm_transforms, mm_remap, mm_previous, blas_positions, guard_counts }, job.shader, 3, /*p_linear_pool=*/true);
+		RD::Uniform deformed(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, job.deformed_vb.is_valid() ? job.deformed_vb : lod_view_dummy_buffer);
+		RD::Uniform deformed_previous(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, job.deformed_prev_vb.is_valid() ? job.deformed_prev_vb : lod_view_dummy_buffer);
+		const RID job_set = rd->uniform_set_create(Vector<RD::Uniform>{ output, material, mm_transforms, mm_remap, mm_previous, blas_positions, guard_counts, deformed, deformed_previous }, job.shader, 3, /*p_linear_pool=*/true);
 		rd->compute_list_bind_uniform_set(compute_list, job_set, 3);
 		job_sets.push_back(job_set);
 		if (job.blas_positions.is_valid()) {
@@ -2909,7 +2937,9 @@ void RenderRaytracing::_displace_merged_multimeshes() {
 		// A merged MultiMesh folds removed points onto the origin, it needs no guard.
 		RD::Uniform blas_positions(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, lod_view_dummy_buffer);
 		RD::Uniform guard_counts(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, displace_dummy_buffer);
-		const RID job_set = rd->uniform_set_create(Vector<RD::Uniform>{ output, material, mm_transforms, mm_remap, mm_previous, blas_positions, guard_counts }, job.shader, 3, /*p_linear_pool=*/true);
+		RD::Uniform deformed(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, lod_view_dummy_buffer);
+		RD::Uniform deformed_previous(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, lod_view_dummy_buffer);
+		const RID job_set = rd->uniform_set_create(Vector<RD::Uniform>{ output, material, mm_transforms, mm_remap, mm_previous, blas_positions, guard_counts, deformed, deformed_previous }, job.shader, 3, /*p_linear_pool=*/true);
 		rd->compute_list_bind_uniform_set(compute_list, job_set, 3);
 		job_sets.push_back(job_set);
 
@@ -5250,7 +5280,7 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 			uint32_t pre_build_size = dirty_blas_list.size();
 			uint32_t pre_refit_size = dirty_blas_update_list.size();
 
-			// MeshInstance skinning/blend shapes provide a deformed vertex buffer, unless a vertex capture displaced it further
+			// MeshInstance skinning/blend shapes provide a deformed vertex buffer, unless vertex() displaced it further
 			// (_displace_surfaces()).
 			RTSurfaceData *surf_data = nullptr;
 			RTDeformedCacheEntry *displaced = deformed_pool.get_or_null(surf->rt_deformed_handle);
