@@ -42,6 +42,7 @@
 #include "servers/rendering/renderer_rd/storage_rd/mesh_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
+#include "servers/rendering/rendering_rt_material_state.h"
 #include "servers/rendering/rendering_server.h"
 #include "servers/rendering/rendering_server_globals.h"
 #include "servers/rendering/storage/environment_storage.h"
@@ -3880,9 +3881,18 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 				mat.flags |= RT_MAT_FLAG_HAS_BACKLIGHT_TEX;
 			}
 		}
-		if (code.contains("// Emission: Enabled")) {
+		// The state BaseMaterial3D::_update_shader() packs for the path tracer (NVIDIA's RTBaseMaterialState): the switches
+		// compiled into its generated code that are not parameters.
+		const Variant rt_state_var = material_storage->material_get_param(p_material_rid, RTBaseMaterialState::PARAM_NAME);
+		const RTBaseMaterialState rt_state = rt_state_var.get_type() == Variant::INT ? RTBaseMaterialState::decode(rt_state_var) : RTBaseMaterialState();
+		if (rt_state.orm) {
+			// ORMMaterial3D: ROUGHNESS = orm_tex.g; METALLIC = orm_tex.b, without the scalars (its metallic is 0 by default).
+			mat.roughness = 1.0f;
+			mat.metallic = 1.0f;
+		}
+		if (rt_state.emission) {
 			mat.flags |= RT_MAT_FLAG_EMISSION;
-			if (code.contains("// Emission Operator: Add")) {
+			if (rt_state.emission_add) {
 				mat.flags |= RT_MAT_FLAG_EMISSION_ADD;
 			}
 			// Its EMISSION_INDIRECT.
@@ -3890,6 +3900,8 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 			if (indirect_var.get_type() == Variant::FLOAT) {
 				mat.emission_indirect = indirect_var;
 			}
+			// Not ported: emission_on_uv2 (the emission texture stays on UV1). Its hit group 0 code changed how NVIDIA's
+			// Vulkan driver compiled the SER pipeline into the defect of PT-VK-SER-PAYLOAD-WA.md (a flat gray image).
 		}
 		if (code.contains("varying vec3 uv1_triplanar_pos;")) {
 			mat.flags |= RT_MAT_FLAG_UV1_TRIPLANAR;
