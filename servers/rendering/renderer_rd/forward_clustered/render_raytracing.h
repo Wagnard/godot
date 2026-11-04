@@ -624,6 +624,7 @@ struct RTDeformedCacheEntry {
 	RID displaced_vb; // [displaced float3 positions][rest TBN block][rest float3 positions][previous frame's displaced float3 positions].
 	uint32_t displaced_vb_capacity = 0; // Bytes; grow-only.
 	uint32_t displaced_frame = 0; // Last frame the surface was displaced; 0 = never.
+	uint32_t evaluated_frame = 0; // Last frame a view evaluated vertex() on it: the later views of that frame share it.
 	uint64_t displaced_stamp = 0; // Bumped on each evaluation.
 	bool displaced_rebuild = false; // Evaluated this frame and the BLAS is to be built again, not refit (_displace_surfaces()).
 	uint32_t displaced_refits = 0; // Since the last rebuild.
@@ -689,6 +690,7 @@ struct RTMergedMMEntry {
 	// frame's give the motion vectors.
 	bool displaced = false;
 	bool displaced_this_frame = false; // Its positions moved this frame: the previous ones are valid.
+	uint64_t displaced_build = 0; // The build_tlas() call (RenderRaytracing::tlas_build_serial) that displaced it last.
 	uint32_t displaced_inputs = 0; // Hash of the material's parameters and the uniforms vertex() was evaluated with.
 	RTVertexUniformsHash vertex_uniforms; // The uniforms' current hash.
 	RID merged_prev_buffer; // float3 per merged vertex, the previous frame's displaced positions.
@@ -705,6 +707,12 @@ struct RTMergedMMEntry {
 	bool omm_index_16bit = false;
 	RID built_omm_micromap;
 	uint32_t built_omm_level = 0;
+
+	// The frame a user (a view, or another node of the same MultiMesh) chose it in build_tlas(), and the LOD it is traced at
+	// that frame: the other users of the frame trace it as built, and those that need another LOD take another entry
+	// (RenderRaytracing::MMSurfaceHandles).
+	uint32_t claimed_frame = 0;
+	uint32_t claimed_lod = 0;
 };
 
 /// A mesh LOD reduced to the vertices its indices use, for the merged MultiMesh BLASes: a LOD keeps the base
@@ -1044,11 +1052,15 @@ class RenderRaytracing {
 	} nrd_composite_shader;
 
 	struct MMSurfaceHandles {
-		LocalVector<RID> per_surface; // Grown on demand; entry per touched surface index.
+		// Grown on demand; per touched surface index, its merged entries (RTMergedMMEntry): one per LOD the users of a frame
+		// trace it at, usually one. A BLAS a view's TLAS references is never built or refit again in place for another LOD
+		// in the same frame: that TLAS tracks it only through itself, so the render graph does not order the write after the
+		// view's trace, and DXR and Vulkan require the TLAS to be built again after it.
+		LocalVector<LocalVector<RID>> per_surface;
 		uint32_t mm_validator = 0; // High 32 bits of MM RID id at last access.
 
 		// Resolve / grow storage for `p_surface_index`.
-		RID &surface_handle(uint32_t p_surface_index) {
+		LocalVector<RID> &surface_slots(uint32_t p_surface_index) {
 			if (p_surface_index >= per_surface.size()) {
 				per_surface.resize(p_surface_index + 1);
 			}
@@ -1107,7 +1119,8 @@ class RenderRaytracing {
 	uint32_t vertex_capture_guard_capacity = 0;
 	RTMergedMMEntry *_access_merged_mm_slot(RID &r_handle);
 	void _free_merged_mm_entry(RID p_handle);
-	const RTMergedMMEntry *_get_merged_mm_entry(RID p_mm_rid, uint32_t p_surface_index); // With a BLAS built, or null.
+	// The merged entries of p_mm_rid's surface (MMSurfaceHandles), released first when its RID index was recycled.
+	LocalVector<RID> &_merged_mm_slots(RID p_mm_rid, uint32_t p_surface_index);
 
 	LocalVector<uint32_t> material_free_slots;
 	uint32_t next_material_slot = 0;
@@ -1240,10 +1253,12 @@ class RenderRaytracing {
 			void *p_mesh_surface,
 			uint32_t p_mm_count,
 			uint32_t p_surface_index,
+			uint32_t p_slot, // Of _merged_mm_slots(), claimed by build_tlas() for p_lod.
 			uint32_t p_surface_counter,
 			uint32_t p_lod,
 			bool p_displace,
 			bool p_reevaluate,
+			bool p_camera_dependent, // Its vertex() reads the camera: each view evaluates it with its own.
 			bool p_rebuild_only, // RT_BLAS_UPDATE_REBUILD: every update is a build.
 			RTMaterialData *p_mat_data,
 			RID p_material,

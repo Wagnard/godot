@@ -787,17 +787,27 @@ RTDeformedCacheEntry *RenderRaytracing::_access_deformed_slot(RID &r_handle) {
 	return entry;
 }
 
-const RTMergedMMEntry *RenderRaytracing::_get_merged_mm_entry(RID p_mm_rid, uint32_t p_surface_index) {
+LocalVector<RID> &RenderRaytracing::_merged_mm_slots(RID p_mm_rid, uint32_t p_surface_index) {
+	// Side table -> pool: dense direct index keyed by RID local_index, with a validator stamp to detect RID local-index
+	// recycling for a different MM.
 	const uint32_t li = p_mm_rid.get_local_index();
+	const uint32_t mm_validator = static_cast<uint32_t>(p_mm_rid.get_id() >> 32);
 	if (li >= mm_handles.size()) {
-		return nullptr;
+		mm_handles.resize(li + 1);
 	}
-	const MMSurfaceHandles &handles = mm_handles[li];
-	if (handles.mm_validator != uint32_t(p_mm_rid.get_id() >> 32) || p_surface_index >= handles.per_surface.size()) {
-		return nullptr;
+	MMSurfaceHandles &handles = mm_handles[li];
+	if (handles.mm_validator != mm_validator) {
+		// Local index has been recycled (or first-ever access). Release any slots the previous owner left behind so we
+		// don't leak until TTL.
+		for (LocalVector<RID> &slots : handles.per_surface) {
+			for (const RID &handle : slots) {
+				_free_merged_mm_entry(handle);
+			}
+		}
+		handles.per_surface.clear();
+		handles.mm_validator = mm_validator;
 	}
-	const RTMergedMMEntry *entry = merged_mm_pool.get_or_null(handles.per_surface[p_surface_index]);
-	return entry && entry->blas.is_valid() ? entry : nullptr;
+	return handles.surface_slots(p_surface_index);
 }
 
 void RenderRaytracing::_free_merged_mm_entry(RID p_handle) {
@@ -913,14 +923,16 @@ void RenderRaytracing::prepare_frame() {
 		uint64_t unused_bytes = 0;
 		for (uint32_t i = 0; i < live.size(); i++) {
 			RTMergedMMEntry *e = merged_mm_pool.get_or_null(live[i]);
-			if (!e || e->last_used_frame == 0) {
+			// Claimed by a view that then did not merge it (build_tlas()): never used, nothing allocated.
+			const uint32_t last_used_frame = e ? MAX(e->last_used_frame, e->claimed_frame) : 0;
+			if (last_used_frame == 0) {
 				continue;
 			}
-			const uint32_t age = current_frame - e->last_used_frame;
+			const uint32_t age = current_frame - last_used_frame;
 			if (age > MM_BLAS_CACHE_TTL) {
 				_free_merged_mm_entry(live[i]);
 			} else if (age > MM_BLAS_CACHE_COLD_FRAMES) {
-				unused.push_back({ e->last_used_frame, live[i] });
+				unused.push_back({ last_used_frame, live[i] });
 				unused_bytes += e->buffer_bytes;
 			}
 		}
@@ -951,9 +963,10 @@ void RenderRaytracing::prepare_frame() {
 			if (handles.per_surface.is_empty() || mesh_storage->owns_multimesh(RID::from_uint64((uint64_t(handles.mm_validator) << 32) | li))) {
 				continue;
 			}
-			for (RID &handle : handles.per_surface) {
-				_free_merged_mm_entry(handle);
-				handle = RID();
+			for (LocalVector<RID> &slots : handles.per_surface) {
+				for (const RID &handle : slots) {
+					_free_merged_mm_entry(handle);
+				}
 			}
 			handles.per_surface.clear();
 		}
@@ -1209,7 +1222,11 @@ RTSurfaceData *RenderRaytracing::process_deformed_surface(
 		entry.prev_pos_seeded = false;
 	}
 
-	// Per-frame copies run exactly once per frame, even when the same surface is visible from multiple viewports.
+	// The previous positions are taken once per frame, by the first view that traces the surface. New data is copied by
+	// every view that finds it: a later view of the frame brings up to date what an earlier one left as it was (out of
+	// that view: out_of_view_update_distance's turns, the dynamic BLAS budgets). Its copy into owned_vb_full is also what
+	// orders its refit after the earlier views' traces, which read owned_vb_full (get_buffers_read_by_address()): their
+	// TLAS references the BLAS, but the render graph only tracks the TLAS (as NVIDIA's process_deformed_surface()).
 	const bool first_touch_this_frame = entry.last_used_frame != current_frame;
 	if (first_touch_this_frame) {
 		if (p_source.prev_offset != UINT32_MAX && data_changed) {
@@ -1218,14 +1235,14 @@ RTSurfaceData *RenderRaytracing::process_deformed_surface(
 		} else if (entry.prev_pos_seeded) {
 			rd->buffer_copy(entry.owned_vb_full, entry.prev_pos_vb, 0, 0, pos_size);
 		}
-		if (data_changed || !entry.prev_pos_seeded) {
-			rd->buffer_copy(p_source.current_vb, entry.owned_vb_full, 0, 0, full_size);
-		}
-		if (!entry.prev_pos_seeded) {
-			// Seed prev = current so motion vectors are zero on the first frame.
-			rd->buffer_copy(entry.owned_vb_full, entry.prev_pos_vb, 0, 0, pos_size);
-			entry.prev_pos_seeded = true;
-		}
+	}
+	if (data_changed || !entry.prev_pos_seeded) {
+		rd->buffer_copy(p_source.current_vb, entry.owned_vb_full, 0, 0, full_size);
+	}
+	if (!entry.prev_pos_seeded) {
+		// Seed prev = current so motion vectors are zero on the first frame.
+		rd->buffer_copy(entry.owned_vb_full, entry.prev_pos_vb, 0, 0, pos_size);
+		entry.prev_pos_seeded = true;
 	}
 
 	if (needs_full_rebuild) {
@@ -1965,6 +1982,11 @@ void RenderRaytracing::_displace_surfaces(const RenderDataRD *p_render_data, con
 			const uint32_t size = vertex_count * (3 + tbn_words + 3 + 3) * sizeof(uint32_t);
 
 			RTDeformedCacheEntry *entry = _access_deformed_slot(surf->rt_deformed_handle);
+			if (entry->evaluated_frame == current_frame && !cse->vertex_reads_camera) {
+				// An earlier view of the frame evaluated it already, with the same inputs: traced as it is, its BLAS not
+				// refit again (build_tlas() finds it displaced this frame, unchanged since).
+				continue;
+			}
 			// An instance uniform animated by a script (a wall growing out of the ground) or a global shader parameter (wind)
 			// moves the geometry too.
 			const uint32_t instance_uniforms_hash = _rt_vertex_uniforms_hash(entry->vertex_uniforms, inst->shader_uniforms_offset, material_counter, cse);
@@ -2110,6 +2132,7 @@ void RenderRaytracing::_displace_surfaces(const RenderDataRD *p_render_data, con
 			displaced_refitted++;
 		}
 		entry->displaced_stamp++;
+		entry->evaluated_frame = current_frame;
 		entry->displaced_deferred = false;
 		displaced_evaluated++;
 		displaced_vertices += vertex_count;
@@ -4249,10 +4272,12 @@ bool RenderRaytracing::_build_merged_mm_blas(
 		void *p_mesh_surface,
 		uint32_t p_mm_count,
 		uint32_t p_surface_index,
+		uint32_t p_slot,
 		uint32_t p_surface_counter,
 		uint32_t p_lod,
 		bool p_displace,
 		bool p_reevaluate,
+		bool p_camera_dependent,
 		bool p_rebuild_only,
 		RTMaterialData *p_mat_data,
 		RID p_material,
@@ -4291,36 +4316,18 @@ bool RenderRaytracing::_build_merged_mm_blas(
 	}
 	const uint64_t surface_format = mesh_storage->mesh_surface_get_format(p_mesh_surface);
 
-	// Side table -> pool: dense direct index keyed by RID local_index, with a
-	// validator stamp to detect RID local-index recycling for a different MM.
-	const uint32_t li = p_mm_rid.get_local_index();
-	const uint32_t mm_validator = static_cast<uint32_t>(p_mm_rid.get_id() >> 32);
-	if (li >= mm_handles.size()) {
-		mm_handles.resize(li + 1);
-	}
-	MMSurfaceHandles &mm_entry = mm_handles[li];
-	if (mm_entry.mm_validator != mm_validator) {
-		// Local index has been recycled (or first-ever access). Release any slots
-		// the previous owner left behind so we don't leak until TTL.
-		for (RID &handle : mm_entry.per_surface) {
-			_free_merged_mm_entry(handle);
-			handle = RID();
-		}
-		mm_entry.per_surface.clear();
-		mm_entry.mm_validator = mm_validator;
-	}
-
-	RTMergedMMEntry *entry_ptr = _access_merged_mm_slot(mm_entry.surface_handle(p_surface_index));
+	LocalVector<RID> &slots = _merged_mm_slots(p_mm_rid, p_surface_index);
+	ERR_FAIL_UNSIGNED_INDEX_V(p_slot, slots.size(), false);
+	RTMergedMMEntry *entry_ptr = _access_merged_mm_slot(slots[p_slot]);
 	ERR_FAIL_NULL_V(entry_ptr, false);
 	RTMergedMMEntry &entry = *entry_ptr;
-	const uint32_t cache_key = (li << 8) | (p_surface_index & 0xFF); // Used only for resource naming below.
+	const uint32_t cache_key = (p_mm_rid.get_local_index() << 8) | (p_surface_index & 0xFF); // Used only for resource naming below.
 
 	const uint32_t current_frame = RSG::rasterizer->get_frame_number();
 
-	// First viewport this frame does the merge dispatch + BLAS refit; later
-	// viewports referencing the same MultiMesh-surface reuse the result.
-	// `last_used_frame` doubles as the per-frame guard, so capture the gate
-	// BEFORE bumping it.
+	// The first user of the entry this frame (a view, or a node of the same MultiMesh) merges, displaces and builds or
+	// refits it; the later ones trace it as built (build_tlas() gave them this entry because they trace the same LOD).
+	// `last_used_frame` doubles as the per-frame guard, so capture the gate BEFORE bumping it.
 	const bool first_touch_this_frame = entry.last_used_frame != current_frame;
 	entry.last_used_frame = current_frame;
 
@@ -4333,6 +4340,8 @@ bool RenderRaytracing::_build_merged_mm_blas(
 	bool structure_changed = (entry.last_mm_count != p_mm_count ||
 			entry.last_surface_counter != p_surface_counter ||
 			entry.last_lod != lod);
+	// The later users of the frame were given the entry for the LOD its first user built.
+	ERR_FAIL_COND_V(structure_changed && !first_touch_this_frame, false);
 
 	if (structure_changed) {
 		// Other triangles are active: a full build, in place when the capacity below holds them.
@@ -4518,9 +4527,11 @@ bool RenderRaytracing::_build_merged_mm_blas(
 	ERR_FAIL_COND_V(!vtx_buf.is_valid(), false);
 	uint64_t vtx_bda = rd->buffer_get_device_address(vtx_buf);
 
-	// Positions displaced while near the camera go back to rest once it is no longer displaced.
-	const bool needs_rebake = first_touch_this_frame &&
-			(transforms_changed || !entry.blas_built_once || (entry.displaced && !p_displace));
+	// Positions displaced while near the camera go back to rest once it is no longer displaced. A BLAS not built yet is
+	// built by whichever user finds it so (a later one when its micromap arrived or was evicted between two views): a new
+	// BLAS, which no earlier trace of the frame references.
+	const bool needs_rebake = !entry.blas_built_once ||
+			(first_touch_this_frame && (transforms_changed || (entry.displaced && !p_displace)));
 
 	// --- Displacement by the material's vertex(), after the merge (_displace_merged_multimeshes()) ---
 	if (p_displace && !entry.merged_prev_buffer.is_valid()) {
@@ -4533,7 +4544,12 @@ bool RenderRaytracing::_build_merged_mm_blas(
 	// parameters, the instance uniforms (godot3d's Rot Blossom grows its MultiMeshes with one) or the global shader
 	// parameters vertex() reads change.
 	const uint32_t displace_inputs = p_displace ? hash_murmur3_one_32(p_material_counter, _rt_vertex_uniforms_hash(entry.vertex_uniforms, int32_t(p_instance_uniforms_ofs), p_material_counter, SceneShaderRaytracing::get_singleton()->get_custom_shader_entry(p_mat_data->rt_sbt_offset))) : 0;
-	const bool displace_now = p_displace && first_touch_this_frame && (needs_rebake || p_reevaluate || !entry.displaced || entry.displaced_inputs != displace_inputs);
+	// Once a frame, by its first user; a later view evaluates it if the earlier ones left it as it was (out of their view:
+	// out_of_view_update_distance's turns), or if vertex() reads the camera (its own). Its displacement writes the merged
+	// vertices the earlier traces read (get_buffers_read_by_address()), which orders the refit after them.
+	const bool displaced_this_frame = !first_touch_this_frame && entry.displaced_this_frame;
+	const bool displaced_for_view = displaced_this_frame && (!p_camera_dependent || entry.displaced_build == tlas_build_serial);
+	const bool displace_now = p_displace && (needs_rebake || (!displaced_for_view && (p_reevaluate || !entry.displaced || entry.displaced_inputs != displace_inputs)));
 
 	// --- Single merged dispatch: bake vertices + TBN + attributes + (optional) indices ---
 	if (needs_rebake) {
@@ -4762,12 +4778,13 @@ bool RenderRaytracing::_build_merged_mm_blas(
 		request.instance_uniforms_ofs = p_instance_uniforms_ofs;
 		mm_displace_requests.push_back(request);
 	}
-	if (first_touch_this_frame) {
+	if (first_touch_this_frame || needs_rebake || displace_now) {
 		entry.displaced = p_displace;
 		entry.displaced_this_frame = displace_now;
-		if (displace_now) {
-			entry.displaced_inputs = displace_inputs;
-		}
+	}
+	if (displace_now) {
+		entry.displaced_inputs = displace_inputs;
+		entry.displaced_build = tlas_build_serial;
 	}
 
 	// --- Populate r_surf_data from the metadata already computed above, then override merged buffer addresses.
@@ -4965,8 +4982,10 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 		uint32_t surface_counter;
 		uint32_t lod;
 		const RTLodView *lod_view;
+		uint32_t mm_slot; // Its merged entry (_merged_mm_slots()).
 		bool displace; // Its material's vertex() moves it and it is near enough.
 		bool reevaluate; // That vertex() reads the time or the camera.
+		bool camera_dependent; // That vertex() reads the camera.
 		bool rebuild_only; // RT_BLAS_UPDATE_REBUILD (_rt_blas_update()).
 		uint16_t material_counter; // Its parameters' version: a change evaluates vertex() again.
 		Transform3D instance_transform;
@@ -5172,12 +5191,14 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 				// Near the camera, a material whose vertex() moves the MultiMesh (wind) is evaluated on it, as raster draws it.
 				bool displace = false;
 				bool reevaluate = false;
+				bool camera_dependent = false;
 				static const float mm_displacement_distance = GLOBAL_GET("rendering/pathtracing/multimesh_displacement_distance");
 				if (mm_displacement_distance > 0.0f && lod_distance <= mm_displacement_distance && mat_data->rt_sbt_offset > 0) {
 					const SceneShaderRaytracing::CustomShaderEntry *displace_cse = rt_shader_singleton->get_custom_shader_entry(mat_data->rt_sbt_offset);
 					RID displace_shader;
 					if (displace_cse && displace_cse->writes_vertex && rt_shader_singleton->get_displace_pipeline(mat_data->rt_sbt_offset, displace_shader).is_valid()) {
 						displace = true;
+						camera_dependent = displace_cse->vertex_reads_camera;
 						reevaluate = displace_cse->uses_vertex_time || (displace_cse->vertex_reads_camera && displace_camera_moved);
 						if (reevaluate && !turns.turn(inst->transformed_aabb, mm_rid.get_id())) {
 							// The wind waits for its turn out of view; a change of the instances or the material still evaluates it.
@@ -5196,28 +5217,82 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 
 				uint32_t lod = 0;
 				const RTLodView *lod_view = nullptr;
+				uint32_t mm_slot = 0;
 				// GODOT_RT_MULTIMESH_LOD=0 merges every MultiMesh at its full detail. One TLAS instance per instance traces
 				// the mesh itself: its BLAS is shared, whatever the instance count.
 				static const bool multimesh_lod = OS::get_singleton()->get_environment("GODOT_RT_MULTIMESH_LOD") != "0";
-				if (!per_instance && multimesh_lod && p_render_data->scene_data->screen_mesh_lod_threshold > 0.0 && mesh_storage->mesh_surface_has_lod(mesh_surface)) {
+				if (!per_instance && mm_gpu_buffer.is_valid()) {
+					const bool lod_selected = multimesh_lod && p_render_data->scene_data->screen_mesh_lod_threshold > 0.0 && mesh_storage->mesh_surface_has_lod(mesh_surface);
 					uint32_t lod_indices = 0;
 					const float lod_model_scale = inst->lod_model_scale * inst->lod_bias;
 					const float lod_distance_scaled = lod_distance * p_render_data->scene_data->lod_distance_multiplier;
 					const float lod_threshold = p_render_data->scene_data->screen_mesh_lod_threshold;
-					lod = mesh_storage->mesh_surface_get_lod(mesh_surface, lod_model_scale, lod_distance_scaled, lod_threshold, lod_indices);
-					// A LOD switch builds the merged BLAS again, which raster pays nothing for. The LOD built stays while the
+					if (lod_selected) {
+						lod = mesh_storage->mesh_surface_get_lod(mesh_surface, lod_model_scale, lod_distance_scaled, lod_threshold, lod_indices);
+					}
+					// A LOD switch builds the merged BLAS again, which raster pays nothing for. A LOD built stays while the
 					// distance is within RT_MULTIMESH_LOD_HYSTERESIS of one that picks it, so that a distance about a threshold
 					// (an AABB following moving units) does not switch it back and forth.
-					const RTMergedMMEntry *built = _get_merged_mm_entry(mm_rid, mm_surf->surface_index);
-					const uint32_t built_lod = built ? built->last_lod : UINT32_MAX;
-					if (built_lod != UINT32_MAX && built_lod != lod) {
-						static constexpr float RT_MULTIMESH_LOD_HYSTERESIS = 0.1f;
-						const uint32_t nearer_lod = mesh_storage->mesh_surface_get_lod(mesh_surface, lod_model_scale, lod_distance_scaled * (1.0f - RT_MULTIMESH_LOD_HYSTERESIS), lod_threshold, lod_indices);
-						const uint32_t farther_lod = mesh_storage->mesh_surface_get_lod(mesh_surface, lod_model_scale, lod_distance_scaled * (1.0f + RT_MULTIMESH_LOD_HYSTERESIS), lod_threshold, lod_indices);
-						if (built_lod >= nearer_lod && built_lod <= farther_lod) {
-							lod = built_lod;
+					uint32_t nearer_lod = lod;
+					uint32_t farther_lod = lod;
+					bool lod_range_known = !lod_selected;
+					auto accepts_lod = [&](uint32_t p_lod) {
+						if (p_lod == lod) {
+							return true;
+						}
+						if (!lod_range_known) {
+							static constexpr float RT_MULTIMESH_LOD_HYSTERESIS = 0.1f;
+							nearer_lod = mesh_storage->mesh_surface_get_lod(mesh_surface, lod_model_scale, lod_distance_scaled * (1.0f - RT_MULTIMESH_LOD_HYSTERESIS), lod_threshold, lod_indices);
+							farther_lod = mesh_storage->mesh_surface_get_lod(mesh_surface, lod_model_scale, lod_distance_scaled * (1.0f + RT_MULTIMESH_LOD_HYSTERESIS), lod_threshold, lod_indices);
+							lod_range_known = true;
+						}
+						return p_lod >= nearer_lod && p_lod <= farther_lod;
+					};
+					// The users of the MultiMesh surface in a frame (its views, the nodes of a shared MultiMesh) trace the entry
+					// the first of them claimed while its LOD is one they accept, as that one built it. One that needs another LOD
+					// takes an entry no user claimed this frame: the one built at a LOD it accepts, else the first (switched in
+					// place), else a new one. A single view and node keeps its one entry.
+					LocalVector<RID> &slots = _merged_mm_slots(mm_rid, mm_surf->surface_index);
+					uint32_t shared_slot = UINT32_MAX;
+					uint32_t free_slot = UINT32_MAX;
+					bool free_slot_built = false;
+					for (uint32_t s = 0; s < slots.size(); s++) {
+						const RTMergedMMEntry *e = merged_mm_pool.get_or_null(slots[s]);
+						if (e && e->claimed_frame == current_frame) {
+							if (e->claimed_lod == lod) {
+								shared_slot = s;
+								break;
+							}
+							if (shared_slot == UINT32_MAX && accepts_lod(e->claimed_lod)) {
+								shared_slot = s;
+							}
+						} else if (!free_slot_built) {
+							const bool built_here = e && e->blas.is_valid() && accepts_lod(e->last_lod);
+							if (built_here || free_slot == UINT32_MAX) {
+								free_slot = s;
+								free_slot_built = built_here;
+							}
 						}
 					}
+					const RTMergedMMEntry *built = nullptr;
+					if (shared_slot != UINT32_MAX) {
+						mm_slot = shared_slot;
+						lod = merged_mm_pool.get_or_null(slots[mm_slot])->claimed_lod;
+					} else {
+						if (free_slot == UINT32_MAX) {
+							free_slot = slots.size();
+							slots.push_back(RID());
+						}
+						mm_slot = free_slot;
+						built = merged_mm_pool.get_or_null(slots[mm_slot]);
+						if (built && !built->blas.is_valid()) {
+							built = nullptr;
+						}
+						if (built && accepts_lod(built->last_lod)) {
+							lod = built->last_lod;
+						}
+					}
+					const uint32_t built_lod = built ? built->last_lod : UINT32_MAX;
 					if (lod > 0) {
 						// Read here: fetching a new LOD's indices waits for the GPU, which cannot happen inside the compute list of phase 2.
 						lod_view = _get_lod_view(mesh_surface, lod);
@@ -5228,7 +5303,7 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 					// A zoom switches thousands of MultiMeshes at once, each a full build of its BLAS on the GPU. A switch the
 					// instance count does not force anyway is spread over the frames: past the frame's budget of triangles, the
 					// MultiMesh keeps the LOD it is built with, a frame longer.
-					if (built_lod != UINT32_MAX && lod != built_lod && built->last_mm_count == mm_count) {
+					if (lod_selected && built_lod != UINT32_MAX && lod != built_lod && built->last_mm_count == mm_count) {
 						static const uint64_t LOD_SWITCH_TRIANGLES_PER_FRAME = uint64_t(int64_t(GLOBAL_GET("rendering/pathtracing/multimesh_lod_switch_triangles_per_frame")));
 						const uint32_t frame_number = RSG::rasterizer->get_frame_number();
 						if (lod_switch_frame != frame_number) {
@@ -5248,6 +5323,13 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 							lod_switch_triangles += switch_triangles;
 						}
 					}
+					RTMergedMMEntry *claimed = merged_mm_pool.get_or_null(slots[mm_slot]);
+					if (!claimed) {
+						slots[mm_slot] = merged_mm_pool.make_rid();
+						claimed = merged_mm_pool.get_or_null(slots[mm_slot]);
+					}
+					claimed->claimed_frame = current_frame;
+					claimed->claimed_lod = lod;
 				}
 
 				if (!(tlas_expand_supported && mm_gpu_buffer.is_valid()) && (!mm_gpu_buffer.is_valid() || !_mm_fits_merged_blas(mesh_surface, mm_count, lod_view))) {
@@ -5270,8 +5352,10 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 				pending.surface_counter = surface_counter;
 				pending.lod = lod;
 				pending.lod_view = lod_view;
+				pending.mm_slot = mm_slot;
 				pending.displace = displace;
 				pending.reevaluate = reevaluate;
+				pending.camera_dependent = camera_dependent;
 				pending.rebuild_only = _rt_blas_update(inst, mm_surf->shader) == RSE::RT_BLAS_UPDATE_REBUILD;
 				pending.material_counter = material_counter;
 				pending.instance_transform = instance_transform;
@@ -5566,8 +5650,8 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 		RTSurfaceData merged_sd;
 		bool use_merged = !pending.per_instance && pending.mm_gpu_buffer.is_valid() &&
 				_build_merged_mm_blas(pending.mm_rid, pending.mm_gpu_buffer, pending.mesh_surface,
-						pending.mm_count, pending.surface_index, pending.surface_counter, pending.lod,
-						pending.displace, pending.reevaluate, pending.rebuild_only, pending.mat_data, pending.material_rid, pending.material_counter,
+						pending.mm_count, pending.surface_index, pending.mm_slot, pending.surface_counter, pending.lod,
+						pending.displace, pending.reevaluate, pending.camera_dependent, pending.rebuild_only, pending.mat_data, pending.material_rid, pending.material_counter,
 						pending.material_ready && !(pending.inst_flags & RD::ACCELERATION_STRUCTURE_INSTANCE_FORCE_OPAQUE_BIT),
 						pending.instance_transform, pending.prev_instance_transform,
 						uint32_t(pending.mm_surf->owner->shader_uniforms_offset),
