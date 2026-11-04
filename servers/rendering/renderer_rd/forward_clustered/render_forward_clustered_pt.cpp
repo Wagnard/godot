@@ -615,6 +615,82 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 		raytracing->copy_output_texture(p_render_data, keep_background);
 	}
 
+	// The pathtracing_rasterized cards are drawn next, where raster's opaque pass draws them (RenderForwardClustered::
+	// _render_scene(), "Render Opaque Pass", before the sky, the MSAA resolve and the screen and depth copies), with the
+	// transparent pass' sets, made here. Drawn after the copies, the DEPTH_TEXTURE and SCREEN_TEXTURE readers of the
+	// transparent pass (a pool, a ground effect drawn from the depth, a refracting pane) saw what is behind them.
+	// The sets bind the copies' textures: those are made first.
+	if (using_upscaling) {
+		// Make sure the upscaled texture is initialized, but not necessarily filled, before running screen copies
+		// so it properly detect if a dedicated copy texture should be used.
+		rb->ensure_upscaled();
+	}
+	if (scene_state.used_screen_texture || global_surface_data.screen_texture_used) {
+		_render_buffers_ensure_screen_texture(p_render_data);
+	}
+	if (scene_state.used_depth_texture || global_surface_data.depth_texture_used) {
+		_render_buffers_ensure_depth_texture(p_render_data);
+	}
+
+	// The path traced reflections of the transparent surfaces, in place of their probes and sky where they match.
+	front_layer_reflection = (raytracing && raytracing->get_front_layer_instance_count() > 0) ? raytracing->rt_get_front_layer_texture(rb.ptr()) : RID();
+
+	const uint32_t transparent_pass_uniform_buffer_index = _setup_environment(p_render_data, false, screen_size, screen_size, p_default_bg_color, false);
+
+	RID rt_shadow_texture_set;
+	if (rt_shadows && scene_shader.is_rt_shadows_shader_group_enabled() && rt_state->geometry_buffer.is_valid() && rt_state->material_buffer.is_valid()) {
+		rt_shadow_texture_set = raytracing->get_fragment_texture_set(scene_shader.default_shader_rt_shadows_rd, RT_SHADOW_TEXTURES_UNIFORM_SET);
+	}
+	const bool use_rt_shadows = rt_shadow_texture_set.is_valid();
+	if (use_rt_shadows) {
+		rt_shadow_tlas = rt_state->tlas;
+		rt_shadow_geometry_buffer = rt_state->geometry_buffer;
+		rt_shadow_material_buffer = rt_state->material_buffer;
+	}
+	const RID rp_uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_ALPHA, p_render_data, radiance_texture, samplers, transparent_pass_uniform_buffer_index, true);
+	rt_shadow_tlas = RID();
+	rt_shadow_geometry_buffer = RID();
+	rt_shadow_material_buffer = RID();
+	// The cards' depth pass' own render pass set, as raster's depth pre-pass builds it (its shaders bind other formats).
+	const RID depth_uniform_set = rasterized_count > 0 ? _setup_render_pass_uniform_set(RENDER_LIST_ALPHA, nullptr, RID(), samplers, transparent_pass_uniform_buffer_index) : RID();
+	front_layer_reflection = RID();
+
+	uint32_t transparent_color_pass_flags = (color_pass_flags | uint32_t(COLOR_PASS_FLAG_TRANSPARENT)) & ~uint32_t(COLOR_PASS_FLAG_SEPARATE_SPECULAR);
+	// Motion vectors should not be overwritten by transparent objects.
+	transparent_color_pass_flags &= ~uint32_t(COLOR_PASS_FLAG_MOTION_VECTORS);
+	if (use_rt_shadows) {
+		transparent_color_pass_flags |= COLOR_PASS_FLAG_RT_SHADOWS;
+	}
+	// The alpha test reads the vertices through their addresses.
+	thread_local LocalVector<RID> rt_shadow_buffers;
+	rt_shadow_buffers.clear();
+	if (use_rt_shadows) {
+		raytracing->get_buffers_read_by_address(rt_shadow_buffers);
+	}
+	const LocalVector<RID> *rt_shadow_buffer_dependencies = use_rt_shadows ? &rt_shadow_buffers : nullptr;
+
+	if (rasterized_count > 0 && rb_data.is_valid()) {
+		RENDER_TIMESTAMP("Render Rasterized Cards");
+		RD::get_singleton()->draw_command_begin_label("Render Rasterized Cards");
+
+		// Their depth first, cut out as raster's depth pass does: the camera rays left them out, so the depth buffer has what
+		// is behind them. Their color then passes the depth test where it is theirs; the sky and the transparent pass (the
+		// DLSS-RR transparency layer: a portal's glow) stay behind them.
+		RenderListParameters depth_params(render_list[RENDER_LIST_ALPHA].elements.ptr(), render_list[RENDER_LIST_ALPHA].element_info.ptr(), rasterized_count, reverse_cull, PASS_MODE_DEPTH, 0, rb_data.is_null(), p_render_data->directional_light_soft_shadows, depth_uniform_set, false, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, 0, base_specialization);
+		_render_list_with_draw_list(&depth_params, rb_data->get_depth_fb(), RD::DRAW_DEFAULT_ALL, Vector<Color>(), 0.0f, 0u, p_render_data->render_region);
+
+		// Their color as the opaque pass draws it: opaque and cut-out cards, with their motion vectors into the velocity
+		// buffer the path tracer wrote. Without them, RR took the motion of what is behind a card for the card's
+		// own and, under parallax (the camera moving sideways), blended it with that background.
+		const uint32_t rasterized_color_pass_flags = transparent_color_pass_flags | (color_pass_flags & uint32_t(COLOR_PASS_FLAG_MOTION_VECTORS));
+		RenderListParameters rasterized_params(render_list[RENDER_LIST_ALPHA].elements.ptr(), render_list[RENDER_LIST_ALPHA].element_info.ptr(), rasterized_count, reverse_cull, PASS_MODE_COLOR, rasterized_color_pass_flags, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, 0, base_specialization);
+		rasterized_params.rt_shadow_texture_uniform_set = rt_shadow_texture_set;
+		rasterized_params.buffer_dependencies = rt_shadow_buffer_dependencies;
+		_render_list_with_draw_list(&rasterized_params, rb_data->get_color_pass_fb(rasterized_color_pass_flags), RD::DRAW_DEFAULT_ALL, Vector<Color>(), 0.0f, 0u, p_render_data->render_region);
+
+		RD::get_singleton()->draw_command_end_label();
+	}
+
 	// The sky where the camera rays missed (their depth is the far plane), drawn as raster draws it: the miss shader only
 	// reads the radiance octmap, far too coarse for a background (a sky shader's stars become a grid of blotches).
 	if (draw_sky || draw_sky_fog_only) {
@@ -659,32 +735,17 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 		_process_compositor_effects(RSE::COMPOSITOR_EFFECT_CALLBACK_TYPE_POST_SKY, p_render_data);
 	}
 
-	if (using_upscaling) {
-		// Make sure the upscaled texture is initialized, but not necessarily filled, before running screen copies
-		// so it properly detect if a dedicated copy texture should be used.
-		rb->ensure_upscaled();
-	}
-
-	if (scene_state.used_screen_texture || global_surface_data.screen_texture_used) {
+	// Their textures were made before the rasterized cards, which the copies now hold.
+	if (scene_state.used_screen_texture) {
 		RENDER_TIMESTAMP("Copy Screen Texture");
-
-		_render_buffers_ensure_screen_texture(p_render_data);
-
-		if (scene_state.used_screen_texture) {
-			// Copy screen texture to backbuffer so we can read from it
-			_render_buffers_copy_screen_texture(p_render_data);
-		}
+		// Copy screen texture to backbuffer so we can read from it
+		_render_buffers_copy_screen_texture(p_render_data);
 	}
 
-	if (scene_state.used_depth_texture || global_surface_data.depth_texture_used) {
+	if (scene_state.used_depth_texture) {
 		RENDER_TIMESTAMP("Copy Depth Texture");
-
-		_render_buffers_ensure_depth_texture(p_render_data);
-
-		if (scene_state.used_depth_texture) {
-			// Copy depth texture to backbuffer so we can read from it
-			_render_buffers_copy_depth_texture(p_render_data);
-		}
+		// Copy depth texture to backbuffer so we can read from it
+		_render_buffers_copy_depth_texture(p_render_data);
 	}
 
 	{
@@ -705,71 +766,22 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 
 		RD::get_singleton()->draw_command_begin_label("Render 3D Transparent Pass");
 
-		// The path traced reflections of the transparent surfaces, in place of their probes and sky where they match.
-		front_layer_reflection = (raytracing && raytracing->get_front_layer_instance_count() > 0) ? raytracing->rt_get_front_layer_texture(rb.ptr()) : RID();
-
-		uint32_t transparent_pass_uniform_buffer_index = _setup_environment(p_render_data, false, screen_size, screen_size, p_default_bg_color, false);
-
-		RID rt_shadow_texture_set;
-		if (rt_shadows && scene_shader.is_rt_shadows_shader_group_enabled() && rt_state->geometry_buffer.is_valid() && rt_state->material_buffer.is_valid()) {
-			rt_shadow_texture_set = raytracing->get_fragment_texture_set(scene_shader.default_shader_rt_shadows_rd, RT_SHADOW_TEXTURES_UNIFORM_SET);
-		}
-		const bool use_rt_shadows = rt_shadow_texture_set.is_valid();
-		if (use_rt_shadows) {
-			rt_shadow_tlas = rt_state->tlas;
-			rt_shadow_geometry_buffer = rt_state->geometry_buffer;
-			rt_shadow_material_buffer = rt_state->material_buffer;
-		}
-		RID rp_uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_ALPHA, p_render_data, radiance_texture, samplers, transparent_pass_uniform_buffer_index, true);
-		rt_shadow_tlas = RID();
-		rt_shadow_geometry_buffer = RID();
-		rt_shadow_material_buffer = RID();
-
 		{
-			uint32_t transparent_color_pass_flags = (color_pass_flags | uint32_t(COLOR_PASS_FLAG_TRANSPARENT)) & ~uint32_t(COLOR_PASS_FLAG_SEPARATE_SPECULAR);
-			// Motion vectors should not be overwritten by transparent objects.
-			transparent_color_pass_flags &= ~uint32_t(COLOR_PASS_FLAG_MOTION_VECTORS);
-			if (use_rt_shadows) {
-				transparent_color_pass_flags |= COLOR_PASS_FLAG_RT_SHADOWS;
-			}
-
 			RID alpha_framebuffer = rb_data->get_color_pass_fb(transparent_color_pass_flags);
 			const uint32_t alpha_count = render_list[RENDER_LIST_ALPHA].elements.size();
 			const uint32_t lit_count = MIN(rr_layer_from, alpha_count);
 			const uint32_t raster_lit_count = MIN(peel_from, lit_count);
-			// The lit transparent surfaces, after the rasterized cards (drawn apart below).
+			// The lit transparent surfaces, after the rasterized cards (drawn before the sky).
 			RenderListParameters render_list_params(render_list[RENDER_LIST_ALPHA].elements.ptr() + rasterized_count, render_list[RENDER_LIST_ALPHA].element_info.ptr() + rasterized_count, raster_lit_count - rasterized_count, reverse_cull, PASS_MODE_COLOR, transparent_color_pass_flags, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, rasterized_count, base_specialization);
 			render_list_params.rt_shadow_texture_uniform_set = rt_shadow_texture_set;
-			// The alpha test reads the vertices through their addresses.
-			thread_local LocalVector<RID> rt_shadow_buffers;
-			rt_shadow_buffers.clear();
-			if (use_rt_shadows) {
-				raytracing->get_buffers_read_by_address(rt_shadow_buffers);
-				render_list_params.buffer_dependencies = &rt_shadow_buffers;
-			}
+			render_list_params.buffer_dependencies = rt_shadow_buffer_dependencies;
 			if (rasterized_count > 0) {
-				// The pathtracing_rasterized cards' depth first, cut out as raster's depth pass does: the camera rays left
-				// them out, so the depth buffer has what is behind them. Their color then passes the depth test where it
-				// is theirs, and the surfaces drawn after them (the DLSS-RR transparency layer: a portal's glow) stay behind.
-				// The depth pass' own render pass set, as raster's depth pre-pass builds it (its shaders bind other formats).
-				RID depth_uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_ALPHA, nullptr, RID(), samplers, transparent_pass_uniform_buffer_index);
-				RenderListParameters depth_params(render_list[RENDER_LIST_ALPHA].elements.ptr(), render_list[RENDER_LIST_ALPHA].element_info.ptr(), rasterized_count, reverse_cull, PASS_MODE_DEPTH, 0, rb_data.is_null(), p_render_data->directional_light_soft_shadows, depth_uniform_set, false, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, 0, base_specialization);
-				_render_list_with_draw_list(&depth_params, rb_data->get_depth_fb(), RD::DRAW_DEFAULT_ALL, Vector<Color>(), 0.0f, 0u, p_render_data->render_region);
-
-				// Their color as the opaque pass draws it: opaque and cut-out cards, with their motion vectors into the velocity
-				// buffer the path tracer wrote. Without them, RR took the motion of what is behind a card for the card's
-				// own and, under parallax (the camera moving sideways), blended it with that background.
-				uint32_t rasterized_color_pass_flags = transparent_color_pass_flags | (color_pass_flags & uint32_t(COLOR_PASS_FLAG_MOTION_VECTORS));
-				RenderListParameters rasterized_params(render_list[RENDER_LIST_ALPHA].elements.ptr(), render_list[RENDER_LIST_ALPHA].element_info.ptr(), rasterized_count, reverse_cull, PASS_MODE_COLOR, rasterized_color_pass_flags, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, 0, base_specialization);
-				rasterized_params.rt_shadow_texture_uniform_set = rt_shadow_texture_set;
-				rasterized_params.buffer_dependencies = render_list_params.buffer_dependencies;
-				_render_list_with_draw_list(&rasterized_params, rb_data->get_color_pass_fb(rasterized_color_pass_flags), RD::DRAW_DEFAULT_ALL, Vector<Color>(), 0.0f, 0u, p_render_data->render_region);
-
 				// DLSS-RR's guides where the cards are: the path tracer wrote those of what is behind them, and RR took a card
 				// for that background's lighting. Their material pass (as SDFGI's: albedo, view normal, roughness, metallic,
 				// view depth) keeps the nearest card in a depth buffer of its own: it cuts out nothing, and must not write the
-				// scene's. PTRasterizedGuides then writes what the raygen would, where that card's depth is the scene's (the
-				// depth pass above cut the cards out).
+				// scene's. PTRasterizedGuides then writes what the raygen would, where that card's depth is the scene's (their
+				// depth pass, before the sky, cut the cards out). After dlss_rr_write_background_albedo(), which writes the
+				// background's albedo from the color where the camera rays missed: a card in front of the sky is drawn there.
 				// GODOT_RR_RASTERIZED_GUIDES=0: the path tracer's guides stay where the cards are, as before (comparisons).
 				static const bool rasterized_guides_off = OS::get_singleton()->get_environment("GODOT_RR_RASTERIZED_GUIDES") == "0";
 				if (raytracing && raytracing->dlss_rr_has_buffers(rb.ptr()) && !rasterized_guides_off) {
@@ -878,7 +890,6 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 				}
 			}
 		}
-		front_layer_reflection = RID();
 
 		RD::get_singleton()->draw_command_end_label();
 	}
