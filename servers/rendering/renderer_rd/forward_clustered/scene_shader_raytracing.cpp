@@ -2700,6 +2700,16 @@ void SceneShaderRaytracing::init(const String p_defines) {
 		modes_ptr[mask] = _raygen_variant_preamble(mask);
 	}
 	raygen_shader.initialize(modes, p_defines);
+	// Specular motion vectors are Ray Reconstruction's: compute_rt_flags() sets them only with it, and the NRD fallback
+	// (RenderForwardClusteredPT::_render_scene()) clears both. Their image (binding 44) is declared under DLSS_RR_ENABLED,
+	// so a variant with one and not the other is never traced and does not compile: disabled, neither compiled nor baked.
+	const uint32_t rr_variant_bit = _raygen_variant_from_rt_flags(RT_FLAG_DLSS_RR_ENABLED);
+	const uint32_t specular_motion_vectors_variant_bit = _raygen_variant_from_rt_flags(RT_FLAG_DLSS_RR_SPECULAR_MOTION_VECTORS);
+	for (uint32_t mask = 0; mask < variant_count; mask++) {
+		if ((mask & specular_motion_vectors_variant_bit) && !(mask & rr_variant_bit)) {
+			raygen_shader.set_variant_enabled(int(mask), false);
+		}
+	}
 
 	// Source template of the displacement pass; each slot's material code is injected into it.
 	displace_shader.initialize({ "" }, p_defines);
