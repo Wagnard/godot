@@ -344,8 +344,17 @@ void main() {
 			vec4(0.0, 0.0, 0.0, 1.0)));
 
 	vec4 target = scene_data_block.data.inv_projection_matrix * vec4(d.x, d.y, 1.0, 1.0);
-	vec4 origin = inv_view * vec4(0.0, 0.0, 0.0, 1.0);
-	vec4 direction = inv_view * vec4(normalize(target.xyz), 0);
+	vec4 origin;
+	vec4 direction;
+	if (scene_data_block.data.projection_matrix[3][3] != 0.0) {
+		// An orthogonal projection: parallel rays from the pixel's point on the near plane (NDC z = 1, reverse Z), where
+		// raster clips, as NVIDIA (49a825dc52 scene_raytracing_raygen.glsl:166-171, which starts them at the camera plane).
+		origin = inv_view * vec4(target.xyz / target.w, 1.0);
+		direction = vec4(normalize((inv_view * vec4(0.0, 0.0, -1.0, 0.0)).xyz), 0.0);
+	} else {
+		origin = inv_view * vec4(0.0, 0.0, 0.0, 1.0);
+		direction = inv_view * vec4(normalize(target.xyz), 0);
+	}
 #ifdef RT_DEBUG_ENABLED
 	if (int(get_rt_param(RT_PARAM_VIS_MODE)) == RT_VIS_TRANSPARENCY_LAYERS) {
 		debug_transparency_layers(pixel, origin.xyz, direction.xyz);
@@ -523,7 +532,8 @@ void main() {
 		const HitRecord fr = hit_unpack(payload);
 
 		if (!is_path_terminated(payload.packed_bounces_flags) && (fr.flags & (HIT_FLAG_PASS_THROUGH | HIT_FLAG_DEBUG)) == 0u) {
-			float view_depth = fr.hit_t * dot(direction.xyz, -normalize(inv_view[2].xyz));
+			// From the camera plane: an orthogonal camera's rays start on its near plane.
+			float view_depth = fr.hit_t * dot(direction.xyz, -normalize(inv_view[2].xyz)) + dot(origin.xyz - inv_view[3].xyz, -normalize(inv_view[2].xyz));
 			const vec3 front_dir = front_layer_reflection_dir(fr, direction.xyz, front_rng_state);
 #ifdef DLSS_RR_ENABLED
 			// Ray Reconstruction's albedo and roughness guides blend toward this surface where its reflection dominates

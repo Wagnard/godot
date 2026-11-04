@@ -136,6 +136,15 @@ vec3 camera_ray_direction(vec2 p_pixel) {
 	return normalize(inv_view * normalize(target.xyz));
 }
 
+/// The world point on the near plane where an orthogonal camera's ray through a pixel starts, as the raygen shader builds
+/// it.
+vec3 camera_ray_near_point(vec2 p_pixel) {
+	vec2 d = (p_pixel + 0.5) / vec2(gl_LaunchSizeEXT.xy) * 2.0 - 1.0;
+	vec4 target = scene_data_block.data.inv_projection_matrix * vec4(d, 1.0, 1.0);
+	mat4 inv_view = transpose(mat4(scene_data_block.data.inv_view_matrix[0], scene_data_block.data.inv_view_matrix[1], scene_data_block.data.inv_view_matrix[2], vec4(0.0, 0.0, 0.0, 1.0)));
+	return (inv_view * vec4(target.xyz / target.w, 1.0)).xyz;
+}
+
 /// Screen derivatives of the hit's barycentrics, what raster's dFdx()/dFdy() see on interpolated values. A camera ray
 /// is differentiated against its neighboring pixels' rays; any other ray as a cone of one pixel's angle from its origin.
 void hit_barycentric_derivatives(in GeometryData geom, uint i0, uint i1, uint i2, vec3 bary, out vec3 r_ddx, out vec3 r_ddy) {
@@ -152,7 +161,26 @@ void hit_barycentric_derivatives(in GeometryData geom, uint i0, uint i1, uint i2
 	vec3 direction = gl_WorldRayDirectionEXT;
 	vec3 camera_position = vec3(scene_data_block.data.inv_view_matrix[0].w, scene_data_block.data.inv_view_matrix[1].w, scene_data_block.data.inv_view_matrix[2].w);
 	vec3 dir_x, dir_y;
-	if (distance(origin, camera_position) < 1e-3) {
+	vec3 origin_x = origin;
+	vec3 origin_y = origin;
+	if (scene_data_block.data.projection_matrix[3][3] != 0.0) {
+		// An orthogonal camera's rays are parallel and start on its near plane (the raygen): its neighbors' rays are this one
+		// moved by a pixel. Any other ray (no ray but the camera's starts at the pixel's near plane point) as a cone below.
+		vec2 pixel = vec2(gl_LaunchIDEXT.xy);
+		vec3 center = camera_ray_near_point(pixel);
+		if (distance(origin, center) < 1e-3) {
+			dir_x = direction;
+			dir_y = direction;
+			origin_x = origin + camera_ray_near_point(pixel + vec2(1.0, 0.0)) - center;
+			origin_y = origin + camera_ray_near_point(pixel + vec2(0.0, 1.0)) - center;
+		} else {
+			float pixel_angle = 2.0 / (float(gl_LaunchSizeEXT.y) * abs(scene_data_block.data.projection_matrix[1][1]));
+			vec3 u = normalize(cross(direction, abs(direction.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
+			vec3 v = cross(direction, u);
+			dir_x = direction + u * pixel_angle;
+			dir_y = direction + v * pixel_angle;
+		}
+	} else if (distance(origin, camera_position) < 1e-3) {
 		vec2 pixel = vec2(gl_LaunchIDEXT.xy);
 		vec3 center = camera_ray_direction(pixel);
 		dir_x = direction + camera_ray_direction(pixel + vec2(1.0, 0.0)) - center;
@@ -164,8 +192,8 @@ void hit_barycentric_derivatives(in GeometryData geom, uint i0, uint i1, uint i2
 		dir_x = direction + u * pixel_angle;
 		dir_y = direction + v * pixel_angle;
 	}
-	vec3 bx = ray_plane_barycentrics(origin, dir_x, p0, e1, e2, n);
-	vec3 by = ray_plane_barycentrics(origin, dir_y, p0, e1, e2, n);
+	vec3 bx = ray_plane_barycentrics(origin_x, dir_x, p0, e1, e2, n);
+	vec3 by = ray_plane_barycentrics(origin_y, dir_y, p0, e1, e2, n);
 	if (bx.x > -0.5 || bx.y > -0.5) {
 		r_ddx = bx - bary;
 	}
