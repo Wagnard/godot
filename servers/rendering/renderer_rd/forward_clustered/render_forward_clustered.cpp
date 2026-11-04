@@ -7410,6 +7410,9 @@ void RenderForwardClustered::enable_features(BitField<FeatureBits> p_feature_bit
 
 	if (p_feature_bits.has_flag(FEATURE_ADVANCED_BIT)) {
 		scene_shader.enable_advanced_shader_group(p_feature_bits.has_flag(FEATURE_MULTIVIEW_BIT));
+		// The weighted-blended OIT pass' variants, enabled for every material at the first blend_oit one drawn
+		// (_render_scene()): like the advanced group, the variants a material may need at run time.
+		scene_shader.enable_oit_shader_group(p_feature_bits.has_flag(FEATURE_MULTIVIEW_BIT));
 	}
 
 	if (p_feature_bits.has_flag(FEATURE_VRS_BIT)) {
