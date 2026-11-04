@@ -158,6 +158,11 @@ struct MaterialData {
 // 0-3 red to alpha, 4 the mean of red, green and blue (RTTextureChannel).
 #define MAT_ROUGHNESS_CHANNEL_SHIFT 16u
 #define MAT_METALLIC_CHANNEL_SHIFT 19u
+// The material's diffuse (GODOT_DIFFUSE_*) and specular (GODOT_SPECULAR_*) modes, 2 bits each, read by the
+// rendering/pathtracing/raster_brdf variant (RT_RASTER_BRDF): RT_MAT_DIFFUSE_MODE_SHIFT / RT_MAT_SPECULAR_MODE_SHIFT.
+#define MAT_DIFFUSE_MODE_SHIFT 28u
+#define MAT_SPECULAR_MODE_SHIFT 30u
+#define MAT_SHADING_MODE_MASK 3u
 
 /// A texel's channel, as BaseMaterial3D's dot(texel, channel mask) reads it.
 float material_texture_channel(vec4 p_texel, uint p_channel) {

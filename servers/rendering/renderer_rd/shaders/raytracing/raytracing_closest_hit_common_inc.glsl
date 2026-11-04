@@ -387,6 +387,11 @@ void debug_visualize(
 		dbg_mat.emissive = vec3(0.0);
 		dbg_mat.transmissivness = 0.0;
 		dbg_mat.opacity = 1.0;
+#ifdef RT_RASTER_BRDF
+		// Which directions are rejected does not depend on the modes.
+		dbg_mat.diffuseMode = GODOT_DIFFUSE_LAMBERT;
+		dbg_mat.specularMode = GODOT_SPECULAR_SCHLICK_GGX;
+#endif
 
 		vec3 dbg_dir;
 		vec3 dbg_weight;

@@ -3149,6 +3149,16 @@ void RenderRaytracing::precache_hit_groups(const LocalVector<RID> &p_materials) 
 	}
 }
 
+static_assert(int(RT_MAT_DIFFUSE_LAMBERT) == int(SceneShaderForwardClustered::ShaderData::DIFFUSE_LAMBERT) &&
+				int(RT_MAT_DIFFUSE_BURLEY) == int(SceneShaderForwardClustered::ShaderData::DIFFUSE_BURLEY) &&
+				int(RT_MAT_DIFFUSE_LAMBERT_WRAP) == int(SceneShaderForwardClustered::ShaderData::DIFFUSE_LAMBERT_WRAP) &&
+				int(RT_MAT_DIFFUSE_TOON) == int(SceneShaderForwardClustered::ShaderData::DIFFUSE_TOON),
+		"RT diffuse modes must match ShaderData::DiffuseMode.");
+static_assert(int(RT_MAT_SPECULAR_SCHLICK_GGX) == int(SceneShaderForwardClustered::ShaderData::SPECULAR_SCHLICK_GGX) &&
+				int(RT_MAT_SPECULAR_TOON) == int(SceneShaderForwardClustered::ShaderData::SPECULAR_TOON) &&
+				int(RT_MAT_SPECULAR_DISABLED) == int(SceneShaderForwardClustered::ShaderData::SPECULAR_DISABLED),
+		"RT specular modes must match ShaderData::SpecularMode.");
+
 RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t p_material_invalidation_counter) {
 	// Static default material for invalid/null materials
 	static RTMaterialData s_default_mat;
@@ -3249,6 +3259,15 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 
 	RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
 	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
+
+	// The diffuse and specular modes raster shades the material with (its render modes, force_lambert_over_burley applied),
+	// BaseMaterial3D's generated shader and any other spatial shader alike, for the rendering/pathtracing/raster_brdf variant
+	// (NVIDIA's _rt_surface_mat_flags(), 49a825dc52 render_raytracing.cpp:3975-3991). Written whatever the setting: the
+	// other variants read none of these bits.
+	const SceneShaderForwardClustered::MaterialData *forward_material = static_cast<const SceneShaderForwardClustered::MaterialData *>(material_storage->material_get_data(p_material_rid, RendererRD::MaterialStorage::SHADER_TYPE_3D));
+	if (forward_material && forward_material->shader_data) {
+		mat.flags |= rt_material_shading_mode_flags(forward_material->shader_data->diffuse_mode, forward_material->shader_data->specular_mode);
+	}
 
 	// Helper lambda to get texture from material parameter
 	// p_srgb should be true for color textures (albedo, emission) that need sRGB->linear conversion

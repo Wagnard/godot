@@ -107,6 +107,7 @@ protected:
 	bool raytracing_transparency_peeling = false; // rendering/pathtracing/max_transparency_layers above 0.
 	bool raytracing_shadow_groups = false;
 	bool raytracing_specular_energy_compensation = false;
+	bool raytracing_raster_brdf = false;
 	RenderingShaderContainerFormat *shader_container_format = nullptr;
 	String shader_container_driver;
 	Vector<Ref<ShaderBakerExportPluginPlatform>> platforms;

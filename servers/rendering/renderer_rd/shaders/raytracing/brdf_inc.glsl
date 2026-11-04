@@ -167,6 +167,26 @@ V mul(const M &m, const V &v) {
 // Enable height correlated version of G2 term. Separable version will be used otherwise
 #define USE_HEIGHT_CORRELATED_G2 1
 
+#ifdef RT_RASTER_BRDF
+// rendering/pathtracing/raster_brdf: raster's BRDF (scene_forward_lights_inc.glsl light_compute()), as NVIDIA's
+// (49a825dc52 brdf_inc.glsl:111-121, 168, 177-180, 924-979): diffuse and specular added, without (1 - F) on the diffuse
+// (light_compute() :242, :290); Hammon's height-correlated G2, raster's V_GGX (:55-59), instead of Lagarde's exact one; the
+// material's diffuse and specular modes (MaterialProperties.diffuseMode / specularMode, godot*() below).
+#undef COMBINE_BRDFS_WITH_FRESNEL
+#define USE_HAMMON_G2 1
+
+// Godot's diffuse modes (RT_MAT_DIFFUSE_* in render_raytracing.h, raster's ShaderData::DiffuseMode).
+#define GODOT_DIFFUSE_LAMBERT 0u
+#define GODOT_DIFFUSE_BURLEY 1u
+#define GODOT_DIFFUSE_LAMBERT_WRAP 2u
+#define GODOT_DIFFUSE_TOON 3u
+
+// Godot's specular modes (RT_MAT_SPECULAR_* in render_raytracing.h, raster's ShaderData::SpecularMode).
+#define GODOT_SPECULAR_SCHLICK_GGX 0u
+#define GODOT_SPECULAR_TOON 1u
+#define GODOT_SPECULAR_DISABLED 2u
+#endif
+
 // Master toggle for the shading-normal clamp at grazing angles.
 // 0 -> clampShadingNormal becomes a passthrough; only the mirror fallback in
 //      shade_and_bounce remains active.
@@ -276,6 +296,10 @@ struct MaterialProperties {
 	float dielectricF0; // Base reflectance for dielectrics (e.g. 0.04 for default 4% reflectance).
 	float transmissivness;
 	float opacity;
+#ifdef RT_RASTER_BRDF
+	uint diffuseMode; // GODOT_DIFFUSE_*
+	uint specularMode; // GODOT_SPECULAR_*
+#endif
 };
 
 // Data needed to evaluate BRDF (surface and material properties at given point + configuration of light and normal vectors)
@@ -748,7 +772,10 @@ float Smith_G2_Over_G1_Height_Correlated(float alpha, float alphaSquared, float 
 // Also note that when USE_OPTIMIZED_G2 is specified, returned value will be: G2 / (4 * NdotL * NdotV) if GG-X is selected
 float Smith_G2(float alpha, float alphaSquared, float NdotL, float NdotV) {
 #if USE_OPTIMIZED_G2 && (MICROFACET_DISTRIBUTION == GGX)
-#if USE_HEIGHT_CORRELATED_G2
+#if USE_HAMMON_G2
+#define G2_DIVIDED_BY_DENOMINATOR 1
+	return Smith_G2_Height_Correlated_GGX_Hammon(alpha, NdotL, NdotV);
+#elif USE_HEIGHT_CORRELATED_G2
 #define G2_DIVIDED_BY_DENOMINATOR 1
 	return Smith_G2_Height_Correlated_GGX_Lagarde(alphaSquared, NdotL, NdotV);
 #else
@@ -857,7 +884,11 @@ float3 sampleBeckmannWalter(float3 Vlocal, float2 alpha2D, float2 u) {
 
 // Weight for the reflection ray sampled from GGX distribution using VNDF method
 float specularSampleWeightGGXVNDF(float alpha, float alphaSquared, float NdotL, float NdotV, float HdotL, float NdotH) {
-#if USE_HEIGHT_CORRELATED_G2
+#if USE_HAMMON_G2
+	// BRDF * NdotL / pdf = F * D * G2' * NdotL / (D * G1(V) / (4 * NdotV)), G2' = Hammon's G2 / (4 * NdotL * NdotV) (NVIDIA's,
+	// 49a825dc52 brdf_inc.glsl:864-867): the lobe whose lights' term is Hammon's, sampled with the exact G1 of the visible normals.
+	return (4.0f * NdotL * NdotV * Smith_G2(alpha, alphaSquared, NdotL, NdotV)) / Smith_G1_GGX(alpha, NdotV, alphaSquared, NdotV * NdotV);
+#elif USE_HEIGHT_CORRELATED_G2
 	return Smith_G2_Over_G1_Height_Correlated(alpha, alphaSquared, NdotL, NdotV);
 #else
 	return Smith_G1_GGX(alpha, NdotL, alphaSquared, NdotL * NdotL);
@@ -1072,6 +1103,69 @@ BrdfData prepareBRDFData(float3 N, float3 L, float3 V, MaterialProperties materi
 	return data;
 }
 
+#ifdef RT_RASTER_BRDF
+// -------------------------------------------------------------------------
+//    Godot's shading model (rendering/pathtracing/raster_brdf)
+// -------------------------------------------------------------------------
+// The lights' terms are raster's light_compute() (scene_forward_lights_inc.glsl), as NVIDIA's (49a825dc52
+// brdf_inc.glsl:924-979). The light from bounces and from the sky: cosine-weighted hemisphere sampling, weighted by the
+// Burley term for DIFFUSE_BURLEY (as production path tracers sample Burley's diffuse: pbrt-v3's DisneyDiffuse inherits
+// BxDF::Sample_f's cosine sampling), Lambert for the others: wrap and toon only shape the terminator of the lights in raster,
+// whose ambient light is Lambert irradiance whatever the mode. Raster's Burley is used unnormalized, as raster does.
+
+// The diffuse term times the cosine, without the reflectance. p_NdotL unclamped: wrap and toon reach past the terminator.
+float godotDiffuseNdotL(const BrdfData data, float p_NdotL, uint p_mode) {
+	const float r = data.roughness;
+	if (p_mode == GODOT_DIFFUSE_BURLEY) {
+		return disneyDiffuse(data) * max(p_NdotL, 0.0f) * ONE_OVER_PI; // light_compute() :230-236.
+	}
+	if (p_mode == GODOT_DIFFUSE_LAMBERT_WRAP) {
+		const float op_roughness = 1.0f + r;
+		return max(0.0f, (p_NdotL + r) / (op_roughness * op_roughness)) * ONE_OVER_PI; // :221-225.
+	}
+	if (p_mode == GODOT_DIFFUSE_TOON) {
+		return smoothstep(-r, max(r, 0.01f), p_NdotL) * ONE_OVER_PI; // :226-228.
+	}
+	return max(p_NdotL, 0.0f) * ONE_OVER_PI; // :237-239.
+}
+
+// The weight of a cosine-weighted hemisphere sample of the diffuse lobe (its term times the cosine over the density),
+// without the reflectance.
+float godotDiffuseSampleWeight(const BrdfData data, uint p_mode) {
+	return p_mode == GODOT_DIFFUSE_BURLEY ? disneyDiffuse(data) : 1.0f;
+}
+
+// The specular term times the cosine. Toon is raster's band (light_compute() :255-261), which raster adds to the diffuse
+// light: tinted by the diffuse reflectance; 0 at roughness 0, where raster skips the lights' specular light (:249) and the
+// band's edges would meet. Schlick-GGX keeps ours at roughness 0 (a mirror's highlight).
+float3 godotSpecularNdotL(const BrdfData data, uint p_mode) {
+	if (p_mode == GODOT_SPECULAR_DISABLED) {
+		return float3(0.0f, 0.0f, 0.0f);
+	}
+	if (p_mode == GODOT_SPECULAR_TOON) {
+		if (data.roughness <= 0.0f) {
+			return float3(0.0f, 0.0f, 0.0f);
+		}
+		const float RdotV = dot(reflect(-data.L, data.N), data.V);
+		const float mid = (1.0f - data.roughness) * (1.0f - data.roughness);
+		return data.diffuseReflectance * (smoothstep(mid - data.roughness * 0.5f, mid + data.roughness * 0.5f, RdotV) * mid);
+	}
+	if (data.Lbackfacing) {
+		return float3(0.0f, 0.0f, 0.0f);
+	}
+	float3 specular = evalSpecular(data);
+#ifdef RT_SPECULAR_ENERGY_COMPENSATION
+	specular *= rt_specular_energy_compensation(data.specularF0, data.roughness, data.NdotV);
+#endif
+	return specular;
+}
+
+// Whether a light behind the shading normal can still light the material through its modes (wrap, toon).
+bool godotShadesBackfacingLight(MaterialProperties material) {
+	return material.diffuseMode == GODOT_DIFFUSE_LAMBERT_WRAP || material.diffuseMode == GODOT_DIFFUSE_TOON || material.specularMode == GODOT_SPECULAR_TOON;
+}
+#endif // RT_RASTER_BRDF
+
 // This is an entry point for evaluation of all other BRDFs based on selected configuration (for direct light)
 float3 evalCombinedBRDF(float3 N, float3 L, float3 V, MaterialProperties material) {
 	// Prepare data needed for BRDF evaluation - unpack material properties and evaluate commonly used terms (e.g. Fresnel, NdotL, ...)
@@ -1104,6 +1198,14 @@ void evalCombinedBRDFSeparate(float3 N, float3 L, float3 V, MaterialProperties m
 	outSpecular = float3(0.0f, 0.0f, 0.0f);
 	// Prepare data needed for BRDF evaluation (uses shading normal N for all BRDF math).
 	const BrdfData data = prepareBRDFData(N, L, V, material);
+#ifdef RT_RASTER_BRDF
+	// Raster's terms; a light behind the shading normal lights only wrap and toon materials.
+	if (data.Lbackfacing && !godotShadesBackfacingLight(material)) {
+		return;
+	}
+	outDiffuse = data.diffuseReflectance * godotDiffuseNdotL(data, dot(N, L), material.diffuseMode);
+	outSpecular = godotSpecularNdotL(data, material.specularMode);
+#else
 	// Ignore L rays "below" the hemisphere
 	if (data.Lbackfacing) {
 		return;
@@ -1120,6 +1222,7 @@ void evalCombinedBRDFSeparate(float3 N, float3 L, float3 V, MaterialProperties m
 	// Specular is already multiplied by F, just attenuate diffuse
 	outDiffuse = (float3(1.0f, 1.0f, 1.0f) - data.F) * outDiffuse;
 #endif
+#endif // RT_RASTER_BRDF
 }
 
 // This is an entry point for evaluation of all other BRDFs based on selected configuration (for indirect light)
@@ -1143,7 +1246,11 @@ bool evalIndirectCombinedBRDF(float2 u, float2 uFresnel, float3 shadingNormal, f
 		const BrdfData data = prepareBRDFData(Nlocal, rayDirectionLocal, Vlocal, material);
 
 		// Function 'diffuseTerm' is predivided by PDF of sampling the cosine weighted hemisphere
+#ifdef RT_RASTER_BRDF
+		sampleWeight = data.diffuseReflectance * godotDiffuseSampleWeight(data, material.diffuseMode);
+#else
 		sampleWeight = data.diffuseReflectance * diffuseTerm(data);
+#endif
 
 #if COMBINE_BRDFS_WITH_FRESNEL
 		// Sample a half-vector of specular BRDF, from its own random pair: RTXPT reused the direction's 'u' here ("correctly it

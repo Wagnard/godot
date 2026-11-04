@@ -339,6 +339,26 @@ enum RTTextureChannel : uint32_t {
 static constexpr uint32_t RT_MAT_ROUGHNESS_CHANNEL_SHIFT = 16u;
 static constexpr uint32_t RT_MAT_METALLIC_CHANNEL_SHIFT = 19u;
 
+// The material's diffuse and specular modes (raster's ShaderData::DiffuseMode / SpecularMode values), in the material flags,
+// read by the rendering/pathtracing/raster_brdf variant (RT_RASTER_BRDF). NVIDIA's bits and values (49a825dc52
+// render_raytracing.h:451-464).
+enum {
+	RT_MAT_DIFFUSE_MODE_SHIFT = 28u,
+	RT_MAT_SPECULAR_MODE_SHIFT = 30u,
+	RT_MAT_DIFFUSE_LAMBERT = 0u,
+	RT_MAT_DIFFUSE_BURLEY = 1u,
+	RT_MAT_DIFFUSE_LAMBERT_WRAP = 2u,
+	RT_MAT_DIFFUSE_TOON = 3u,
+	RT_MAT_SPECULAR_SCHLICK_GGX = 0u,
+	RT_MAT_SPECULAR_TOON = 1u,
+	RT_MAT_SPECULAR_DISABLED = 2u,
+};
+
+// Packs an RT_MAT_DIFFUSE_* and an RT_MAT_SPECULAR_* value into material flag bits.
+constexpr uint32_t rt_material_shading_mode_flags(uint32_t p_diffuse_mode, uint32_t p_specular_mode) {
+	return (p_diffuse_mode << RT_MAT_DIFFUSE_MODE_SHIFT) | (p_specular_mode << RT_MAT_SPECULAR_MODE_SHIFT);
+}
+
 // Index format for RT geometry (matches GLSL fetch_indices).
 enum {
 	RT_INDEX_FORMAT_UINT16 = 0,

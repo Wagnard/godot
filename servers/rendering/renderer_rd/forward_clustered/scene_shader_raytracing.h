@@ -135,6 +135,10 @@ public:
 		// raster's multiple scattering energy compensation from its DFG LUT (binding 47). A project setting too, off by
 		// default: the other variants keep their code unchanged.
 		RT_FLAG_SPECULAR_ENERGY_COMPENSATION = (1 << 12),
+		// rendering/pathtracing/raster_brdf (RT_RASTER_BRDF): raster's BRDF, the materials' diffuse and specular modes
+		// (material flags RT_MAT_DIFFUSE_MODE_SHIFT / RT_MAT_SPECULAR_MODE_SHIFT), Hammon's G2 (raster's V_GGX), diffuse and
+		// specular added without (1 - F). A project setting too, off by default: the other variants keep their code unchanged.
+		RT_FLAG_RASTER_BRDF = (1 << 13),
 	};
 
 	// rendering/pathtracing/decals: which path vertices receive decals.
@@ -689,14 +693,14 @@ public:
 		Vector<String> sources; // Parallel to stages.
 	};
 	// The variants' base programs and hit group 0's opacity micromap bake. p_simple_shadows, p_ser,
-	// p_specular_motion_vectors, p_transparent_shadows, p_decal_mode, p_transparency_peeling, p_shadow_groups and
-	// p_specular_energy_compensation: the project's rendering/pathtracing/use_simple_shadows,
+	// p_specular_motion_vectors, p_transparent_shadows, p_decal_mode, p_transparency_peeling, p_shadow_groups,
+	// p_specular_energy_compensation and p_raster_brdf: the project's rendering/pathtracing/use_simple_shadows,
 	// use_shader_execution_reordering, specular_motion_vectors, transparent_shadows, decals other than All Hits,
-	// max_transparency_layers above 0, shadow_groups and specular_energy_compensation.
-	void get_bake_programs(bool p_simple_shadows, bool p_ser, bool p_specular_motion_vectors, bool p_transparent_shadows, bool p_decal_mode, bool p_transparency_peeling, bool p_shadow_groups, bool p_specular_energy_compensation, LocalVector<BakeProgram> &r_programs);
+	// max_transparency_layers above 0, shadow_groups, specular_energy_compensation and raster_brdf.
+	void get_bake_programs(bool p_simple_shadows, bool p_ser, bool p_specular_motion_vectors, bool p_transparent_shadows, bool p_decal_mode, bool p_transparency_peeling, bool p_shadow_groups, bool p_specular_energy_compensation, bool p_raster_brdf, LocalVector<BakeProgram> &r_programs);
 	// p_material's hit group in every such variant, and its displacement and opacity micromap bake programs; nothing for a
 	// material path traced by hit group 0.
-	void get_material_bake_programs(RID p_material, bool p_simple_shadows, bool p_ser, bool p_specular_motion_vectors, bool p_transparent_shadows, bool p_decal_mode, bool p_transparency_peeling, bool p_shadow_groups, bool p_specular_energy_compensation, LocalVector<BakeProgram> &r_programs);
+	void get_material_bake_programs(RID p_material, bool p_simple_shadows, bool p_ser, bool p_specular_motion_vectors, bool p_transparent_shadows, bool p_decal_mode, bool p_transparency_peeling, bool p_shadow_groups, bool p_specular_energy_compensation, bool p_raster_brdf, LocalVector<BakeProgram> &r_programs);
 	static String get_binary_cache_file_name(const String &p_key, const String &p_api);
 	static Vector<uint8_t> make_binary_cache_file(const Vector<uint8_t> &p_binary);
 	// Null when the path tracer's shaders were never initialized (no Forward+ renderer).

@@ -435,6 +435,15 @@ vec3 lights_backlight_term(vec3 p_brdf_diffuse, MaterialProperties p_material, v
 	return max(diffuse_reflectance * ONE_OVER_PI - p_brdf_diffuse, vec3(0.0)) * p_backlight;
 }
 
+// Whether a light behind the shading normal can light the surface: through BACKLIGHT (m_backlight), and in the
+// rendering/pathtracing/raster_brdf variant through the wrap and toon modes too (godotShadesBackfacingLight()). Their shadow
+// ray still leaves from the front: the surface shadows such a light as raster's shadow map does.
+#ifdef RT_RASTER_BRDF
+#define RT_LIT_FROM_BEHIND(m_backlight, m_material) ((m_backlight) || godotShadesBackfacingLight(m_material))
+#else
+#define RT_LIT_FROM_BEHIND(m_backlight, m_material) m_backlight
+#endif
+
 // The weight a light is picked by (resampled importance sampling, below): its unshadowed contribution at the point,
 // estimated from the light's center (luminance of the emission, distance attenuation, spot cone, cosine). It is 0 only
 // where the light cannot light the point (other layers, out of range, the whole light outside the spot cone, behind a
@@ -513,7 +522,9 @@ vec3 lights_evaluate_direct_lighting(
 #ifdef NRD_ENABLED
 	r_specular = vec3(0.0);
 #endif
-	bool has_backlight = any(greaterThan(backlight, vec3(0.0)));
+	// Wrap and toon materials take lights behind the shading normal too: weighed as for BACKLIGHT, so that the light choice
+	// stays unbiased.
+	bool has_backlight = RT_LIT_FROM_BEHIND(any(greaterThan(backlight, vec3(0.0))), material);
 	if (light_count == 0u) {
 		return vec3(0.0);
 	}
@@ -695,7 +706,7 @@ vec3 lights_evaluate_light(
 		float light_pdf;
 		vec3 L = lights_sample_cone(ls, u, light_pdf);
 
-		if (!has_backlight && dot(N, L) <= 0.0) {
+		if (!RT_LIT_FROM_BEHIND(has_backlight, material) && dot(N, L) <= 0.0) {
 			return vec3(0.0);
 		}
 

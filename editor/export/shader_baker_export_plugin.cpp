@@ -133,8 +133,9 @@ bool ShaderBakerExportPlugin::_begin_customize_resources(const Ref<EditorExportP
 	raytracing_transparency_peeling = int(get_export_preset()->get_project_setting("rendering/pathtracing/max_transparency_layers")) > 0;
 	raytracing_shadow_groups = get_export_preset()->get_project_setting("rendering/pathtracing/shadow_groups");
 	raytracing_specular_energy_compensation = get_export_preset()->get_project_setting("rendering/pathtracing/specular_energy_compensation");
+	raytracing_raster_brdf = get_export_preset()->get_project_setting("rendering/pathtracing/raster_brdf");
 	to_hash.append("[PathTracing]");
-	to_hash.append(itos(bool(get_option("shader_baker/path_tracing"))) + itos(raytracing_simple_shadows) + itos(raytracing_ser) + itos(raytracing_specular_motion_vectors) + itos(raytracing_transparent_shadows) + itos(raytracing_decal_mode) + itos(raytracing_transparency_peeling) + itos(raytracing_shadow_groups) + itos(raytracing_specular_energy_compensation));
+	to_hash.append(itos(bool(get_option("shader_baker/path_tracing"))) + itos(raytracing_simple_shadows) + itos(raytracing_ser) + itos(raytracing_specular_motion_vectors) + itos(raytracing_transparent_shadows) + itos(raytracing_decal_mode) + itos(raytracing_transparency_peeling) + itos(raytracing_shadow_groups) + itos(raytracing_specular_energy_compensation) + itos(raytracing_raster_brdf));
 	customization_configuration_hash = to_hash.as_string().hash64();
 
 	BitField<RenderingShaderLibrary::FeatureBits> renderer_features = {};
@@ -557,9 +558,9 @@ void ShaderBakerExportPlugin::_customize_raytracing_programs(RID p_material) {
 
 	LocalVector<SceneShaderRaytracing::BakeProgram> programs;
 	if (p_material.is_valid()) {
-		raytracing->get_material_bake_programs(p_material, raytracing_simple_shadows, raytracing_ser, raytracing_specular_motion_vectors, raytracing_transparent_shadows, raytracing_decal_mode, raytracing_transparency_peeling, raytracing_shadow_groups, raytracing_specular_energy_compensation, programs);
+		raytracing->get_material_bake_programs(p_material, raytracing_simple_shadows, raytracing_ser, raytracing_specular_motion_vectors, raytracing_transparent_shadows, raytracing_decal_mode, raytracing_transparency_peeling, raytracing_shadow_groups, raytracing_specular_energy_compensation, raytracing_raster_brdf, programs);
 	} else {
-		raytracing->get_bake_programs(raytracing_simple_shadows, raytracing_ser, raytracing_specular_motion_vectors, raytracing_transparent_shadows, raytracing_decal_mode, raytracing_transparency_peeling, raytracing_shadow_groups, raytracing_specular_energy_compensation, programs);
+		raytracing->get_bake_programs(raytracing_simple_shadows, raytracing_ser, raytracing_specular_motion_vectors, raytracing_transparent_shadows, raytracing_decal_mode, raytracing_transparency_peeling, raytracing_shadow_groups, raytracing_specular_energy_compensation, raytracing_raster_brdf, programs);
 	}
 
 	for (const SceneShaderRaytracing::BakeProgram &program : programs) {

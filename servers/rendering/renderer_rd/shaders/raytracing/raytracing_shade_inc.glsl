@@ -270,6 +270,15 @@ bool shade_and_bounce(inout PathState ps, HitRecord r, vec3 p_ray_origin, vec3 p
 	brdf_mat.emissive = r.emissive;
 	brdf_mat.transmissivness = 0.0;
 	brdf_mat.opacity = 1.0;
+#ifdef RT_RASTER_BRDF
+	// rendering/pathtracing/raster_brdf: the material's modes, from its record (RT_MAT_DIFFUSE_MODE_SHIFT), not the payload:
+	// the hit groups read and write nothing more than without the variant (PT-VK-SER-HG0-PAYLOAD-READ-WA.md).
+	{
+		const uint mat_flags = materials[r.geometry_idx].flags;
+		brdf_mat.diffuseMode = (mat_flags >> MAT_DIFFUSE_MODE_SHIFT) & MAT_SHADING_MODE_MASK;
+		brdf_mat.specularMode = (mat_flags >> MAT_SPECULAR_MODE_SHIFT) & MAT_SHADING_MODE_MASK;
+	}
+#endif
 
 	vec3 specularF0 = baseColorToSpecularF0(brdf_mat.baseColor, brdf_mat.metalness, brdf_mat.dielectricF0);
 	vec3 diffuseReflectance = baseColorToDiffuseReflectance(brdf_mat.baseColor, brdf_mat.metalness);
@@ -516,6 +525,11 @@ vec3 front_layer_reflection_dir(HitRecord r, vec3 p_ray_dir, inout uint r_rng_st
 	front_mat.emissive = vec3(0.0);
 	front_mat.transmissivness = 0.0;
 	front_mat.opacity = 1.0;
+#ifdef RT_RASTER_BRDF
+	// Only its specular lobe's direction is sampled: GGX in every mode.
+	front_mat.diffuseMode = GODOT_DIFFUSE_LAMBERT;
+	front_mat.specularMode = GODOT_SPECULAR_SCHLICK_GGX;
+#endif
 	// The material's normal as raster reflects on it: clamping it toward the faceted geometry at grazing angles
 	// would reflect the triangles of a displaced surface (waves) instead of its smooth normal.
 	vec3 front_dir;
