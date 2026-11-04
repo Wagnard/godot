@@ -73,6 +73,8 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 		// GODOT_RT_KEEP_CACHES=1 keeps everything but the DLSS Ray Reconstruction textures.
 		static const bool keep_caches = OS::get_singleton()->get_environment("GODOT_RT_KEEP_CACHES") == "1";
 		if (rb_data.is_valid()) {
+			// Raster honours the viewport's 3D MSAA again.
+			rb_data->set_single_sample(false);
 			if (raytracing && keep_caches) {
 				if (raytracing->dlss_rr_has_buffers(rb.ptr())) {
 					raytracing->dlss_rr_free_buffers(rb.ptr());
@@ -101,13 +103,24 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 
 	scene_state.used_uniform_buffer_count = 0;
 
-	static const int texture_multisamples[RSE::VIEWPORT_MSAA_MAX] = { 1, 2, 4, 8 };
+	// 3D MSAA does not apply to the traced frames: the path tracer shades one jittered sample per pixel, antialiased by
+	// TAA or the temporal upscaler, and multisampling the raster passes drawn over it would only add the cost of the
+	// MSAA targets and their resolves. As raster does where a path cannot use MSAA (MetalFX temporal upscaling,
+	// RendererViewport::_configure_3d_render_buffers()), it is disabled internally, the setting kept: the raster passes
+	// of this frame draw into the single-sample targets (RenderBufferDataForwardClustered::set_single_sample()), and the
+	// view rasterized again uses MSAA.
+	const bool msaa_ignored = rb->get_msaa_3d() != RSE::VIEWPORT_MSAA_DISABLED;
+	if (msaa_ignored) {
+		WARN_PRINT_ONCE("3D MSAA (Viewport.msaa_3d, rendering/anti_aliasing/quality/msaa_3d) does not apply to path-traced views: they are rendered without it. Set it to Disabled to free its buffers.");
+	}
+	if (rb_data.is_valid()) {
+		rb_data->set_single_sample(true);
+	}
 
 	RENDER_TIMESTAMP("Prepare 3D Scene");
 
 	// Compositor effect requirements.
 	bool ce_needs_motion_vectors = _compositor_effects_has_flag(p_render_data, RSE::COMPOSITOR_EFFECT_FLAG_NEEDS_MOTION_VECTORS);
-	bool ce_needs_normal_roughness = _compositor_effects_has_flag(p_render_data, RSE::COMPOSITOR_EFFECT_FLAG_NEEDS_ROUGHNESS);
 
 	current_cluster_builder = rb_data->cluster_builder;
 	p_render_data->voxel_gi_count = 0;
@@ -209,7 +222,7 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 	uint32_t rr_layer_from = UINT32_MAX;
 	uint32_t peel_from = UINT32_MAX;
 	{
-		const bool use_layer = raytracing && raytracing->dlss_rr_has_buffers(rb.ptr()) && p_render_data->scene_data->view_count == 1 && rb->get_msaa_3d() == RSE::VIEWPORT_MSAA_DISABLED && _rr_transparency_layer_enabled();
+		const bool use_layer = raytracing && raytracing->dlss_rr_has_buffers(rb.ptr()) && p_render_data->scene_data->view_count == 1 && _rr_transparency_layer_enabled();
 		// As compute_rt_flags() sets RT_FLAG_TRANSPARENCY_PEELING.
 		const bool use_peeling = raytracing && p_render_data->environment.is_valid() && RenderRaytracing::get_transparency_peel_layers() > 0;
 		LocalVector<GeometryInstanceSurfaceDataCache *> &elements = render_list[RENDER_LIST_ALPHA].elements;
@@ -491,14 +504,19 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 	}
 
 	// After this point clear_color has linear encoding.
-	RSE::ViewportMSAA msaa = rb->get_msaa_3d();
-	bool use_msaa = msaa != RSE::VIEWPORT_MSAA_DISABLED;
+	// With the viewport's MSAA ignored, the raster passes test and write a single-sample depth attachment of their own
+	// (the viewport's depth texture is then an R32F resolve target): it is copied into the depth texture where raster
+	// resolves its multisampled depth, for the compositor effects, the depth copy, DLSS-RR's guides and post-processing.
+	const bool copy_single_sample_depth = msaa_ignored && rb_data.is_valid() && rb_data->uses_single_sample_depth();
+	auto copy_depth_to_texture = [&]() {
+		for (uint32_t v = 0; v < rb->get_view_count(); v++) {
+			copy_effects->copy_depth_to_rect(rb_data->get_single_sample_depth(v), rb->get_depth_texture(v), Rect2i(Point2i(), rb->get_internal_size()));
+		}
+	};
 
-	bool ce_pre_opaque_wants_resolved = use_msaa &&
+	bool ce_pre_opaque_wants_resolved = msaa_ignored &&
 			(_compositor_effects_has_flag(p_render_data, RSE::COMPOSITOR_EFFECT_FLAG_ACCESS_RESOLVED_COLOR, RSE::COMPOSITOR_EFFECT_CALLBACK_TYPE_PRE_OPAQUE) ||
 					_compositor_effects_has_flag(p_render_data, RSE::COMPOSITOR_EFFECT_FLAG_ACCESS_RESOLVED_DEPTH, RSE::COMPOSITOR_EFFECT_CALLBACK_TYPE_PRE_OPAQUE));
-	bool ce_post_opaque_resolved_depth = use_msaa && _compositor_effects_has_flag(p_render_data, RSE::COMPOSITOR_EFFECT_FLAG_ACCESS_RESOLVED_DEPTH, RSE::COMPOSITOR_EFFECT_CALLBACK_TYPE_POST_OPAQUE);
-	bool ce_pre_transparent_resolved_depth = use_msaa && _compositor_effects_has_flag(p_render_data, RSE::COMPOSITOR_EFFECT_FLAG_ACCESS_RESOLVED_DEPTH, RSE::COMPOSITOR_EFFECT_CALLBACK_TYPE_PRE_TRANSPARENT);
 
 	SceneShaderForwardClustered::ShaderSpecialization base_specialization = scene_shader.default_specialization;
 	base_specialization.use_depth_fog = p_render_data->environment.is_valid() && environment_get_fog_mode(p_render_data->environment) == RSE::EnvironmentFogMode::ENV_FOG_MODE_DEPTH;
@@ -705,28 +723,16 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 		RD::get_singleton()->draw_command_end_label();
 	}
 
-	{
-		// RT output is already in internal_texture, so the color MSAA resolve is
-		// skipped; only depth is resolved for compositor effects that need it.
-		if (ce_post_opaque_resolved_depth) {
-			for (uint32_t v = 0; v < rb->get_view_count(); v++) {
-				resolve_effects->resolve_depth(rb->get_depth_msaa(v), rb->get_depth_texture(v), rb->get_internal_size(), texture_multisamples[msaa]);
-			}
-		}
-
-		RENDER_TIMESTAMP("Process Post Opaque Compositor Effects");
-		_process_compositor_effects(RSE::COMPOSITOR_EFFECT_CALLBACK_TYPE_POST_OPAQUE, p_render_data);
+	// Where raster resolves its MSAA depth (after the sky, which is drawn before the post-opaque effects here): from then
+	// on the depth texture holds the traced depth and the cards', as it does without MSAA.
+	if (copy_single_sample_depth) {
+		RENDER_TIMESTAMP("Copy Single-Sample Depth");
+		copy_depth_to_texture();
 	}
 
-	if (use_msaa) {
-		RENDER_TIMESTAMP("Resolve MSAA");
-
-		// RT writes internal_texture, so only depth is resolved here.
-		if (scene_state.used_depth_texture || scene_state.used_normal_texture || ce_needs_normal_roughness || ce_pre_transparent_resolved_depth) {
-			for (uint32_t v = 0; v < rb->get_view_count(); v++) {
-				resolve_effects->resolve_depth(rb->get_depth_msaa(v), rb->get_depth_texture(v), rb->get_internal_size(), texture_multisamples[msaa]);
-			}
-		}
+	{
+		RENDER_TIMESTAMP("Process Post Opaque Compositor Effects");
+		_process_compositor_effects(RSE::COMPOSITOR_EFFECT_CALLBACK_TYPE_POST_OPAQUE, p_render_data);
 	}
 
 	{
@@ -857,10 +863,11 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 				}
 				rr_transparency_layer = rb->get_texture(RB_SCOPE_DLSS_RR, SNAME("transparency_layer"));
 				RID layer_framebuffer;
+				const RID layer_depth = copy_single_sample_depth ? rb_data->get_single_sample_depth() : rb->get_depth_texture();
 				if (rb->has_texture(RB_SCOPE_VRS, RB_TEXTURE)) {
-					layer_framebuffer = FramebufferCacheRD::get_singleton()->get_cache_multiview(1, rr_transparency_layer, RID(), RID(), rb->get_depth_texture(), rb->get_texture(RB_SCOPE_VRS, RB_TEXTURE));
+					layer_framebuffer = FramebufferCacheRD::get_singleton()->get_cache_multiview(1, rr_transparency_layer, RID(), RID(), layer_depth, rb->get_texture(RB_SCOPE_VRS, RB_TEXTURE));
 				} else {
-					layer_framebuffer = FramebufferCacheRD::get_singleton()->get_cache_multiview(1, rr_transparency_layer, RID(), RID(), rb->get_depth_texture());
+					layer_framebuffer = FramebufferCacheRD::get_singleton()->get_cache_multiview(1, rr_transparency_layer, RID(), RID(), layer_depth);
 				}
 				RenderListParameters layer_params(render_list[RENDER_LIST_ALPHA].elements.ptr() + lit_count, render_list[RENDER_LIST_ALPHA].element_info.ptr() + lit_count, alpha_count - lit_count, reverse_cull, PASS_MODE_COLOR, transparent_color_pass_flags, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, lit_count, base_specialization);
 				layer_params.rt_shadow_texture_uniform_set = rt_shadow_texture_set;
@@ -898,12 +905,9 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 
 	RD::get_singleton()->draw_command_begin_label("Resolve");
 
-	if (use_msaa) {
-		// RT writes internal_texture and the path tracer writes velocity itself, so
-		// only depth needs resolving.
-		for (uint32_t v = 0; v < rb->get_view_count(); v++) {
-			resolve_effects->resolve_depth(rb->get_depth_msaa(v), rb->get_depth_texture(v), rb->get_internal_size(), texture_multisamples[msaa]);
-		}
+	if (copy_single_sample_depth) {
+		// What the transparent surfaces that write depth added, as raster's final resolve.
+		copy_depth_to_texture();
 	}
 
 	RD::get_singleton()->draw_command_end_label();

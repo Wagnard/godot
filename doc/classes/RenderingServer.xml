@@ -4486,6 +4486,7 @@
 			<param index="1" name="msaa" type="int" enum="RenderingServer.ViewportMSAA" />
 			<description>
 				Sets the multisample antialiasing mode for 3D on the specified [param viewport] RID. Equivalent to [member ProjectSettings.rendering/anti_aliasing/quality/msaa_3d] or [member Viewport.msaa_3d].
+				[b]Note:[/b] MSAA does not apply to path-traced views ([member Environment.pathtracing_enabled]): they are rendered without it, and a warning is printed once.
 			</description>
 		</method>
 		<method name="viewport_set_occlusion_culling_build_quality">

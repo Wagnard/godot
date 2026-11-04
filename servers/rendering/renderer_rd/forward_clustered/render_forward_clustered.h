@@ -66,6 +66,7 @@
 #define RB_TEX_VOXEL_GI_MSAA SNAME("voxel_gi_msaa")
 #define RB_TEX_OIT_ACCUM SNAME("oit_accum")
 #define RB_TEX_OIT_REVEAL SNAME("oit_reveal")
+#define RB_TEX_SINGLE_SAMPLE_DEPTH SNAME("single_sample_depth")
 namespace RendererSceneRenderImplementation {
 
 class RenderForwardClustered : public RendererSceneRenderRD {
@@ -119,6 +120,11 @@ public:
 #ifdef METAL_MFXTEMPORAL_ENABLED
 		RendererRD::MFXTemporalContext *mfx_temporal_context = nullptr;
 #endif
+		// See set_single_sample().
+		bool single_sample = false;
+
+		bool _use_msaa() const;
+		RID _get_depth_attachment();
 
 	public:
 		ClusterBuilderRD *cluster_builder = nullptr;
@@ -188,6 +194,16 @@ public:
 		RID get_depth_fb(DepthFrameBufferType p_type = DEPTH_FB);
 		RID get_specular_only_fb();
 		RID get_velocity_only_fb();
+
+		// For the frames that ignore the viewport's 3D MSAA (path tracing): the framebuffers above then use the
+		// single-sample targets. The resolved depth texture of a multisampled viewport cannot be a depth attachment (it
+		// is R32F, get_depth_format()), so they draw into get_single_sample_depth() instead, which the caller copies into
+		// the depth texture where raster resolves its multisampled depth.
+		void set_single_sample(bool p_single_sample) { single_sample = p_single_sample; }
+		bool is_single_sample() const { return single_sample; }
+		bool uses_single_sample_depth() const;
+		RID get_single_sample_depth();
+		RID get_single_sample_depth(uint32_t p_layer);
 
 		virtual void configure(RenderSceneBuffersRD *p_render_buffers) override;
 		virtual void free_data() override;

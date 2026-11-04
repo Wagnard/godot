@@ -243,13 +243,44 @@ void RenderForwardClustered::RenderBufferDataForwardClustered::configure(RenderS
 	cluster_builder->setup(p_render_buffers->get_internal_size(), p_render_buffers->get_max_cluster_elements(), p_render_buffers->get_depth_texture(), sampler, p_render_buffers->get_internal_texture());
 }
 
+bool RenderForwardClustered::RenderBufferDataForwardClustered::_use_msaa() const {
+	return !single_sample && render_buffers->get_msaa_3d() != RSE::VIEWPORT_MSAA_DISABLED;
+}
+
+bool RenderForwardClustered::RenderBufferDataForwardClustered::uses_single_sample_depth() const {
+	ERR_FAIL_NULL_V(render_buffers, false);
+	return single_sample && render_buffers->get_msaa_3d() != RSE::VIEWPORT_MSAA_DISABLED;
+}
+
+RID RenderForwardClustered::RenderBufferDataForwardClustered::get_single_sample_depth() {
+	ERR_FAIL_NULL_V(render_buffers, RID());
+	if (!render_buffers->has_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_SINGLE_SAMPLE_DEPTH)) {
+		// The format and usage of a viewport's depth without MSAA (RenderSceneBuffersRD::configure()).
+		const bool can_be_storage = render_buffers->get_can_be_storage();
+		render_buffers->create_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_SINGLE_SAMPLE_DEPTH, RenderSceneBuffersRD::get_depth_format(false, false, can_be_storage), RenderSceneBuffersRD::get_depth_usage_bits(false, false, can_be_storage));
+	}
+	return render_buffers->get_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_SINGLE_SAMPLE_DEPTH);
+}
+
+RID RenderForwardClustered::RenderBufferDataForwardClustered::get_single_sample_depth(uint32_t p_layer) {
+	get_single_sample_depth();
+	return render_buffers->get_texture_slice(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_SINGLE_SAMPLE_DEPTH, p_layer, 0);
+}
+
+RID RenderForwardClustered::RenderBufferDataForwardClustered::_get_depth_attachment() {
+	if (_use_msaa()) {
+		return render_buffers->get_texture(RB_SCOPE_BUFFERS, RB_TEX_DEPTH_MSAA);
+	}
+	return uses_single_sample_depth() ? get_single_sample_depth() : render_buffers->get_depth_texture();
+}
+
 RID RenderForwardClustered::RenderBufferDataForwardClustered::get_color_only_fb() {
 	ERR_FAIL_NULL_V(render_buffers, RID());
 
-	bool use_msaa = render_buffers->get_msaa_3d() != RSE::VIEWPORT_MSAA_DISABLED;
+	bool use_msaa = _use_msaa();
 
 	RID color = use_msaa ? render_buffers->get_texture(RB_SCOPE_BUFFERS, RB_TEX_COLOR_MSAA) : render_buffers->get_internal_texture();
-	RID depth = use_msaa ? render_buffers->get_texture(RB_SCOPE_BUFFERS, RB_TEX_DEPTH_MSAA) : render_buffers->get_depth_texture();
+	RID depth = _get_depth_attachment();
 
 	if (render_buffers->has_texture(RB_SCOPE_VRS, RB_TEXTURE)) {
 		RID vrs_texture = render_buffers->get_texture(RB_SCOPE_VRS, RB_TEXTURE);
@@ -261,7 +292,7 @@ RID RenderForwardClustered::RenderBufferDataForwardClustered::get_color_only_fb(
 
 RID RenderForwardClustered::RenderBufferDataForwardClustered::get_color_pass_fb(uint32_t p_color_pass_flags) {
 	ERR_FAIL_NULL_V(render_buffers, RID());
-	bool use_msaa = render_buffers->get_msaa_3d() != RSE::VIEWPORT_MSAA_DISABLED;
+	bool use_msaa = _use_msaa();
 
 	int v_count = (p_color_pass_flags & COLOR_PASS_FLAG_MULTIVIEW) ? render_buffers->get_view_count() : 1;
 	RID color = use_msaa ? render_buffers->get_texture(RB_SCOPE_BUFFERS, RB_TEX_COLOR_MSAA) : render_buffers->get_internal_texture();
@@ -278,7 +309,7 @@ RID RenderForwardClustered::RenderBufferDataForwardClustered::get_color_pass_fb(
 		velocity_buffer = render_buffers->get_velocity_buffer(use_msaa);
 	}
 
-	RID depth = use_msaa ? render_buffers->get_texture(RB_SCOPE_BUFFERS, RB_TEX_DEPTH_MSAA) : render_buffers->get_depth_texture();
+	RID depth = _get_depth_attachment();
 
 	if (render_buffers->has_texture(RB_SCOPE_VRS, RB_TEXTURE)) {
 		RID vrs_texture = render_buffers->get_texture(RB_SCOPE_VRS, RB_TEXTURE);
@@ -290,9 +321,9 @@ RID RenderForwardClustered::RenderBufferDataForwardClustered::get_color_pass_fb(
 
 RID RenderForwardClustered::RenderBufferDataForwardClustered::get_depth_fb(DepthFrameBufferType p_type) {
 	ERR_FAIL_NULL_V(render_buffers, RID());
-	bool use_msaa = render_buffers->get_msaa_3d() != RSE::VIEWPORT_MSAA_DISABLED;
+	bool use_msaa = _use_msaa();
 
-	RID depth = use_msaa ? render_buffers->get_texture(RB_SCOPE_BUFFERS, RB_TEX_DEPTH_MSAA) : render_buffers->get_depth_texture();
+	RID depth = _get_depth_attachment();
 
 	switch (p_type) {
 		case DEPTH_FB: {
@@ -321,7 +352,7 @@ RID RenderForwardClustered::RenderBufferDataForwardClustered::get_depth_fb(Depth
 }
 
 RID RenderForwardClustered::RenderBufferDataForwardClustered::get_specular_only_fb() {
-	bool use_msaa = render_buffers->get_msaa_3d() != RSE::VIEWPORT_MSAA_DISABLED;
+	bool use_msaa = _use_msaa();
 
 	RID specular = render_buffers->get_texture(RB_SCOPE_FORWARD_CLUSTERED, use_msaa ? RB_TEX_SPECULAR_MSAA : RB_TEX_SPECULAR);
 
@@ -329,7 +360,7 @@ RID RenderForwardClustered::RenderBufferDataForwardClustered::get_specular_only_
 }
 
 RID RenderForwardClustered::RenderBufferDataForwardClustered::get_velocity_only_fb() {
-	bool use_msaa = render_buffers->get_msaa_3d() != RSE::VIEWPORT_MSAA_DISABLED;
+	bool use_msaa = _use_msaa();
 
 	RID velocity = render_buffers->get_texture(RB_SCOPE_BUFFERS, use_msaa ? RB_TEX_VELOCITY_MSAA : RB_TEX_VELOCITY);
 
