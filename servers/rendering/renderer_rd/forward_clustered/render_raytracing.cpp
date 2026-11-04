@@ -4964,7 +4964,7 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 			return 0;
 		}
 		if (!shadow_groups) {
-			WARN_PRINT_ONCE("A GeometryInstance3D uses SHADOW_CASTING_SETTING_SELF_SHADOWING: the path tracer casts its shadows on everything unless rendering/pathtracing/shadow_groups is enabled.");
+			WARN_PRINT_ONCE("A GeometryInstance3D uses SHADOW_CASTING_SETTING_SELF_SHADOWING, but rendering/pathtracing/shadow_groups is disabled: the path tracer casts its shadows on everything.");
 			return 0;
 		}
 		return RT_GEOM_FLAG_SELF_SHADOWING;
@@ -5962,7 +5962,7 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 		}
 		if (!shadow_groups) {
 			if (caster_masks.size() > 1 || (caster_masks.size() == 1 && caster_masks[0] != RT_LAYER_MASK_ALL)) {
-				WARN_PRINT("A Light3D uses shadow_caster_mask: the path tracer lets every layer cast its shadows unless rendering/pathtracing/shadow_groups is enabled.");
+				WARN_PRINT("A Light3D uses shadow_caster_mask, but rendering/pathtracing/shadow_groups is disabled: the path tracer lets every layer cast its shadows, the rasterizer does not.");
 				caster_mask_warned = true;
 			}
 		} else if (!caster_masks.is_empty()) {

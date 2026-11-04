@@ -107,7 +107,7 @@ public:
 		RT_FLAG_TRANSPARENCY_PEELING = (1 << 10),
 		// rendering/pathtracing/shadow_groups (RT_SHADOW_GROUPS): Light3D.shadow_caster_mask and SELF_SHADOWING; the shadow
 		// rays also meet the RT_INSTANCE_MASK_SHADOW_GROUP casters, in a ray query, when the frame has some
-		// (RT_PARAM_FLAG_SHADOW_GROUPS). A project setting too.
+		// (RT_PARAM_FLAG_SHADOW_GROUPS). A project setting too, on by default (raster follows both).
 		RT_FLAG_SHADOW_GROUPS = (1 << 11),
 	};
 
