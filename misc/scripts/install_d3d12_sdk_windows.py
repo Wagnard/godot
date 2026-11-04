@@ -39,7 +39,7 @@ else:
 # The shader cache key does not include Mesa: a new version reaches cached shaders only with a new engine commit.
 # Check for latest version: https://github.com/Wagnard/godot-nir-static/releases/latest
 mesa_repository = "Wagnard/godot-nir-static"
-mesa_version = "25.3.1-3-wagnardsoft.6"
+mesa_version = "25.3.1-3-wagnardsoft.7"
 # WinPixEventRuntime
 # Check for latest version: https://www.nuget.org/api/v2/package/WinPixEventRuntime (check downloaded filename)
 pix_version = "1.0.240308001"
