@@ -3406,7 +3406,7 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 		s_default_mat.data.emission_strength = 0.0f;
 		s_default_mat.data.roughness = 1.0f;
 		s_default_mat.data.specular = 0.5f;
-		s_default_mat.data.ao_strength = 1.0f;
+		s_default_mat.data.emission_indirect = 1.0f;
 		s_default_mat.data.uv1_scale[0] = 1.0f;
 		s_default_mat.data.uv1_scale[1] = 1.0f;
 		s_default_mat.data.uv1_offset[0] = 0.0f;
@@ -3465,7 +3465,7 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 	mat.metallic = 0.0f;
 	mat.roughness = 1.0f;
 	mat.specular = 0.5f;
-	mat.ao_strength = 1.0f;
+	mat.emission_indirect = 1.0f;
 	mat.flags = 0;
 	mat.albedo_texture_idx = 0;
 	mat.normal_texture_idx = 0;
@@ -3884,6 +3884,11 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 			mat.flags |= RT_MAT_FLAG_EMISSION;
 			if (code.contains("// Emission Operator: Add")) {
 				mat.flags |= RT_MAT_FLAG_EMISSION_ADD;
+			}
+			// Its EMISSION_INDIRECT.
+			const Variant indirect_var = material_storage->material_get_param(p_material_rid, "emission_indirect_energy");
+			if (indirect_var.get_type() == Variant::FLOAT) {
+				mat.emission_indirect = indirect_var;
 			}
 		}
 		if (code.contains("varying vec3 uv1_triplanar_pos;")) {

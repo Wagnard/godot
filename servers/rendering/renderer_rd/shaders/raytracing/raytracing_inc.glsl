@@ -390,16 +390,14 @@ bool is_unextended(uint packed) {
 	return (packed & UNEXTENDED_FLAG) != 0u;
 }
 
-#ifdef RT_DECAL_MODE
 // Non-singular path flag (bit 30): the path has bounced off a diffuse lobe or a specular one rougher than mirror-like, as
 // NVIDIA's NON_SINGULAR_PATH_FLAG (49a825dc52, raytracing_inc.glsl:153-158). rendering/pathtracing/decals Singular Only
-// leaves the decals out of the hits that come after.
+// leaves the decals out of the hits that come after; the material code reads it as RAY_IS_SINGULAR.
 const uint NON_SINGULAR_PATH_FLAG = (1u << 30);
 #define SINGULAR_ROUGHNESS_MAX 0.05
 bool is_singular_path(uint packed) {
 	return (packed & NON_SINGULAR_PATH_FLAG) == 0u;
 }
-#endif
 
 const uint PATH_TERMINATED_FLAG = (1u << 26);
 uint set_path_terminated(uint packed) {

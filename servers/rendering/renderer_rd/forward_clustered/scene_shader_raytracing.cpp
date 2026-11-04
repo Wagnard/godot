@@ -968,6 +968,11 @@ bool SceneShaderRaytracing::_preprocess_shader(RID p_material, bool p_is_procedu
 	actions.write_flag_pointers["VERTEX"] = &writes_vertex;
 	bool writes_modelview = false;
 	actions.write_flag_pointers["MODELVIEW_MATRIX"] = &writes_modelview;
+	// A cut-out that may differ between ray types: the opacity micromap bake sees a camera ray's.
+	bool uses_ray_state = false;
+	for (const char *ray_state : { "RAY_IS_PRIMARY", "RAY_IS_SHADOW", "RAY_IS_DIFFUSE", "RAY_IS_SPECULAR", "RAY_IS_SINGULAR", "RAY_BOUNCES", "RAY_DIFFUSE_BOUNCES" }) {
+		actions.usage_flag_pointers[ray_state] = &uses_ray_state;
+	}
 
 	HashMap<StringName, ShaderLanguage::ShaderNode::Uniform> uniform_sink;
 	actions.uniforms = &uniform_sink;
@@ -985,7 +990,7 @@ bool SceneShaderRaytracing::_preprocess_shader(RID p_material, bool p_is_procedu
 	r_entry.uses_alpha = uses_alpha;
 	if (!p_is_procedural) {
 		const RTAlphaDependencies alpha_dependencies = rt_alpha_dependencies(compiler.get_parsed_shader());
-		r_entry.alpha_bakeable = alpha_dependencies.bakeable;
+		r_entry.alpha_bakeable = alpha_dependencies.bakeable && !uses_ray_state;
 		r_entry.alpha_reads_color = alpha_dependencies.reads_color;
 	}
 	r_entry.writes_vertex = (writes_vertex || writes_modelview) && !p_is_procedural;
@@ -2825,6 +2830,17 @@ void SceneShaderRaytracing::init(const String p_defines) {
 		actions.renames["CUSTOM2"] = "custom2_attrib";
 		actions.renames["CUSTOM3"] = "custom3_attrib";
 		actions.renames["LIGHT_VERTEX"] = "light_vertex";
+		// The path tracer's built-ins (ShaderTypes): raster takes them as a camera ray's, the hit shaders from the ray that
+		// hit (raytracing_custom_globals_inc.glsl). SCENE_DEPTH is the opaque depth DEPTH_TEXTURE reads (_depth_buffer_reads()).
+		actions.renames["SCENE_DEPTH"] = "rt_depth_buffer_value()";
+		actions.renames["EMISSION_INDIRECT"] = "emission_indirect";
+		actions.renames["RAY_IS_PRIMARY"] = "rt_ray_is_primary(rt_ray_flags)";
+		actions.renames["RAY_IS_SHADOW"] = "is_shadow_ray(rt_ray_flags)";
+		actions.renames["RAY_IS_DIFFUSE"] = "rt_ray_is_diffuse(rt_ray_flags)";
+		actions.renames["RAY_IS_SPECULAR"] = "rt_ray_is_specular(rt_ray_flags)";
+		actions.renames["RAY_IS_SINGULAR"] = "rt_ray_is_singular(rt_ray_flags)";
+		actions.renames["RAY_BOUNCES"] = "int(get_total_bounces(rt_ray_flags))";
+		actions.renames["RAY_DIFFUSE_BOUNCES"] = "int(get_diffuse_bounces(rt_ray_flags))";
 
 		actions.renames["NODE_POSITION_WORLD"] = "read_model_matrix[3].xyz";
 		actions.renames["CAMERA_POSITION_WORLD"] = "inv_view_matrix[3].xyz";

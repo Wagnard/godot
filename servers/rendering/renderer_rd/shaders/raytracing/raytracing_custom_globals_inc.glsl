@@ -151,6 +151,25 @@ float rt_depth_buffer_value() {
 	return rt_behind_depth;
 }
 
+// The RAY_* built-ins, from the flags of the ray that hit (packed_bounces_flags), as NVIDIA's (49a825dc52,
+// raytracing_inc.glsl rt_ray_is_*()). Raster takes them as a camera ray's (ShaderTypes::add_raster_ray_renames()). A shadow
+// ray carries no bounce state: only RAY_IS_SHADOW is true for it. The front layer's reflection path starts on the
+// transparent surface's specular lobe, so its first hit is specular, not primary. rt_ray_flags is set by the hit shaders
+// (raytracing_custom_fragment_inc.glsl); elsewhere (the opacity micromap bake) it stays a camera ray's.
+uint rt_ray_flags = 0u;
+bool rt_ray_is_primary(uint p_flags) {
+	return !is_shadow_ray(p_flags) && get_total_bounces(p_flags) == 0u && !is_specular_lobe(p_flags);
+}
+bool rt_ray_is_diffuse(uint p_flags) {
+	return !is_shadow_ray(p_flags) && get_total_bounces(p_flags) != 0u && !is_specular_lobe(p_flags);
+}
+bool rt_ray_is_specular(uint p_flags) {
+	return !is_shadow_ray(p_flags) && is_specular_lobe(p_flags);
+}
+bool rt_ray_is_singular(uint p_flags) {
+	return !is_shadow_ray(p_flags) && is_singular_path(p_flags);
+}
+
 // Screen/depth textures are unavailable in RT -- alias to bindless slot 0
 // so shaders that reference them still compile (reads return dummy values).
 #define depth_buffer bindless_textures[0]

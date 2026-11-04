@@ -475,11 +475,9 @@ bool shade_and_bounce(inout PathState ps, HitRecord r, vec3 p_ray_origin, vec3 p
 	} else {
 		ps.packed_bounces_flags = inc_total_bounce(ps.packed_bounces_flags);
 	}
-#ifdef RT_DECAL_MODE
 	if (brdfType == DIFFUSE_TYPE || r.roughness > SINGULAR_ROUGHNESS_MAX) {
 		ps.packed_bounces_flags |= NON_SINGULAR_PATH_FLAG;
 	}
-#endif
 	// If the next ray leaves the scene, it takes the Environment's light by this lobe: as raster's ambient_light for the
 	// diffuse lobe and indirect_specular_light for the specular one (scene_forward_clustered.glsl).
 	ps.packed_bounces_flags = set_specular_lobe(ps.packed_bounces_flags, brdfType == SPECULAR_TYPE);

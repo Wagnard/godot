@@ -16,6 +16,14 @@
 //   materials[], CustomMaterialUniforms, scene_data_block
 
 MaterialData rt_mat = materials[rt_geometry_idx];
+// RAY_* (rt_ray_is_primary()). The shadow and sky visibility rays are the ones that stop at their first hit: with SER
+// the raygen does not set their payload (a payload written before hitObjectTraceRayEXT() is what NVIDIA's Vulkan driver
+// can hand back after a later call, PT-VK-SER-PAYLOAD-WA.md), so the ray's flags tell them apart.
+#ifdef RT_STAGE_ANY_HIT
+rt_ray_flags = (gl_IncomingRayFlagsEXT & (gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT)) != 0u ? set_shadow_ray(0u) : payload.packed_bounces_flags;
+#else
+rt_ray_flags = payload.packed_bounces_flags;
+#endif
 // The raygen passes the distance of the opaque surface behind a front layer hit in the payload (rt_depth_buffer_value()).
 if (is_front_layer_ray(payload.packed_bounces_flags) && payload.hit_t > 0.0 && payload.hit_t < 10000.0) {
 	vec3 rt_behind_world = gl_WorldRayOriginEXT + gl_WorldRayDirectionEXT * payload.hit_t;
@@ -254,6 +262,7 @@ float metallic = 0.0;
 float roughness = 1.0;
 float specular = 0.5;
 vec3 emission = vec3(0.0);
+float emission_indirect = 1.0; // EMISSION_INDIRECT: the emission's weight after the path's first diffuse bounce.
 vec3 normal_map = vec3(0.5, 0.5, 1.0);
 float normal_map_depth = 1.0;
 float ao = 1.0;

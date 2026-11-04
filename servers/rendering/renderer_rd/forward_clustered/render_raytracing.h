@@ -162,7 +162,7 @@ struct alignas(16) RT_MaterialData {
 	float emission_strength;
 	float metallic;
 	float roughness;
-	float ao_strength;
+	float emission_indirect; // BaseMaterial3D.emission_indirect_energy: the emission's weight after a diffuse bounce.
 	uint32_t flags;
 	float uv1_scale[2];
 	float uv1_offset[2];

@@ -119,7 +119,7 @@ struct MaterialData {
 
 	float metallic;
 	float roughness;
-	float ao_strength;
+	float emission_indirect; // BaseMaterial3D.emission_indirect_energy: the emission's weight after a diffuse bounce.
 	uint flags; // Bit 0: has_normal_map, Bit 1: has_emission
 
 	vec2 uv1_scale; // UV1 scale (default 1,1)

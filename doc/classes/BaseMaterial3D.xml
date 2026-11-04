@@ -219,7 +219,7 @@
 			Multiplier for emitted light. See [member emission_enabled].
 		</member>
 		<member name="emission_indirect_energy" type="float" setter="set_emission_indirect_energy" getter="get_emission_indirect_energy" default="1.0">
-			Multiplier for emitted light seen through indirect lighting (SDFGI and path tracing). [code]0.0[/code] makes the emission invisible to bounces, values above [code]1.0[/code] boost it. In path tracing, like [member Light3D.light_indirect_energy], it applies after the first diffuse bounce; directly visible emission and specular reflections are unaffected. In path tracing, it also scales the color of unshaded materials, even with [member emission_enabled] disabled.
+			Multiplier for emitted light seen through indirect lighting (SDFGI and path tracing). [code]0.0[/code] makes the emission invisible to bounces, values above [code]1.0[/code] boost it. In path tracing, like [member Light3D.light_indirect_energy], it applies after the first diffuse bounce; directly visible emission and specular reflections are unaffected. In path tracing, unshaded materials light nothing after a diffuse bounce, whatever this value.
 		</member>
 		<member name="emission_intensity" type="float" setter="set_emission_intensity" getter="get_emission_intensity">
 			Luminance of emitted light, measured in nits (candela per square meter). Only available when [member ProjectSettings.rendering/lights_and_shadows/use_physical_light_units] is enabled. The default is roughly equivalent to an indoor lightbulb.

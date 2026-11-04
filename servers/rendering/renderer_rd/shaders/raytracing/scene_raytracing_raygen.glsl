@@ -153,10 +153,7 @@ void trace_probe_ray() {
 	ps.throughput = vec3(1.0);
 	// As the ray a traced surface sends after its diffuse bounce, so the probe gets the indirect light such a surface there
 	// would: no per pixel writes (they are the primary ray's), and a miss takes the Environment's ambient light.
-	ps.packed_bounces_flags = pack_bounces(1u, 1u);
-#ifdef RT_DECAL_MODE
-	ps.packed_bounces_flags |= NON_SINGULAR_PATH_FLAG;
-#endif
+	ps.packed_bounces_flags = pack_bounces(1u, 1u) | NON_SINGULAR_PATH_FLAG;
 	ps.rng_state = init_rng(uvec2(ray, probe), uint(get_rt_param(RT_PARAM_FRAME_INDEX)), 0x5052u);
 #ifdef NRD_ENABLED
 	nrd_path_init(ps, false);
@@ -547,11 +544,9 @@ void main() {
 			// As deep as a camera path; not sample zero: no primary writes. Along the transparent surface's specular lobe:
 			// a miss takes the reflected light, as the raster transparent pass reflects.
 			rs.packed_bounces_flags = set_specular_lobe(pack_bounces(0u, 0u), true);
-#ifdef RT_DECAL_MODE
 			if (fr.roughness > SINGULAR_ROUGHNESS_MAX) {
 				rs.packed_bounces_flags |= NON_SINGULAR_PATH_FLAG;
 			}
-#endif
 			rs.rng_state = front_rng_state;
 #ifdef NRD_ENABLED
 			nrd_path_init(rs, false);
@@ -918,6 +913,10 @@ void main() {
 	m.metalness = metallic;
 	m.specular = specular;
 	m.emissive = emission * scene_data_block.data.emissive_exposure_normalization;
+	// EMISSION_INDIRECT, as Light3D.light_indirect_energy weighs a light: after the path's first diffuse bounce.
+	if (get_diffuse_bounces(payload.packed_bounces_flags) != 0u) {
+		m.emissive *= emission_indirect;
+	}
 #ifdef MODE_UNSHADED
 	m.unshaded = true;
 #else
@@ -1079,6 +1078,10 @@ void main() {
 		}
 		emissive = ((mat.flags & MAT_FLAG_EMISSION_ADD) != 0u ? mat.emission_color + emission_tex : mat.emission_color * emission_tex) * mat.emission_strength;
 		emissive *= scene_data_block.data.emissive_exposure_normalization;
+		// emission_indirect_energy (EMISSION_INDIRECT), after the path's first diffuse bounce.
+		if (get_diffuse_bounces(payload.packed_bounces_flags) != 0u) {
+			emissive *= mat.emission_indirect;
+		}
 	}
 
 	// Build MaterialResult.
