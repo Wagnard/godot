@@ -6390,7 +6390,10 @@ void RenderForwardClustered::_geometry_instance_add_surface_with_material(Geomet
 		rt_pass_flags |= GeometryInstanceSurfaceDataCache::FLAG_PASS_DEPTH;
 		rt_pass_flags |= GeometryInstanceSurfaceDataCache::FLAG_PASS_SHADOW;
 	}
-	if ((p_material->shader_data->pathtracing_rasterized || ginstance->data->pathtracing_rasterized) && (rt_pass_flags & GeometryInstanceSurfaceDataCache::FLAG_PASS_OPAQUE)) {
+	// GPUParticles3D are not traced (the TLAS takes meshes and MultiMeshes, RendererSceneCull's ray tracing cull): their
+	// opaque and cut-out draw passes are rasterized the same way, or nothing would draw them under path tracing.
+	const bool particles = ginstance->data->base_type == RSE::INSTANCE_PARTICLES;
+	if ((p_material->shader_data->pathtracing_rasterized || ginstance->data->pathtracing_rasterized || particles) && (rt_pass_flags & GeometryInstanceSurfaceDataCache::FLAG_PASS_OPAQUE)) {
 		// Drawn by the path tracer's raster pass (its alpha list, after a depth pass of its own) over the traced image;
 		// traced only for the other rays (RenderRaytracing::build_tlas(), not as a front layer surface). Opaque and cut-out
 		// surfaces only: a transparent one (a sprite's buff halo overlay) is drawn there already.
