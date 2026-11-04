@@ -883,6 +883,16 @@ float3 evalMultiScatterApproximation(float alpha, float NdV, float3 F0) {
 	return 1.0 + F0 * Ems;
 }
 
+#ifdef RT_SPECULAR_ENERGY_COMPENSATION
+// rendering/pathtracing/specular_energy_compensation: raster's multiple scattering compensation of the specular lobe, from
+// its DFG LUT (RenderForwardClustered::dfg_lut, integrate_dfg.glsl), as scene_forward_clustered_inc.glsl's
+// prefiltered_dfg() and get_energy_compensation() read it (Filament, "Energy compensation" 4.7.2): 1 + F0 (1 / DFG.y - 1).
+// Raster applies it to the lights' specular light and to the reflections, so do the lights and the reflection rays here.
+// NVIDIA does the same (49a825dc52 raytracing_closest_hit_common_inc.glsl:277-290, binding 39 there).
+// Defined with the material samplers it reads the LUT with (raytracing_samplers_inc.glsl), which come after this file.
+float3 rt_specular_energy_compensation(float3 p_f0, float p_roughness, float p_NdotV);
+#endif
+
 // Samples a reflection ray from the rough surface using selected microfacet distribution and sampling method
 // Resulting weight includes multiplication by cosine (NdotL) term
 float3 sampleSpecularMicrofacet(float3 Vlocal, float alpha, float alphaSquared, float3 specularF0, float specularF90, float2 u, OUT_PARAMETER(float3) weight) {
@@ -908,7 +918,9 @@ float3 sampleSpecularMicrofacet(float3 Vlocal, float alpha, float alphaSquared, 
 	float NdotH = max(0.00001f, min(1.0f, dot(Nlocal, Hlocal)));
 	float3 F = evalFresnel(specularF0, specularF90, HdotL);
 
-#if MICROFACET_DISTRIBUTION == GGX
+#if defined(RT_SPECULAR_ENERGY_COMPENSATION)
+	float3 ms = rt_specular_energy_compensation(specularF0, sqrt(alpha), NdotV);
+#elif MICROFACET_DISTRIBUTION == GGX
 	float3 ms = evalMultiScatterApproximation(alpha, NdotV, specularF0);
 #else
 	float3 ms = vec3(1.0f, 1.0f, 1.0f);
@@ -1072,6 +1084,9 @@ float3 evalCombinedBRDF(float3 N, float3 L, float3 V, MaterialProperties materia
 
 	// Eval specular and diffuse BRDFs
 	float3 specular = evalSpecular(data);
+#ifdef RT_SPECULAR_ENERGY_COMPENSATION
+	specular *= rt_specular_energy_compensation(data.specularF0, data.roughness, data.NdotV);
+#endif
 	float3 diffuse = evalDiffuse(data);
 
 	// Combine specular and diffuse layers
@@ -1096,6 +1111,9 @@ void evalCombinedBRDFSeparate(float3 N, float3 L, float3 V, MaterialProperties m
 
 	// Eval specular and diffuse BRDFs
 	outSpecular = evalSpecular(data);
+#ifdef RT_SPECULAR_ENERGY_COMPENSATION
+	outSpecular *= rt_specular_energy_compensation(data.specularF0, data.roughness, data.NdotV);
+#endif
 	outDiffuse = evalDiffuse(data);
 
 #if COMBINE_BRDFS_WITH_FRESNEL

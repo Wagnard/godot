@@ -247,7 +247,9 @@ vec3 rt_environment_nee(RTEnvSampling p_env, vec3 p_origin, vec3 p_geometry_norm
 		const float n_dot_v = max(0.00001, min(1.0, v_local.z));
 		const float h_dot_l = max(0.00001, min(1.0, data.LdotH));
 		const float n_dot_h = max(0.00001, min(1.0, data.NdotH));
-#if MICROFACET_DISTRIBUTION == GGX
+#if defined(RT_SPECULAR_ENERGY_COMPENSATION)
+		const vec3 ms = rt_specular_energy_compensation(data.specularF0, data.roughness, n_dot_v);
+#elif MICROFACET_DISTRIBUTION == GGX
 		const vec3 ms = evalMultiScatterApproximation(data.alpha, n_dot_v, data.specularF0);
 #else
 		const vec3 ms = vec3(1.0);

@@ -7341,6 +7341,12 @@ RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderD
 		rb->clear_context(RB_SCOPE_RT_TIMING);
 	}
 
+	// Binding 47: raster's DFG LUT, in the rendering/pathtracing/specular_energy_compensation variant only
+	// (raytracing_samplers_inc.glsl rt_specular_energy_compensation()).
+	if (p_rt_flags & SceneShaderRaytracing::RT_FLAG_SPECULAR_ENERGY_COMPENSATION) {
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 47, owner->dfg_lut.texture));
+	}
+
 	RID shader_rd = shader ? shader->get_pipeline_shader_rd(p_rt_flags) : RID();
 
 	RID result;
