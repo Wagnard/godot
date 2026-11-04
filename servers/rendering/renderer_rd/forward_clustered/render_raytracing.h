@@ -581,6 +581,17 @@ struct RTCacheEntry {
 	uint64_t size_bytes = 0;
 };
 
+// The uniforms vertex() reads from the global uniform buffer, hashed (RenderRaytracing::_vertex_uniforms_hash()): the
+// instance uniforms and the global shader parameters. Hashed again only once the buffer's values, the instance's slice or
+// the material changed, so a surface whose uniforms stay as they are reads nothing per frame.
+struct RTVertexUniformsHash {
+	uint64_t buffer_version = UINT64_MAX; // MaterialStorage::global_shader_uniforms_get_version() when hashed.
+	uint64_t instance_version = 0; // MaterialStorage::global_shader_parameters_instance_get_version() when hashed.
+	int32_t instance_uniforms_ofs = -1;
+	uint16_t material_counter = 0;
+	uint32_t hash = 0;
+};
+
 /// BLAS cache entry for a surface driven by a per-frame-deformed vertex buffer.
 ///
 /// The skinned vertex buffer is owned by the engine's MeshInstance system and may
@@ -620,7 +631,8 @@ struct RTDeformedCacheEntry {
 	uint32_t displaced_slot = 0;
 	uint32_t displaced_prev_offset = 0; // Bytes to the previous frame's positions in displaced_vb.
 	uint16_t displaced_material_counter = 0;
-	uint32_t displaced_instance_uniforms_hash = 0; // The instance uniforms vertex() was evaluated with.
+	uint32_t displaced_instance_uniforms_hash = 0; // The instance uniforms and global shader parameters vertex() was evaluated with.
+	RTVertexUniformsHash vertex_uniforms; // Their current hash.
 	bool displaced_deferred = false; // A change waits for the surface's next update frame (far from the camera).
 	Transform3D displaced_transform;
 	uint64_t displaced_deformation = 0; // A skinned surface's: the skinning output it was evaluated from.
@@ -677,7 +689,8 @@ struct RTMergedMMEntry {
 	// frame's give the motion vectors.
 	bool displaced = false;
 	bool displaced_this_frame = false; // Its positions moved this frame: the previous ones are valid.
-	uint32_t displaced_inputs = 0; // Hash of the material's parameters and the instance uniforms vertex() was evaluated with.
+	uint32_t displaced_inputs = 0; // Hash of the material's parameters and the uniforms vertex() was evaluated with.
+	RTVertexUniformsHash vertex_uniforms; // The uniforms' current hash.
 	RID merged_prev_buffer; // float3 per merged vertex, the previous frame's displaced positions.
 	bool indexed = false; // selects MODE_INDEXED vs MODE_NON_INDEXED variant
 	uint32_t last_tbn_stride = 0; // The strides the buffers were sized with.

@@ -1780,6 +1780,33 @@ void RenderRaytracing::_schedule_dynamic_updates(const RenderDataRD *p_render_da
 // Displacement by material vertex() code
 // ---------------------------------------------------------------------------
 
+// Hash of what vertex() reads from the global uniform buffer: the instance uniforms at p_instance_uniforms_ofs and the
+// global shader parameters p_cse names. The storage's versions tell when it may have changed; otherwise the last hash is
+// returned without reading the values.
+static uint32_t _rt_vertex_uniforms_hash(RTVertexUniformsHash &r_cache, int32_t p_instance_uniforms_ofs, uint16_t p_material_counter, const SceneShaderRaytracing::CustomShaderEntry *p_cse) {
+	const RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
+	const uint64_t buffer_version = material_storage->global_shader_uniforms_get_version();
+	const uint64_t instance_version = material_storage->global_shader_parameters_instance_get_version();
+	// The material's counter covers its shader, hence which global shader parameters vertex() reads.
+	if (r_cache.buffer_version == buffer_version && r_cache.instance_version == instance_version &&
+			r_cache.instance_uniforms_ofs == p_instance_uniforms_ofs && r_cache.material_counter == p_material_counter) {
+		return r_cache.hash;
+	}
+	uint32_t hash = material_storage->global_shader_parameters_instance_hash(p_instance_uniforms_ofs);
+	if (p_cse) {
+		for (const StringName &name : p_cse->vertex_global_uniforms) {
+			const Span<const float> values = material_storage->global_shader_uniform_get_values(name);
+			hash = hash_murmur3_buffer(values.ptr(), int(values.size() * sizeof(float)), hash);
+		}
+	}
+	r_cache.buffer_version = buffer_version;
+	r_cache.instance_version = instance_version;
+	r_cache.instance_uniforms_ofs = p_instance_uniforms_ofs;
+	r_cache.material_counter = p_material_counter;
+	r_cache.hash = hash;
+	return hash;
+}
+
 // Runs the vertex() of every material that moves VERTEX on its surfaces, so their BLAS holds what raster draws
 // (Terrain3D builds its whole relief there). The output goes through the deformed path in build_tlas().
 void RenderRaytracing::_displace_surfaces(const RenderDataRD *p_render_data, const UpdateTurns &p_turns) {
@@ -1938,8 +1965,9 @@ void RenderRaytracing::_displace_surfaces(const RenderDataRD *p_render_data, con
 			const uint32_t size = vertex_count * (3 + tbn_words + 3 + 3) * sizeof(uint32_t);
 
 			RTDeformedCacheEntry *entry = _access_deformed_slot(surf->rt_deformed_handle);
-			// An instance uniform animated by a script (a wall growing out of the ground) moves the geometry too.
-			const uint32_t instance_uniforms_hash = material_storage->global_shader_parameters_instance_hash(inst->shader_uniforms_offset);
+			// An instance uniform animated by a script (a wall growing out of the ground) or a global shader parameter (wind)
+			// moves the geometry too.
+			const uint32_t instance_uniforms_hash = _rt_vertex_uniforms_hash(entry->vertex_uniforms, inst->shader_uniforms_offset, material_counter, cse);
 			const bool first = entry->displaced_frame == 0;
 			// A skinned surface follows its skinning (its deformed buffer is vertex()'s input).
 			const uint64_t deformation = skinned ? mesh_storage->mesh_instance_get_last_change(inst->mesh_instance, surf->surface_index) : 0;
@@ -1950,7 +1978,7 @@ void RenderRaytracing::_displace_surfaces(const RenderDataRD *p_render_data, con
 			const bool inputs_moved = !frozen && (entry->displaced_material_counter != material_counter || entry->displaced_instance_uniforms_hash != instance_uniforms_hash || cse->uses_vertex_time || (cse->vertex_reads_camera && camera_moved));
 			if (!evaluate && (entry->displaced_deferred || inputs_moved || entry->displaced_deformation != deformation)) {
 				// What vertex() keeps moving (TIME, the camera, a parameter set every frame: Terrain3D's geomorphing, an
-				// instance uniform) is evaluated, and its BLAS refit, every frame near the camera and every N frames beyond,
+				// instance uniform, a global shader parameter) is evaluated, and its BLAS refit, every frame near the camera and every N frames beyond,
 				// N growing with the distance. The surfaces take turns, and the motion between two updates is reported on the
 				// update frame.
 				uint32_t period = 1;
@@ -1983,8 +2011,9 @@ void RenderRaytracing::_displace_surfaces(const RenderDataRD *p_render_data, con
 			}
 			// What can turn triangles on or off builds the BLAS again: a new surface or buffer, another hit group, the
 			// instance moved (Terrain3D's clipmap: the only time its holes move), another micromap. Otherwise (TIME, the
-			// camera, a material parameter or an instance uniform set every frame: Terrain3D's _camera_pos) it is refit,
-			// and every DISPLACED_REBUILD_PERIOD refits built again, as the BVH of a refit keeps the topology of its build.
+			// camera, a material parameter, an instance uniform or a global shader parameter set every frame: Terrain3D's
+			// _camera_pos) it is refit, and every DISPLACED_REBUILD_PERIOD refits built again, as the BVH of a refit keeps the
+			// topology of its build.
 			// The refit keeps the triangles' state (raytracing_displace.glsl); a vertex turning on or off sets the guard,
 			// which builds the BLAS again a frame later (DXR and Vulkan: an update cannot change a primitive's active
 			// state). rendering/pathtracing/displaced_refit off builds again every time. GeometryInstance3D.rt_blas_update (or
@@ -4501,8 +4530,9 @@ bool RenderRaytracing::_build_merged_mm_blas(
 		entry.displaced = false; // Its previous positions are not written yet.
 	}
 	// Evaluated after every merge, every frame when vertex() reads the time or the camera, and when the material's
-	// parameters or the instance uniforms change (godot3d's Rot Blossom grows its MultiMeshes with one).
-	const uint32_t displace_inputs = p_displace ? hash_murmur3_one_32(p_material_counter, RendererRD::MaterialStorage::get_singleton()->global_shader_parameters_instance_hash(int32_t(p_instance_uniforms_ofs))) : 0;
+	// parameters, the instance uniforms (godot3d's Rot Blossom grows its MultiMeshes with one) or the global shader
+	// parameters vertex() reads change.
+	const uint32_t displace_inputs = p_displace ? hash_murmur3_one_32(p_material_counter, _rt_vertex_uniforms_hash(entry.vertex_uniforms, int32_t(p_instance_uniforms_ofs), p_material_counter, SceneShaderRaytracing::get_singleton()->get_custom_shader_entry(p_mat_data->rt_sbt_offset))) : 0;
 	const bool displace_now = p_displace && first_touch_this_frame && (needs_rebake || p_reevaluate || !entry.displaced || entry.displaced_inputs != displace_inputs);
 
 	// --- Single merged dispatch: bake vertices + TBN + attributes + (optional) indices ---

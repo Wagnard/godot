@@ -265,6 +265,7 @@ private:
 
 		HashMap<RID, int32_t> instance_buffer_pos;
 		uint64_t instance_version = 0;
+		uint64_t buffer_version = 0; // Advances whenever values are written (_global_shader_uniform_mark_buffer_dirty()).
 	} global_shader_uniforms;
 
 	int32_t _global_shader_uniform_allocate(uint32_t p_elements);
@@ -481,6 +482,8 @@ public:
 	virtual void global_shader_parameters_instance_update(RID p_instance, int p_index, const Variant &p_value, int p_flags_count = 0) override;
 	// Advances whenever any instance's slice of the global uniform buffer is allocated, freed or written.
 	uint64_t global_shader_parameters_instance_get_version() const { return global_shader_uniforms.instance_version; }
+	// Advances whenever a global shader parameter's or an instance uniform's value is written.
+	uint64_t global_shader_uniforms_get_version() const { return global_shader_uniforms.buffer_version; }
 
 	RID global_shader_uniforms_get_storage_buffer() const;
 	/// Hash of the values of the instance uniforms allocated at p_offset (0 if none): tells the path tracer when the

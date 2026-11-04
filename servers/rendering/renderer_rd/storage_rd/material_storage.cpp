@@ -1768,6 +1768,7 @@ void MaterialStorage::_global_shader_uniform_store_in_buffer(int32_t p_index, RS
 }
 
 void MaterialStorage::_global_shader_uniform_mark_buffer_dirty(int32_t p_index, int32_t p_elements) {
+	global_shader_uniforms.buffer_version++;
 	int32_t prev_chunk = -1;
 
 	for (int32_t i = 0; i < p_elements; i++) {
@@ -1865,6 +1866,8 @@ void MaterialStorage::global_shader_parameter_set(const StringName &p_name, cons
 			for (const RID &E : gv.texture_materials) {
 				Material *material = material_storage->get_material(E);
 				ERR_CONTINUE(!material);
+				// The path tracer binds the texture by material, and what vertex() samples from it moves the geometry.
+				material_storage->_material_rt_invalidate(material);
 				material_storage->_material_queue_update(material, false, true);
 			}
 		}
@@ -1897,6 +1900,7 @@ void MaterialStorage::global_shader_parameter_set_override(const StringName &p_n
 		for (const RID &E : gv.texture_materials) {
 			Material *material = material_storage->get_material(E);
 			ERR_CONTINUE(!material);
+			material_storage->_material_rt_invalidate(material);
 			material_storage->_material_queue_update(material, false, true);
 		}
 	}

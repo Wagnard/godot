@@ -409,6 +409,7 @@ public:
 		bool writes_modelview = false; // vertex() writes MODELVIEW_MATRIX (billboards): raster draws VERTEX through it.
 		bool uses_vertex_time = false;
 		bool vertex_reads_camera = false; // vertex() reads the view or projection.
+		Vector<StringName> vertex_global_uniforms; // The global shader parameters (not textures) vertex() may read.
 		Vector<ShaderCompiler::GeneratedCode::Varying> varyings; // Interpolated by the hit shaders on displaced geometry.
 		bool is_procedural = false; // Uses intersection shader instead of triangle geometry
 		uint32_t alpha_texture_buffer_offset = UINT32_MAX; // Byte offset of hint_alpha texture index in CustomMaterialUniforms UBO; UINT32_MAX if absent

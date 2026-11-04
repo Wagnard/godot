@@ -1033,6 +1033,17 @@ bool SceneShaderRaytracing::_preprocess_shader(RID p_material, bool p_is_procedu
 			r_entry.vertex_reads_camera = true;
 		}
 	}
+	// As conservative: the global shader parameters read there, which the displaced geometry follows (an index into the
+	// global uniform buffer, kept in the material's uniforms). Their textures are the material's (MaterialStorage).
+	for (const KeyValue<StringName, ShaderLanguage::ShaderNode::Uniform> &kv : uniform_sink) {
+		if (kv.value.scope != ShaderLanguage::ShaderNode::Uniform::SCOPE_GLOBAL || ShaderLanguage::is_sampler_type(kv.value.type)) {
+			continue;
+		}
+		const String member = "material." + _uniform_identifier(kv.key);
+		if (r_entry.vertex_code.contains(member) || r_entry.fragment_globals.contains(member)) {
+			r_entry.vertex_global_uniforms.push_back(kv.key);
+		}
+	}
 	r_entry.uniform_members = gen_code.uniforms;
 	r_entry.uniform_total_size = gen_code.uniform_total_size;
 	r_entry.uniform_offsets = gen_code.uniform_offsets;
