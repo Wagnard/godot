@@ -4457,6 +4457,14 @@ bool RenderRaytracing::_build_merged_mm_blas(
 		// destination buffers, so no in-shader barrier is required. A build also writes the unused vertices and indices
 		// up to the capacity; a refit leaves them as they are.
 		uint32_t thread_count = entry.blas_built_once ? MAX(used_vertices, used_indices) : MAX(entry.cap_vertices, entry.cap_indices);
+		// The mesh's vertex and index buffers are read through their addresses (push constants): declared, as the TLAS
+		// expansion declares the MultiMesh buffers, so that the graph orders this pass after their updates
+		// (mesh_surface_update_vertex_region() / _index_region(), which bump the surface's counter and so rebake here in the
+		// same frame) with the barrier it needs. A LOD view's are bound (bindings 5 and 6).
+		rd->compute_list_add_buffer_dependency(p_compute_list, vtx_buf, false);
+		if (indexed && !lod_view) {
+			rd->compute_list_add_buffer_dependency(p_compute_list, index_buffer, false);
+		}
 		rd->compute_list_dispatch_threads(p_compute_list, thread_count, 1, 1);
 	}
 
