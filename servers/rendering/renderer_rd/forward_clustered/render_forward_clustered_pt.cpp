@@ -439,7 +439,7 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 			case RSE::ENV_BG_COLOR: {
 				clear_color = bg_mode == RSE::ENV_BG_CLEAR_COLOR ? p_default_bg_color : environment_get_bg_color(p_render_data->environment);
 
-				if (!p_render_data->transparent_bg && (rb->has_custom_data(RB_SCOPE_FOG) || environment_get_fog_enabled(p_render_data->environment))) {
+				if (!p_render_data->transparent_bg && (RendererRD::Fog::get_active(rb.ptr(), p_render_data->environment).is_valid() || environment_get_fog_enabled(p_render_data->environment))) {
 					draw_sky_fog_only = true;
 					RendererRD::MaterialStorage::get_singleton()->material_set_param(sky.sky_scene_state.fog_material, "clear_color", Variant(clear_color));
 				}
