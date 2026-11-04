@@ -1123,7 +1123,9 @@ void evalCombinedBRDFSeparate(float3 N, float3 L, float3 V, MaterialProperties m
 }
 
 // This is an entry point for evaluation of all other BRDFs based on selected configuration (for indirect light)
-bool evalIndirectCombinedBRDF(float2 u, float3 shadingNormal, float3 geometryNormal, float3 V, MaterialProperties material, const int brdfType, OUT_PARAMETER(float3) rayDirection, OUT_PARAMETER(float3) sampleWeight, float4 debug) {
+// uFresnel: for the diffuse lobe, the random pair of the half vector its Fresnel weight is taken at (COMBINE_BRDFS_WITH_FRESNEL),
+// independent of the direction's u.
+bool evalIndirectCombinedBRDF(float2 u, float2 uFresnel, float3 shadingNormal, float3 geometryNormal, float3 V, MaterialProperties material, const int brdfType, OUT_PARAMETER(float3) rayDirection, OUT_PARAMETER(float3) sampleWeight, float4 debug) {
 	// Ignore incident ray coming from "below" the hemisphere
 	//if (dot(shadingNormal, V) <= 0.0f) return false;
 
@@ -1144,8 +1146,9 @@ bool evalIndirectCombinedBRDF(float2 u, float3 shadingNormal, float3 geometryNor
 		sampleWeight = data.diffuseReflectance * diffuseTerm(data);
 
 #if COMBINE_BRDFS_WITH_FRESNEL
-		// Sample a half-vector of specular BRDF. Note that we're reusing random variable 'u' here, but correctly it should be an new independent random number
-		float3 Hspecular = sampleSpecularHalfVector(Vlocal, float2(data.alpha, data.alpha), u);
+		// Sample a half-vector of specular BRDF, from its own random pair: RTXPT reused the direction's 'u' here ("correctly it
+		// should be an new independent random number"), which tied the Fresnel weight to the direction drawn.
+		float3 Hspecular = sampleSpecularHalfVector(Vlocal, float2(data.alpha, data.alpha), uFresnel);
 
 		// Clamp HdotL to small value to prevent numerical instability. Assume that rays incident from below the hemisphere have been filtered
 		float VdotH = max(0.00001f, min(1.0f, dot(Vlocal, Hspecular)));

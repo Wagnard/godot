@@ -395,14 +395,15 @@ void debug_visualize(
 		vec2 u_spec_rng = rand2(ps.rng_state);
 		vec2 u_diff_rng = rand2(ps.rng_state);
 
-		bool u_spec_ok = evalIndirectCombinedBRDF(u_spec_rng, final_normal, geometry_normal, V, dbg_mat, SPECULAR_TYPE, dbg_dir, dbg_weight, vec4(0.0));
-		bool u_diff_ok = evalIndirectCombinedBRDF(u_diff_rng, final_normal, geometry_normal, V, dbg_mat, DIFFUSE_TYPE, dbg_dir, dbg_weight, vec4(0.0));
+		// The Fresnel pair changes only the diffuse weight, not whether the direction is valid: the same pair.
+		bool u_spec_ok = evalIndirectCombinedBRDF(u_spec_rng, u_spec_rng, final_normal, geometry_normal, V, dbg_mat, SPECULAR_TYPE, dbg_dir, dbg_weight, vec4(0.0));
+		bool u_diff_ok = evalIndirectCombinedBRDF(u_diff_rng, u_diff_rng, final_normal, geometry_normal, V, dbg_mat, DIFFUSE_TYPE, dbg_dir, dbg_weight, vec4(0.0));
 
 		// Uses the same threshold as shade_and_bounce so the visualization
 		// stays in sync with production sampling.
 		vec3 N_clamped = clampShadingNormal(final_normal, geometry_normal, V, RT_SHADING_NORMAL_CLAMP_THRESHOLD);
-		bool c_spec_ok = evalIndirectCombinedBRDF(u_spec_rng, N_clamped, geometry_normal, V, dbg_mat, SPECULAR_TYPE, dbg_dir, dbg_weight, vec4(0.0));
-		bool c_diff_ok = evalIndirectCombinedBRDF(u_diff_rng, N_clamped, geometry_normal, V, dbg_mat, DIFFUSE_TYPE, dbg_dir, dbg_weight, vec4(0.0));
+		bool c_spec_ok = evalIndirectCombinedBRDF(u_spec_rng, u_spec_rng, N_clamped, geometry_normal, V, dbg_mat, SPECULAR_TYPE, dbg_dir, dbg_weight, vec4(0.0));
+		bool c_diff_ok = evalIndirectCombinedBRDF(u_diff_rng, u_diff_rng, N_clamped, geometry_normal, V, dbg_mat, DIFFUSE_TYPE, dbg_dir, dbg_weight, vec4(0.0));
 
 		bool all_uncl_ok = u_spec_ok && u_diff_ok;
 		bool all_cl_ok = c_spec_ok && c_diff_ok;

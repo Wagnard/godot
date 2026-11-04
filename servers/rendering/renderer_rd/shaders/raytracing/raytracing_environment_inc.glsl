@@ -227,13 +227,11 @@ vec3 rt_environment_nee(RTEnvSampling p_env, vec3 p_origin, vec3 p_geometry_norm
 
 	vec3 value = vec3(0.0);
 	if (p_env.diffuse) {
-		// evalIndirectCombinedBRDF(DIFFUSE_TYPE): the diffuse reflectance times one minus the Fresnel of a half vector it
-		// samples with the same random numbers as the direction (sampleHemisphere()), which this direction gives back.
+		// evalIndirectCombinedBRDF(DIFFUSE_TYPE): the diffuse reflectance times one minus the Fresnel of a half vector drawn
+		// with its own random pair, independent of the direction: the same estimate of the lobe here, from another pair.
 		vec3 diffuse = data.diffuseReflectance * (l_local.z * ONE_OVER_PI);
 #if COMBINE_BRDFS_WITH_FRESNEL
-		float u_y = atan(l_local.y, l_local.x) * ONE_OVER_TWO_PI;
-		const vec2 u = vec2(dot(l_local.xy, l_local.xy), u_y < 0.0 ? u_y + 1.0 : u_y);
-		const vec3 h = sampleSpecularHalfVector(v_local, vec2(data.alpha, data.alpha), u);
+		const vec3 h = sampleSpecularHalfVector(v_local, vec2(data.alpha, data.alpha), rand2(r_rng_state));
 		const float v_dot_h = max(0.00001, min(1.0, dot(v_local, h)));
 		diffuse *= vec3(1.0) - evalFresnel(data.specularF0, data.specularF90, v_dot_h);
 #endif

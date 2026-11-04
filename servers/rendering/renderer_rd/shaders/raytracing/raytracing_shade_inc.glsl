@@ -432,10 +432,16 @@ bool shade_and_bounce(inout PathState ps, HitRecord r, vec3 p_ray_origin, vec3 p
 	}
 
 	vec2 u = rand2(ps.rng_state);
+#if COMBINE_BRDFS_WITH_FRESNEL
+	// The diffuse lobe's Fresnel half vector: the next pair of the path's sequence, independent of the direction's.
+	const vec2 u_fresnel = brdfType == DIFFUSE_TYPE ? rand2(ps.rng_state) : u;
+#else
+	const vec2 u_fresnel = u;
+#endif
 	vec3 next_dir;
 	vec3 brdf_weight;
 	bool recovered = false;
-	if (!evalIndirectCombinedBRDF(u, N, r.geometry_normal, V, brdf_mat, brdfType, next_dir, brdf_weight, vec4(0.0))) {
+	if (!evalIndirectCombinedBRDF(u, u_fresnel, N, r.geometry_normal, V, brdf_mat, brdfType, next_dir, brdf_weight, vec4(0.0))) {
 		// Two failure modes:
 		//   1) Sample weight is zero (no contribution). Terminate.
 		//   2) Sampled direction is below the geometry plane. Recover by
@@ -514,7 +520,8 @@ vec3 front_layer_reflection_dir(HitRecord r, vec3 p_ray_dir, inout uint r_rng_st
 	// would reflect the triangles of a displaced surface (waves) instead of its smooth normal.
 	vec3 front_dir;
 	vec3 front_weight;
-	if (!evalIndirectCombinedBRDF(rand2(r_rng_state), r.normal, r.normal, V, front_mat, SPECULAR_TYPE, front_dir, front_weight, vec4(0.0))) {
+	const vec2 front_u = rand2(r_rng_state);
+	if (!evalIndirectCombinedBRDF(front_u, front_u, r.normal, r.normal, V, front_mat, SPECULAR_TYPE, front_dir, front_weight, vec4(0.0))) {
 		front_dir = reflect(-V, r.normal);
 	}
 	// Below the surface, the ray would cross it: mirror it back above.
