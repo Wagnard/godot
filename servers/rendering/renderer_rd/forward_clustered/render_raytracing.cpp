@@ -3616,23 +3616,13 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 				// Instance uniforms live in the global buffer (rt_instance_uniforms_ofs), not in the material's: as raster's
 				// MaterialData::update_uniform_buffer(), skip them. Their order is left at 0, so packing one wrote over the
 				// material's first uniform (godot3d's grass: rain_wetness's global index, which then read grass_lod_width).
-				if (ShaderLanguage::is_sampler_type(u.type) || u.scope == ShaderLanguage::ShaderNode::Uniform::SCOPE_INSTANCE) {
-					continue;
-				}
-				if (u.order < 0 || u.order >= (int)cse->uniform_offsets.size()) {
+				if (!SceneShaderRaytracing::is_material_buffer_uniform(u, cse->uniform_offsets)) {
 					continue;
 				}
 
-				uint32_t offset = cse->uniform_offsets[u.order];
-				uint32_t size = ShaderLanguage::get_datatype_size(u.type);
-				if (u.array_size > 0) {
-					const uint32_t padded = 16 * u.array_size;
-					size *= u.array_size;
-					if (size % padded != 0) {
-						size += padded - (size % padded);
-					}
-				}
-				if (offset + size > cse->uniform_total_size) {
+				// A global's slot is its index (4 bytes): with its type's size, one laid out last was skipped and read index 0.
+				const uint32_t offset = cse->uniform_offsets[u.order];
+				if (offset + SceneShaderRaytracing::material_buffer_uniform_size(u) > cse->uniform_total_size) {
 					continue;
 				}
 

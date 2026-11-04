@@ -67,6 +67,28 @@ public:
 		PIPELINE_VERSION_MAX
 	};
 
+	// A member of the material's uniform buffer, as raster's MaterialData::update_uniform_buffer() fills it: instance
+	// uniforms live in the global buffer (the parser leaves their order at 0, the first material uniform's slot).
+	static inline bool is_material_buffer_uniform(const ShaderLanguage::ShaderNode::Uniform &p_uniform, const Vector<uint32_t> &p_uniform_offsets) {
+		return !ShaderLanguage::is_sampler_type(p_uniform.type) && p_uniform.scope != ShaderLanguage::ShaderNode::Uniform::SCOPE_INSTANCE &&
+				p_uniform.order >= 0 && p_uniform.order < (int)p_uniform_offsets.size();
+	}
+
+	// Its size in that buffer, as ShaderCompiler lays it out: a global is an index into the global buffer, an array is
+	// padded to 16 bytes per element.
+	static inline uint32_t material_buffer_uniform_size(const ShaderLanguage::ShaderNode::Uniform &p_uniform) {
+		if (p_uniform.scope == ShaderLanguage::ShaderNode::Uniform::SCOPE_GLOBAL) {
+			return ShaderLanguage::get_datatype_size(ShaderLanguage::TYPE_UINT);
+		}
+		const uint32_t size = ShaderLanguage::get_datatype_size(p_uniform.type);
+		if (p_uniform.array_size <= 0) {
+			return size;
+		}
+		const uint32_t array_bytes = size * p_uniform.array_size;
+		const uint32_t granule = 16 * p_uniform.array_size;
+		return (array_bytes + granule - 1) / granule * granule;
+	}
+
 	enum PipelineColorPassFlags {
 		PIPELINE_COLOR_PASS_FLAG_NONE = 0 // Simplified: no flags needed
 	};
