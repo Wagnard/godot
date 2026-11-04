@@ -35,7 +35,11 @@ struct RTLightData {
 	vec4 projector_uv_y;
 	uint projector_enabled;
 	uint projector_texture; // Omni and spot: the projector in bindless_textures (sRGB view), 0 for none.
+#ifdef RT_SHADOW_GROUPS
+	uint shadow_caster_mask; // Light3D.shadow_caster_mask: the layers whose casters shadow this light.
+#else
 	uint pad1;
+#endif
 	uint pad2;
 };
 
@@ -221,6 +225,27 @@ float lights_get_specular_multiplier(float specular_amount, float roughness) {
 
 #include "raytracing_alpha_test_inc.glsl"
 
+#ifdef RT_SHADOW_GROUPS
+// rendering/pathtracing/shadow_groups: whether the receiver is SELF_SHADOWING, a parameter of the light evaluation in this
+// variant only, so that the others' code is unchanged.
+#define RT_SHADOW_RECEIVER_PARAM , bool p_self_shadowing_receiver
+#define RT_SHADOW_RECEIVER_ARG , p_self_shadowing_receiver
+#define RT_SHADOW_RECEIVER_OF(m_geometry_idx) , ((geometries[m_geometry_idx].flags & FLAG_SELF_SHADOWING) != 0u)
+
+// The light the shadow group casters let through toward p_light (ray_query_shadow_group_transmittance()), when the TLAS
+// holds some this frame.
+vec3 lights_trace_shadow_group(RTLightData p_light, vec3 p_origin, vec3 p_direction, float p_max_dist, bool p_self_shadowing_receiver) {
+	if (!(p_max_dist > 0.002) || (uint(get_rt_param(RT_PARAM_FLAGS)) & RT_PARAM_FLAG_SHADOW_GROUPS) == 0u) {
+		return vec3(1.0);
+	}
+	return ray_query_shadow_group_transmittance(p_origin, p_direction, p_max_dist - 0.001, RT_SHADOW_RAY_FLAGS | gl_RayFlagsTerminateOnFirstHitEXT, p_light.shadow_caster_mask, p_self_shadowing_receiver);
+}
+#else
+#define RT_SHADOW_RECEIVER_PARAM
+#define RT_SHADOW_RECEIVER_ARG
+#define RT_SHADOW_RECEIVER_OF(m_geometry_idx)
+#endif
+
 // ============================================================================
 // Shadow Ray (traceRayEXT pipeline)
 // ============================================================================
@@ -370,22 +395,36 @@ vec3 lights_trace_shadow_transmittance(vec3 origin, vec3 direction, float max_di
 
 // The light reaching the point, through the transparent surfaces in between (rendering/pathtracing/transparent_shadows):
 // no shadow ray for a light without shadows, and its shadow opacity, as raster.
-vec3 lights_shadow_visibility(RTLightData p_light, vec3 p_origin, vec3 p_direction, float p_max_dist, inout uint rng_state) {
+vec3 lights_shadow_visibility(RTLightData p_light, vec3 p_origin, vec3 p_direction, float p_max_dist, inout uint rng_state RT_SHADOW_RECEIVER_PARAM) {
 	if (p_light.shadow_opacity <= 0.0) {
 		return vec3(1.0);
 	}
+#ifdef RT_SHADOW_GROUPS
+	vec3 transmittance = lights_trace_shadow_transmittance(p_origin, p_direction, p_max_dist, rng_state);
+	if (any(greaterThan(transmittance, vec3(0.0)))) {
+		transmittance *= lights_trace_shadow_group(p_light, p_origin, p_direction, p_max_dist, p_self_shadowing_receiver);
+	}
+	return mix(vec3(1.0), transmittance, p_light.shadow_opacity);
+#else
 	return mix(vec3(1.0), lights_trace_shadow_transmittance(p_origin, p_direction, p_max_dist, rng_state), p_light.shadow_opacity);
+#endif
 }
 #else
 #define RT_SHADOW_VISIBILITY float
 #define RT_SHADOW_BLOCKED(m_visibility) (m_visibility <= 0.0)
 
 // The light reaching the point: no shadow ray for a light without shadows, and its shadow opacity, as raster.
-float lights_shadow_visibility(RTLightData p_light, vec3 p_origin, vec3 p_direction, float p_max_dist, inout uint rng_state) {
+float lights_shadow_visibility(RTLightData p_light, vec3 p_origin, vec3 p_direction, float p_max_dist, inout uint rng_state RT_SHADOW_RECEIVER_PARAM) {
 	if (p_light.shadow_opacity <= 0.0) {
 		return 1.0;
 	}
+#ifdef RT_SHADOW_GROUPS
+	const bool visible = lights_trace_shadow_ray(p_origin, p_direction, p_max_dist, rng_state) &&
+			lights_trace_shadow_group(p_light, p_origin, p_direction, p_max_dist, p_self_shadowing_receiver).x > 0.0;
+	return visible ? 1.0 : 1.0 - p_light.shadow_opacity;
+#else
 	return lights_trace_shadow_ray(p_origin, p_direction, p_max_dist, rng_state) ? 1.0 : 1.0 - p_light.shadow_opacity;
+#endif
 }
 #endif
 
@@ -446,7 +485,7 @@ float lights_target_weight(RTLightData p_light, vec3 p_hit_pos, vec3 p_N, bool p
 	return weight * max(cos_theta, 0.05);
 }
 
-vec3 lights_evaluate_light(RTLightData light, vec3 hit_pos, vec3 hit_pos_back, vec3 geometry_normal, vec3 N, vec3 V, MaterialProperties material, vec3 backlight, bool specular_disabled, inout uint rng_state, bool is_indirect_bounce NRD_SPECULAR_PARAM);
+vec3 lights_evaluate_light(RTLightData light, vec3 hit_pos, vec3 hit_pos_back, vec3 geometry_normal, vec3 N, vec3 V, MaterialProperties material, vec3 backlight, bool specular_disabled, inout uint rng_state, bool is_indirect_bounce RT_SHADOW_RECEIVER_PARAM NRD_SPECULAR_PARAM);
 
 // Evaluate direct lighting using NEE: one light, picked among those that can light the point in proportion to
 // lights_target_weight() (resampled importance sampling with each of them as a candidate: Talbot et al. 2005, "Importance
@@ -470,7 +509,7 @@ vec3 lights_evaluate_direct_lighting(
 		inout uint rng_state,
 		bool is_indirect_bounce,
 		uint light_count,
-		uint layer_mask NRD_SPECULAR_PARAM) {
+		uint layer_mask RT_SHADOW_RECEIVER_PARAM NRD_SPECULAR_PARAM) {
 #ifdef NRD_ENABLED
 	r_specular = vec3(0.0);
 #endif
@@ -545,11 +584,11 @@ vec3 lights_evaluate_direct_lighting(
 	}
 
 #ifdef NRD_ENABLED
-	const vec3 light = lights_evaluate_light(rt_lights[selected_idx], hit_pos, hit_pos_back, geometry_normal, N, V, material, backlight, specular_disabled, rng_state, is_indirect_bounce, r_specular);
+	const vec3 light = lights_evaluate_light(rt_lights[selected_idx], hit_pos, hit_pos_back, geometry_normal, N, V, material, backlight, specular_disabled, rng_state, is_indirect_bounce RT_SHADOW_RECEIVER_ARG, r_specular);
 	r_specular /= max(light_select_pdf, 1e-10);
 	return light / max(light_select_pdf, 1e-10);
 #else
-	return lights_evaluate_light(rt_lights[selected_idx], hit_pos, hit_pos_back, geometry_normal, N, V, material, backlight, specular_disabled, rng_state, is_indirect_bounce) / max(light_select_pdf, 1e-10);
+	return lights_evaluate_light(rt_lights[selected_idx], hit_pos, hit_pos_back, geometry_normal, N, V, material, backlight, specular_disabled, rng_state, is_indirect_bounce RT_SHADOW_RECEIVER_ARG) / max(light_select_pdf, 1e-10);
 #endif
 }
 
@@ -566,7 +605,7 @@ vec3 lights_evaluate_light(
 		vec3 backlight,
 		bool specular_disabled,
 		inout uint rng_state,
-		bool is_indirect_bounce NRD_SPECULAR_PARAM) {
+		bool is_indirect_bounce RT_SHADOW_RECEIVER_PARAM NRD_SPECULAR_PARAM) {
 #ifdef NRD_ENABLED
 	r_specular = vec3(0.0);
 #endif
@@ -622,7 +661,7 @@ vec3 lights_evaluate_light(
 		}
 
 		bool through = has_backlight && dot(geometry_normal, L) < 0.0;
-		RT_SHADOW_VISIBILITY visibility = lights_shadow_visibility(light, through ? hit_pos_back : hit_pos, L, shadow_dist, rng_state);
+		RT_SHADOW_VISIBILITY visibility = lights_shadow_visibility(light, through ? hit_pos_back : hit_pos, L, shadow_dist, rng_state RT_SHADOW_RECEIVER_ARG);
 		if (RT_SHADOW_BLOCKED(visibility)) {
 			return vec3(0.0);
 		}
@@ -667,7 +706,7 @@ vec3 lights_evaluate_light(
 		}
 
 		bool through = has_backlight && dot(geometry_normal, L) < 0.0;
-		RT_SHADOW_VISIBILITY visibility = lights_shadow_visibility(light, through ? hit_pos_back : hit_pos, L, ls.max_distance, rng_state);
+		RT_SHADOW_VISIBILITY visibility = lights_shadow_visibility(light, through ? hit_pos_back : hit_pos, L, ls.max_distance, rng_state RT_SHADOW_RECEIVER_ARG);
 		if (RT_SHADOW_BLOCKED(visibility)) {
 			return vec3(0.0);
 		}

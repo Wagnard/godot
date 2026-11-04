@@ -6293,7 +6293,7 @@
 			Only render the shadows from the object. The object itself will not be drawn.
 		</constant>
 		<constant name="SHADOW_CASTING_SETTING_SELF_SHADOWING" value="4" enum="ShadowCastingSetting">
-			The path tracer casts the object's shadows only onto objects that also use [constant SHADOW_CASTING_SETTING_SELF_SHADOWING]. The object still receives shadows from everything, and still appears in reflections and indirect lighting. The rasterizer casts no shadows from it, like [constant SHADOW_CASTING_SETTING_OFF].
+			The path tracer casts the object's shadows only onto objects that also use [constant SHADOW_CASTING_SETTING_SELF_SHADOWING]. The object still receives shadows from everything, and still appears in reflections and indirect lighting. The rasterizer casts no shadows from it, like [constant SHADOW_CASTING_SETTING_OFF]. Requires [member ProjectSettings.rendering/pathtracing/shadow_groups]; without it, the path tracer casts its shadows like [constant SHADOW_CASTING_SETTING_ON].
 		</constant>
 		<constant name="RT_BLAS_UPDATE_AUTO" value="0" enum="RTBlasUpdate">
 			For instances, follows the shader's [code]rt_blas[/code] render mode. For shaders, the path tracer's own choice per kind of geometry: refits for skinned and blend shape meshes and merged [MultiMesh]es, refits with a periodic rebuild for surfaces moved by their material's [code]vertex()[/code] function.

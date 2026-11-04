@@ -47,3 +47,42 @@ vec4 ray_query_shadow_color(uint geometry_idx, uint primitive_id, vec2 candidate
 	return color;
 }
 #endif
+
+#ifdef RT_SHADOW_GROUPS
+/// rendering/pathtracing/shadow_groups: the light the shadow group casters (RT_MASK_SHADOW_GROUP, build_tlas()) let through
+/// from p_origin along p_direction, toward a light whose Light3D.shadow_caster_mask is p_caster_mask, for a receiver that is
+/// SELF_SHADOWING or not. A caster outside the caster mask, or SELF_SHADOWING seen from another receiver, lets it through.
+/// Opaque instances included, every candidate is reported (gl_RayFlagsNoOpaqueEXT; Vulkan "Ray Opacity Culling", DXR
+/// RAY_FLAG_FORCE_NON_OPAQUE) and decided here: cut-outs by ray_query_alpha_test(), as the simple shadows, the transparent
+/// shadow copies filter the light as in lights_trace_shadow_transmittance(), the others block it.
+vec3 ray_query_shadow_group_transmittance(vec3 p_origin, vec3 p_direction, float p_tmax, uint p_ray_flags, uint p_caster_mask, bool p_self_shadowing_receiver) {
+	vec3 transmittance = vec3(1.0);
+	rayQueryEXT group_rq;
+	rayQueryInitializeEXT(group_rq, tlas, p_ray_flags | gl_RayFlagsNoOpaqueEXT, RT_MASK_SHADOW_GROUP, p_origin, 0.001, p_direction, p_tmax);
+	while (rayQueryProceedEXT(group_rq)) {
+		if (rayQueryGetIntersectionTypeEXT(group_rq, false) != gl_RayQueryCandidateIntersectionTriangleEXT) {
+			continue;
+		}
+		const uint geometry_idx = rayQueryGetIntersectionInstanceCustomIndexEXT(group_rq, false);
+		const uint flags = geometries[geometry_idx].flags;
+		if ((geometries[geometry_idx].layer_mask & p_caster_mask) == 0u || ((flags & FLAG_SELF_SHADOWING) != 0u && !p_self_shadowing_receiver)) {
+			continue;
+		}
+		const uint primitive_id = rayQueryGetIntersectionPrimitiveIndexEXT(group_rq, false);
+		const vec2 bary = rayQueryGetIntersectionBarycentricsEXT(group_rq, false);
+#ifdef RT_TRANSPARENT_SHADOWS
+		if ((flags & FLAG_TRANSPARENT_SHADOW) != 0u) {
+			const vec4 color = ray_query_shadow_color(geometry_idx, primitive_id, bary);
+			if (!shadow_transmittance_filter(transmittance, color.rgb, color.a)) {
+				rayQueryConfirmIntersectionEXT(group_rq);
+			}
+			continue;
+		}
+#endif
+		if ((flags & FLAG_SHADOW_GROUP_CUTOUT) == 0u || ray_query_alpha_test(geometry_idx, primitive_id, bary)) {
+			rayQueryConfirmIntersectionEXT(group_rq);
+		}
+	}
+	return rayQueryGetIntersectionTypeEXT(group_rq, true) == gl_RayQueryCommittedIntersectionNoneEXT ? transmittance : vec3(0.0);
+}
+#endif

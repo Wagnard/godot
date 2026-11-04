@@ -28,3 +28,9 @@ const uint PEEL_BLEND_SUB = 2u;
 const uint PEEL_BLEND_MUL = 3u;
 const uint PEEL_BLEND_PREMUL_ALPHA = 4u;
 #endif
+#ifdef RT_SHADOW_GROUPS
+// rendering/pathtracing/shadow_groups: SHADOW_CASTING_SETTING_SELF_SHADOWING, its shadows fall on such instances only.
+const uint FLAG_SELF_SHADOWING = 2048u;
+// An RT_MASK_SHADOW_GROUP caster that is not forced opaque in the TLAS: alpha tested in the ray query.
+const uint FLAG_SHADOW_GROUP_CUTOUT = 4096u;
+#endif

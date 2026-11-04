@@ -113,7 +113,7 @@
 			In other words, the actual mesh will not be visible, only the shadows casted from the mesh will be.
 		</constant>
 		<constant name="SHADOW_CASTING_SETTING_SELF_SHADOWING" value="4" enum="ShadowCastingSetting">
-			The path tracer casts this object's shadows only onto objects that also use [constant SHADOW_CASTING_SETTING_SELF_SHADOWING], such as the parts of a first-person weapon and arms. The object still receives shadows from everything, and still appears in reflections and indirect lighting. The rasterizer casts no shadows from it, like [constant SHADOW_CASTING_SETTING_OFF].
+			The path tracer casts this object's shadows only onto objects that also use [constant SHADOW_CASTING_SETTING_SELF_SHADOWING], such as the parts of a first-person weapon and arms. The object still receives shadows from everything, and still appears in reflections and indirect lighting. The rasterizer casts no shadows from it, like [constant SHADOW_CASTING_SETTING_OFF]. Requires [member ProjectSettings.rendering/pathtracing/shadow_groups]; without it, the path tracer casts its shadows like [constant SHADOW_CASTING_SETTING_ON].
 		</constant>
 		<constant name="RT_BLAS_UPDATE_AUTO" value="0" enum="RTBlasUpdate">
 			Follows the shader's [code]rt_blas[/code] render mode. When the shader doesn't set one, each kind of geometry keeps the path tracer's own choice: skinned and blend shape meshes and merged [MultiMesh]es refit; surfaces moved by their material's [code]vertex()[/code] function refit with a rebuild every 60 refits.

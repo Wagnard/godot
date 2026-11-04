@@ -358,10 +358,10 @@ bool shade_and_bounce(inout PathState ps, HitRecord r, vec3 p_ray_origin, vec3 p
 #ifdef NRD_ENABLED
 		vec3 direct_specular;
 		vec3 direct_light = lights_evaluate_direct_lighting(
-				hit_pos_offset, hit_pos_back, r.geometry_normal, N, V, brdf_mat, r.backlight, (r.flags & HIT_FLAG_SPECULAR_DISABLED) != 0u, ps.rng_state, is_indirect, rt_light_count, geometries[r.geometry_idx].layer_mask, direct_specular);
+				hit_pos_offset, hit_pos_back, r.geometry_normal, N, V, brdf_mat, r.backlight, (r.flags & HIT_FLAG_SPECULAR_DISABLED) != 0u, ps.rng_state, is_indirect, rt_light_count, geometries[r.geometry_idx].layer_mask RT_SHADOW_RECEIVER_OF(r.geometry_idx), direct_specular);
 #else
 		vec3 direct_light = lights_evaluate_direct_lighting(
-				hit_pos_offset, hit_pos_back, r.geometry_normal, N, V, brdf_mat, r.backlight, (r.flags & HIT_FLAG_SPECULAR_DISABLED) != 0u, ps.rng_state, is_indirect, rt_light_count, geometries[r.geometry_idx].layer_mask);
+				hit_pos_offset, hit_pos_back, r.geometry_normal, N, V, brdf_mat, r.backlight, (r.flags & HIT_FLAG_SPECULAR_DISABLED) != 0u, ps.rng_state, is_indirect, rt_light_count, geometries[r.geometry_idx].layer_mask RT_SHADOW_RECEIVER_OF(r.geometry_idx));
 #endif
 		ps.radiance += ps.throughput * direct_light * mix(1.0, r.ao, r.ao_light_affect);
 #ifdef NRD_ENABLED

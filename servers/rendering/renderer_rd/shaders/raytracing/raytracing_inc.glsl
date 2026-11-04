@@ -30,6 +30,7 @@
 #define RT_PARAM_FLAG_LIGHT_SAMPLING_RIS 1u // Bit 0: rendering/pathtracing/light_sampling_ris
 #define RT_PARAM_FLAG_RUSSIAN_ROULETTE 2u // Bit 1: rendering/pathtracing/russian_roulette
 #define RT_PARAM_FLAG_DECALS_SINGULAR_ONLY 4u // Bit 2: rendering/pathtracing/decals Singular Only (RT_DECAL_MODE variant)
+#define RT_PARAM_FLAG_SHADOW_GROUPS 8u // Bit 3: the TLAS holds RT_MASK_SHADOW_GROUP casters (RT_SHADOW_GROUPS variant)
 // Bits 8-14: rendering/pathtracing/max_transparency_layers, the layers a camera ray peels (RT_TRANSPARENCY_PEELING variant)
 #define RT_PARAM_FLAG_PEEL_LAYERS_SHIFT 8u
 #define RT_PARAM_FLAG_PEEL_LAYERS_MASK 0x7Fu

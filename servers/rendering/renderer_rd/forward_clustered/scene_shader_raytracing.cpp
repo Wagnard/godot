@@ -84,6 +84,7 @@ static constexpr RaygenShaderOption RAYGEN_SHADER_OPTIONS[] = {
 	{ SceneShaderRaytracing::RT_FLAG_TRANSPARENT_SHADOWS, "#define RT_TRANSPARENT_SHADOWS\n" },
 	{ SceneShaderRaytracing::RT_FLAG_DECAL_MODE, "#define RT_DECAL_MODE\n" },
 	{ SceneShaderRaytracing::RT_FLAG_TRANSPARENCY_PEELING, "#define RT_TRANSPARENCY_PEELING\n" },
+	{ SceneShaderRaytracing::RT_FLAG_SHADOW_GROUPS, "#define RT_SHADOW_GROUPS\n" },
 
 };
 
@@ -1334,6 +1335,10 @@ uint32_t SceneShaderRaytracing::compute_rt_flags(RID p_environment) {
 			flags |= RT_FLAG_TRANSPARENCY_PEELING;
 		}
 
+		if (GLOBAL_GET_CACHED(bool, "rendering/pathtracing/shadow_groups")) {
+			flags |= RT_FLAG_SHADOW_GROUPS;
+		}
+
 		const RSE::PathtracingDenoiser denoiser = env_storage->environment_get_pathtracing_denoiser(p_environment);
 		if (denoiser == RSE::PT_DENOISER_DLSS_RAY_RECONSTRUCTION) {
 			flags |= RT_FLAG_DLSS_RR_ENABLED;
@@ -1593,10 +1598,10 @@ SceneShaderRaytracing *SceneShaderRaytracing::get_singleton_if_initialized() {
 }
 
 // The flags that change a variant's sources (RAYGEN_SHADER_OPTIONS; the debug draw is left out): every combination a run of the project can trace with.
-static LocalVector<uint32_t> _bake_rt_flags(bool p_simple_shadows, bool p_ser, bool p_specular_motion_vectors, bool p_transparent_shadows, bool p_decal_mode, bool p_transparency_peeling) {
+static LocalVector<uint32_t> _bake_rt_flags(bool p_simple_shadows, bool p_ser, bool p_specular_motion_vectors, bool p_transparent_shadows, bool p_decal_mode, bool p_transparency_peeling, bool p_shadow_groups) {
 	LocalVector<uint32_t> flags;
 	const uint32_t shadows = (p_simple_shadows ? SceneShaderRaytracing::RT_FLAG_RAY_QUERY_SHADOWS_ENABLED : 0) | (p_transparent_shadows ? SceneShaderRaytracing::RT_FLAG_TRANSPARENT_SHADOWS : 0) | (p_decal_mode ? SceneShaderRaytracing::RT_FLAG_DECAL_MODE : 0) |
-			(p_transparency_peeling ? SceneShaderRaytracing::RT_FLAG_TRANSPARENCY_PEELING : 0);
+			(p_transparency_peeling ? SceneShaderRaytracing::RT_FLAG_TRANSPARENCY_PEELING : 0) | (p_shadow_groups ? SceneShaderRaytracing::RT_FLAG_SHADOW_GROUPS : 0);
 	// Ray Reconstruction with the project's specular motion vectors (compute_rt_flags()).
 	const uint32_t rr_flags = SceneShaderRaytracing::RT_FLAG_DLSS_RR_ENABLED | (p_specular_motion_vectors ? SceneShaderRaytracing::RT_FLAG_DLSS_RR_SPECULAR_MOTION_VECTORS : 0);
 	for (const uint32_t rr : { uint32_t(0), rr_flags, uint32_t(SceneShaderRaytracing::RT_FLAG_NRD_ENABLED) }) {
@@ -1623,8 +1628,8 @@ static SceneShaderRaytracing::BakeProgram _compute_bake_program(const String &p_
 	return program;
 }
 
-void SceneShaderRaytracing::get_bake_programs(bool p_simple_shadows, bool p_ser, bool p_specular_motion_vectors, bool p_transparent_shadows, bool p_decal_mode, bool p_transparency_peeling, LocalVector<BakeProgram> &r_programs) {
-	LocalVector<uint32_t> variants = _bake_rt_flags(p_simple_shadows, p_ser, p_specular_motion_vectors, p_transparent_shadows, p_decal_mode, p_transparency_peeling);
+void SceneShaderRaytracing::get_bake_programs(bool p_simple_shadows, bool p_ser, bool p_specular_motion_vectors, bool p_transparent_shadows, bool p_decal_mode, bool p_transparency_peeling, bool p_shadow_groups, LocalVector<BakeProgram> &r_programs) {
+	LocalVector<uint32_t> variants = _bake_rt_flags(p_simple_shadows, p_ser, p_specular_motion_vectors, p_transparent_shadows, p_decal_mode, p_transparency_peeling, p_shadow_groups);
 	if (!variants.has(RT_FLAG_NONE)) {
 		variants.push_back(RT_FLAG_NONE); // init()'s probe builds its base.
 	}
@@ -1659,7 +1664,7 @@ void SceneShaderRaytracing::get_bake_programs(bool p_simple_shadows, bool p_ser,
 	}
 }
 
-void SceneShaderRaytracing::get_material_bake_programs(RID p_material, bool p_simple_shadows, bool p_ser, bool p_specular_motion_vectors, bool p_transparent_shadows, bool p_decal_mode, bool p_transparency_peeling, LocalVector<BakeProgram> &r_programs) {
+void SceneShaderRaytracing::get_material_bake_programs(RID p_material, bool p_simple_shadows, bool p_ser, bool p_specular_motion_vectors, bool p_transparent_shadows, bool p_decal_mode, bool p_transparency_peeling, bool p_shadow_groups, LocalVector<BakeProgram> &r_programs) {
 	RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
 	// Only spatial materials have hit groups: the export walks every material, particle process, canvas item, sky and fog
 	// ones included, which the hit group compiler would reject ("Invalid render mode").
@@ -1683,7 +1688,7 @@ void SceneShaderRaytracing::get_material_bake_programs(RID p_material, bool p_si
 	}
 	entry.name = material_storage->material_get_shader_path_hint(p_material);
 
-	for (const uint32_t flags : _bake_rt_flags(p_simple_shadows, p_ser, p_specular_motion_vectors, p_transparent_shadows, p_decal_mode, p_transparency_peeling)) {
+	for (const uint32_t flags : _bake_rt_flags(p_simple_shadows, p_ser, p_specular_motion_vectors, p_transparent_shadows, p_decal_mode, p_transparency_peeling, p_shadow_groups)) {
 		if (!bake_compile_contexts.has(flags)) {
 			VariantCompileContext ctx;
 			if (!_build_variant_compile_context(flags, ctx)) {

@@ -33,6 +33,9 @@ layout(constant_id = 0) const uint RT_FLAGS = 0u;
 #define RT_MASK_SECONDARY 0x20
 // What a ray from a surface sees: the camera's instances and the ones only bounces see.
 #define RT_MASK_BOUNCE (RT_MASK_CAMERA | RT_MASK_SECONDARY)
+// In place of SHADOW: a caster some lights or receivers do not get the shadow of (rendering/pathtracing/shadow_groups,
+// ray_query_shadow_group_transmittance()).
+#define RT_MASK_SHADOW_GROUP 0x80
 
 layout(set = 0, binding = 2, std140) uniform SceneDataBlock {
 	SceneData data;

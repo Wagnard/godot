@@ -64,7 +64,8 @@ private:
 	struct ParamsUBO {
 		float view_to_world[16];
 		uint32_t frame_index;
-		uint32_t pad[3];
+		uint32_t shadow_groups; // RTViewportState::shadow_groups_used.
+		uint32_t pad[2];
 	};
 	static_assert(sizeof(ParamsUBO) == 80);
 

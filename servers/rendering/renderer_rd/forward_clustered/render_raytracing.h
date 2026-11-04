@@ -230,7 +230,8 @@ struct alignas(16) RT_LightData {
 	float projector_uv_y[4];
 	uint32_t projector_enabled;
 	uint32_t projector_texture; // Omni and spot: Light3D.light_projector in the bindless textures (sRGB), 0 for none.
-	uint32_t pad[2];
+	uint32_t shadow_caster_mask; // Light3D.shadow_caster_mask: the layers whose instances cast its shadows (RT_SHADOW_GROUPS).
+	uint32_t pad;
 };
 static_assert(sizeof(RT_LightData) == 128, "RT_LightData must be 128 bytes for std430");
 
@@ -296,7 +297,15 @@ enum : uint8_t {
 	// Build-time only: a transparent surface gets a copy for the shadow rays (rendering/pathtracing/transparent_shadows).
 	RT_INSTANCE_MASK_TRANSPARENT_SHADOW = 0x40u,
 	RT_INSTANCE_MASK_DOUBLE_SIDED_SHADOW = 0x80u, // Build-time only: the shadow rays need both faces, see build_tlas().
+	// In place of SHADOW, assigned after the build-time bits above are cleared (the same bit as DOUBLE_SIDED_SHADOW): a
+	// caster that shadows only some of the frame's lights or receivers (rendering/pathtracing/shadow_groups,
+	// Light3D.shadow_caster_mask, SHADOW_CASTING_SETTING_SELF_SHADOWING). The shadow rays meet these in a ray query that
+	// tests each candidate (RT_SHADOW_GROUPS): the 8-bit instance mask cannot hold a group per caster mask.
+	RT_INSTANCE_MASK_SHADOW_GROUP = 0x80u,
 };
+
+// The 20 render layers of VisualInstance3D.layers, which light cull and shadow caster masks select.
+static constexpr uint32_t RT_LAYER_MASK_ALL = 0xFFFFFu;
 
 // Material flags for RT (matches GLSL mat_flags bit layout).
 enum {
@@ -360,6 +369,11 @@ enum {
 	RT_GEOM_PEEL_BLEND_SUB = 2u,
 	RT_GEOM_PEEL_BLEND_MUL = 3u,
 	RT_GEOM_PEEL_BLEND_PREMUL_ALPHA = 4u,
+	// Per TLAS instance, rendering/pathtracing/shadow_groups only (RT_SHADOW_GROUPS): an instance with
+	// SHADOW_CASTING_SETTING_SELF_SHADOWING. Its shadows fall only on such instances; it receives every shadow.
+	RT_GEOM_FLAG_SELF_SHADOWING = 1u << 11,
+	// Per TLAS instance, on RT_INSTANCE_MASK_SHADOW_GROUP casters only: not forced opaque, alpha tested in the ray query.
+	RT_GEOM_FLAG_SHADOW_GROUP_CUTOUT = 1u << 12,
 };
 
 // The facing of the traced triangles of one TLAS instance.
@@ -789,6 +803,8 @@ struct RTViewportState {
 	RID scene_uniform_set;
 	// The view's parameters of the volumetric fog's ray queries (RTFogShadows, rendering/pathtracing/volumetric_fog_shadows).
 	RID fog_shadows_params_buffer;
+	// rendering/pathtracing/shadow_groups: the last TLAS holds RT_INSTANCE_MASK_SHADOW_GROUP casters (RT_PARAM_FLAG_SHADOW_GROUPS).
+	bool shadow_groups_used = false;
 
 	uint32_t frame_counter = 0;
 };

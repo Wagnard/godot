@@ -129,6 +129,7 @@ bool RTFogShadows::prepare(RenderRaytracing *p_raytracing, RTViewportState *p_st
 	ParamsUBO params = {};
 	RendererRD::MaterialStorage::store_transform(p_render_data->scene_data->cam_transform, params.view_to_world);
 	params.frame_index = p_state->frame_counter;
+	params.shadow_groups = p_state->shadow_groups_used ? 1 : 0;
 	RD::get_singleton()->buffer_update(p_state->fog_shadows_params_buffer, 0, sizeof(ParamsUBO), &params);
 
 	const RID shader_rd = _get_shader_rd();

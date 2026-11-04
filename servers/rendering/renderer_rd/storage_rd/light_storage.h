@@ -641,6 +641,14 @@ public:
 		return light->has_shadow_in(RSE::SHADOW_RENDERER_RASTERIZER);
 	}
 
+	// Whether the path tracer draws this light's shadow (Light3D.shadow_renderers).
+	_FORCE_INLINE_ bool light_has_path_traced_shadow(RID p_light) const {
+		const Light *light = light_owner.get_or_null(p_light);
+		ERR_FAIL_NULL_V(light, false);
+
+		return light->has_shadow_in(RSE::SHADOW_RENDERER_PATH_TRACER);
+	}
+
 	// Path-traced shadow strength at p_distance from the camera: shadow opacity times the shadow distance fade, 0 when the path tracer draws no shadow.
 	_FORCE_INLINE_ float light_get_path_traced_shadow_opacity(RID p_light, float p_distance) const {
 		const Light *light = light_owner.get_or_null(p_light);

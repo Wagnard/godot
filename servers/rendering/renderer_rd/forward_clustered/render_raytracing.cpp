@@ -4945,18 +4945,29 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 	uint32_t rt_triangles_refit = 0;
 	const bool collect_render_info = (p_render_data->render_info != nullptr);
 
-	// Which rays see an instance, from its cast_shadow setting.
+	// Which rays see an instance, from its cast_shadow setting and its shadow_renderers (path tracer bit), as
+	// RendererSceneCull::is_shadow_cast_by() gives them.
 	auto instance_mask = [](const RenderGeometryInstanceBase *p_instance) -> uint8_t {
-		switch (p_instance->data->cast_shadows) {
-			case RSE::SHADOW_CASTING_SETTING_OFF:
-				return RT_INSTANCE_MASK_CAMERA;
-			case RSE::SHADOW_CASTING_SETTING_SHADOWS_ONLY:
-				return RT_INSTANCE_MASK_SHADOW;
-			case RSE::SHADOW_CASTING_SETTING_DOUBLE_SIDED:
-				return RT_INSTANCE_MASK_CAMERA | RT_INSTANCE_MASK_SHADOW | RT_INSTANCE_MASK_DOUBLE_SIDED_SHADOW;
-			default:
-				return RT_INSTANCE_MASK_CAMERA | RT_INSTANCE_MASK_SHADOW;
+		uint8_t mask = p_instance->rt_shadows_only ? 0 : RT_INSTANCE_MASK_CAMERA;
+		if (p_instance->rt_shadow_caster) {
+			mask |= RT_INSTANCE_MASK_SHADOW;
+			if (p_instance->data->cast_shadows == RSE::SHADOW_CASTING_SETTING_DOUBLE_SIDED) {
+				mask |= RT_INSTANCE_MASK_DOUBLE_SIDED_SHADOW;
+			}
 		}
+		return mask;
+	};
+	// rendering/pathtracing/shadow_groups (RT_SHADOW_GROUPS): the instances that cast shadows on SELF_SHADOWING ones only.
+	const bool shadow_groups = p_rt_flags & SceneShaderRaytracing::RT_FLAG_SHADOW_GROUPS;
+	auto shadow_group_flags = [shadow_groups](const RenderGeometryInstanceBase *p_instance) -> uint32_t {
+		if (!p_instance->rt_self_shadowing || !p_instance->rt_shadow_caster) {
+			return 0;
+		}
+		if (!shadow_groups) {
+			WARN_PRINT_ONCE("A GeometryInstance3D uses SHADOW_CASTING_SETTING_SELF_SHADOWING: the path tracer casts its shadows on everything unless rendering/pathtracing/shadow_groups is enabled.");
+			return 0;
+		}
+		return RT_GEOM_FLAG_SELF_SHADOWING;
 	};
 
 	// The facing of an instance's triangles traced with p_tlas_transform, as raster culls and reports it. p_instance_mirror
@@ -5060,6 +5071,7 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 				geom.aabb_size_y = (float)ps->culling_aabb.size.y;
 				geom.aabb_size_z = (float)ps->culling_aabb.size.z;
 				geom.layer_mask = inst->layer_mask;
+				geom.flags |= shadow_group_flags(inst);
 				geometry_data.push_back(geom);
 
 				if (inst->transform_status == RenderForwardClustered::GeometryInstanceForwardClustered::TransformStatus::MOVED) {
@@ -5518,6 +5530,7 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 			blass.push_back(surf_data->blas);
 			geometry_data.push_back(surf_data->geometry);
 			geometry_data[geometry_data.size() - 1].layer_mask = inst->layer_mask;
+			geometry_data[geometry_data.size() - 1].flags |= shadow_group_flags(inst);
 
 			if (billboard) {
 				// Turning with the camera is motion too.
@@ -5665,6 +5678,7 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 			blas_transforms.push_back(pending.instance_transform);
 			geometry_data.push_back(merged_sd.geometry);
 			geometry_data[geometry_data.size() - 1].layer_mask = pending.mm_surf->owner->layer_mask;
+			geometry_data[geometry_data.size() - 1].flags |= shadow_group_flags(pending.mm_surf->owner);
 			sbt_offsets.push_back(pending.mat_data->rt_sbt_offset);
 			material_data.push_back(pending.mat_data->data);
 			material_data[material_data.size() - 1].instance_uniforms_ofs = uint32_t(pending.mm_surf->owner->shader_uniforms_offset);
@@ -5708,6 +5722,7 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 				multimesh_buffers_read_this_frame.push_back(pending.mm_gpu_buffer);
 			}
 			mm_geometry.layer_mask = pending.mm_surf->owner->layer_mask;
+			mm_geometry.flags |= shadow_group_flags(pending.mm_surf->owner);
 			RT_MaterialData mm_material = pending.mat_data->data;
 			mm_material.instance_uniforms_ofs = uint32_t(pending.mm_surf->owner->shader_uniforms_offset);
 			// The facing of the node's transform for every instance, which the GPU writes: an instance mirrored by its own
@@ -5811,6 +5826,7 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 				blas_transforms.push_back(final_transform);
 				geometry_data.push_back(mm_geometry);
 				geometry_data[geometry_data.size() - 1].layer_mask = pending.mm_surf->owner->layer_mask;
+				geometry_data[geometry_data.size() - 1].flags |= shadow_group_flags(pending.mm_surf->owner);
 				geometry_data[geometry_data.size() - 1].multimesh_offset = mm_cur_offset + mi;
 				geometry_data[geometry_data.size() - 1].multimesh_previous_offset = mm_cur_offset + mi;
 				sbt_offsets.push_back(pending.mat_data->rt_sbt_offset);
@@ -5916,6 +5932,72 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 		shadow_job.flags |= RD::ACCELERATION_STRUCTURE_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT;
 		shadow_job.mask = RT_INSTANCE_MASK_SHADOW;
 		tlas_expand_jobs.push_back(shadow_job);
+	}
+
+	// rendering/pathtracing/shadow_groups (RT_SHADOW_GROUPS): Light3D.shadow_caster_mask and SELF_SHADOWING, with the
+	// build-time bits above cleared. A caster whose layers are in the caster mask of every shadowed light of the frame
+	// keeps RT_INSTANCE_MASK_SHADOW, which the shadow rays meet as without the setting; one in none of them casts
+	// nothing, as raster culls its shadow casters by layers & shadow_caster_mask (RendererSceneCull::_light_instance_update_shadow()).
+	// One in some of them, and a SELF_SHADOWING one, moves to RT_INSTANCE_MASK_SHADOW_GROUP: the shadow rays meet those
+	// in a ray query that tests each against the light's caster mask and the receiver (lights_trace_shadow_group()).
+	// NVIDIA gives each distinct set of caster masks a bit of the TLAS mask (RTShadowGroupTable, 49a825dc52
+	// render_raytracing.h:954-1037, 6 bits), ours has one free bit. Procedural geometry keeps casting for every light:
+	// a ray query cannot run its intersection shader.
+	state->shadow_groups_used = false;
+	static bool caster_mask_warned = false;
+	if (shadow_groups || !caster_mask_warned) {
+		LocalVector<uint32_t> caster_masks;
+		RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
+		for (const PagedArray<RID> *lights : { p_render_data->lights, p_render_data->rt_lights }) {
+			for (uint32_t li = 0; lights && li < (uint32_t)lights->size(); li++) {
+				const RID base = light_storage->light_instance_get_base_light((*lights)[li]);
+				if (!light_storage->light_has_path_traced_shadow(base)) {
+					continue;
+				}
+				const uint32_t caster_mask = light_storage->light_get_shadow_caster_mask(base) & RT_LAYER_MASK_ALL;
+				if (!caster_masks.has(caster_mask)) {
+					caster_masks.push_back(caster_mask);
+				}
+			}
+		}
+		if (!shadow_groups) {
+			if (caster_masks.size() > 1 || (caster_masks.size() == 1 && caster_masks[0] != RT_LAYER_MASK_ALL)) {
+				WARN_PRINT("A Light3D uses shadow_caster_mask: the path tracer lets every layer cast its shadows unless rendering/pathtracing/shadow_groups is enabled.");
+				caster_mask_warned = true;
+			}
+		} else if (!caster_masks.is_empty()) {
+			auto assign_shadow_group = [&](uint8_t &r_mask, RT_GeometryData &r_geometry, uint32_t p_instance_flags) {
+				if (!(r_mask & RT_INSTANCE_MASK_SHADOW) || (r_geometry.flags & RT_GEOM_FLAG_PROCEDURAL)) {
+					return;
+				}
+				bool any_light = false;
+				bool every_light = true;
+				for (const uint32_t caster_mask : caster_masks) {
+					if (r_geometry.layer_mask & caster_mask) {
+						any_light = true;
+					} else {
+						every_light = false;
+					}
+				}
+				if (every_light && !(r_geometry.flags & RT_GEOM_FLAG_SELF_SHADOWING)) {
+					return;
+				}
+				r_mask &= ~RT_INSTANCE_MASK_SHADOW;
+				if (any_light) {
+					r_mask |= RT_INSTANCE_MASK_SHADOW_GROUP;
+					if (!(p_instance_flags & RD::ACCELERATION_STRUCTURE_INSTANCE_FORCE_OPAQUE_BIT)) {
+						r_geometry.flags |= RT_GEOM_FLAG_SHADOW_GROUP_CUTOUT;
+					}
+					state->shadow_groups_used = true;
+				}
+			};
+			for (uint32_t i = 0; i < instance_masks.size(); i++) {
+				assign_shadow_group(instance_masks[i], geometry_data[i], instance_flags[i]);
+			}
+			for (TlasExpandJob &job : tlas_expand_jobs) {
+				assign_shadow_group(job.mask, tlas_expand_geometry_templates[job.data.template_index], job.flags);
+			}
+		}
 	}
 	// The GPU's instances, records and motion transforms follow the CPU's.
 	for (TlasExpandJob &job : tlas_expand_jobs) {
@@ -6232,7 +6314,7 @@ uint32_t RenderRaytracing::gather_lights(const RenderDataRD *p_render_data, RT_L
 		ld.spot_direction[1] = 0.0f;
 		ld.spot_direction[2] = 0.0f;
 		ld.cull_mask = ls->light_get_cull_mask(base);
-		ld.shadow_opacity = ls->light_has_shadow(base) ? ls->light_get_param(base, RSE::LIGHT_PARAM_SHADOW_OPACITY) : 0.0f;
+		ld.shadow_opacity = ls->light_has_path_traced_shadow(base) ? ls->light_get_param(base, RSE::LIGHT_PARAM_SHADOW_OPACITY) : 0.0f;
 
 		// The projector, as raster's update_light_buffers() maps it (in view space there): the first directional light
 		// with one has the texture binding.
@@ -6240,7 +6322,8 @@ uint32_t RenderRaytracing::gather_lights(const RenderDataRD *p_render_data, RT_L
 		memset(ld.projector_uv_y, 0, sizeof(ld.projector_uv_y));
 		ld.projector_enabled = 0;
 		ld.projector_texture = 0;
-		ld.pad[0] = ld.pad[1] = 0;
+		ld.shadow_caster_mask = ls->light_get_shadow_caster_mask(base);
+		ld.pad = 0;
 		const RID projector = ls->light_get_projector(base);
 		if (projector.is_valid() && rt_directional_projector.is_null()) {
 			const RID projector_texture = RendererRD::TextureStorage::get_singleton()->texture_get_rd_texture(projector, true);
@@ -6307,7 +6390,7 @@ uint32_t RenderRaytracing::gather_lights(const RenderDataRD *p_render_data, RT_L
 		}
 		ld.specular_amount = ls->light_get_param(base, RSE::LIGHT_PARAM_SPECULAR) * 2.0f; // Matches rasterizer convention (light_storage.cpp), normalizes 0.5 default to 1.0.
 		ld.cull_mask = ls->light_get_cull_mask(base);
-		ld.shadow_opacity = ls->light_has_shadow(base) ? ls->light_get_param(base, RSE::LIGHT_PARAM_SHADOW_OPACITY) * positional_lights[i].shadow_fade : 0.0f;
+		ld.shadow_opacity = ls->light_has_path_traced_shadow(base) ? ls->light_get_param(base, RSE::LIGHT_PARAM_SHADOW_OPACITY) * positional_lights[i].shadow_fade : 0.0f;
 		ld.indirect_energy = ls->light_get_param(base, RSE::LIGHT_PARAM_INDIRECT_ENERGY);
 
 		if (type == RSE::LIGHT_SPOT) {
@@ -6329,7 +6412,8 @@ uint32_t RenderRaytracing::gather_lights(const RenderDataRD *p_render_data, RT_L
 		memset(ld.projector_uv_y, 0, sizeof(ld.projector_uv_y));
 		ld.projector_enabled = 0;
 		ld.projector_texture = 0;
-		ld.pad[0] = ld.pad[1] = 0;
+		ld.shadow_caster_mask = ls->light_get_shadow_caster_mask(base);
+		ld.pad = 0;
 		// The projector, in the light's own frame as raster's light_process_omni() / light_process_spot() map it
 		// (scene_forward_lights_inc.glsl, through shadow_matrix): a spot's in its shadow camera's perspective, an omni
 		// light's panorama around it. The texture itself (sRGB, as raster's decal_atlas_srgb), not the atlas copy.
@@ -6985,6 +7069,9 @@ RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderD
 		}
 		if (p_rt_flags & SceneShaderRaytracing::RT_FLAG_TRANSPARENCY_PEELING) {
 			rt_param_flags |= (get_transparency_peel_layers() & SceneShaderRaytracing::RT_PARAM_FLAG_PEEL_LAYERS_MASK) << SceneShaderRaytracing::RT_PARAM_FLAG_PEEL_LAYERS_SHIFT;
+		}
+		if (p_state->shadow_groups_used) {
+			rt_param_flags |= SceneShaderRaytracing::RT_PARAM_FLAG_SHADOW_GROUPS;
 		}
 		rt_ubo.params[SceneShaderRaytracing::RT_PARAM_FLAGS] = float(rt_param_flags);
 		if (p_background_is_color) {
