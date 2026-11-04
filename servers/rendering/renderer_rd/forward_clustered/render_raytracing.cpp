@@ -1653,10 +1653,7 @@ static uint32_t _peel_blend(const SceneShaderForwardClustered::ShaderData *p_sha
 // geometry's own policy: refits for skinned and blend shape meshes and merged MultiMeshes, refits with a build every
 // DISPLACED_REBUILD_PERIOD refits for displaced surfaces.
 static RSE::RTBlasUpdate _rt_blas_update(const RenderGeometryInstanceBase *p_instance, const SceneShaderForwardClustered::ShaderData *p_shader) {
-	if (p_instance->rt_blas_update != RSE::RT_BLAS_UPDATE_AUTO) {
-		return p_instance->rt_blas_update;
-	}
-	return p_shader ? p_shader->rt_blas_update : RSE::RT_BLAS_UPDATE_AUTO;
+	return rt_resolve_blas_update(p_instance->rt_blas_update, p_shader ? p_shader->rt_blas_update : RSE::RT_BLAS_UPDATE_AUTO);
 }
 
 // ---------------------------------------------------------------------------
@@ -1675,6 +1672,53 @@ bool RenderRaytracing::UpdateTurns::turn(const AABB &p_aabb, uint64_t p_key) con
 	const float distance = Vector3().max(p_aabb.position - camera_origin).max(camera_origin - (p_aabb.position + p_aabb.size)).length();
 	const uint32_t period = CLAMP(uint32_t(distance / update_distance), 1u, OUT_OF_VIEW_MAX_UPDATE_PERIOD);
 	return (frame + uint32_t(p_key)) % period == 0;
+}
+
+float RendererSceneRenderImplementation::rt_dynamic_visibility(const AABB &p_aabb, bool p_in_view, const Vector3 &p_camera_origin, float p_offscreen_weight) {
+	const real_t radius = p_aabb.size.length() * 0.5f;
+	if (radius <= 0) {
+		return 0.0f;
+	}
+	const real_t ratio = radius / MAX(p_camera_origin.distance_to(p_aabb.get_center()), radius);
+	return float(ratio * ratio) * (p_in_view ? 1.0f : p_offscreen_weight);
+}
+
+float RendererSceneRenderImplementation::rt_dynamic_score(float p_visibility, uint32_t p_waited, uint32_t p_max_stale_frames) {
+	return MAX(p_visibility, 1e-4f) * float(1 + MIN(p_waited, p_max_stale_frames)) + (p_waited >= p_max_stale_frames ? 1e6f : 0.0f);
+}
+
+uint32_t RendererSceneRenderImplementation::rt_dynamic_select(LocalVector<RTDynamicCandidate> &r_candidates, const RTDynamicBudgets &p_budgets, RTDynamicBudgetUsage &r_usage) {
+	for (RTDynamicCandidate &candidate : r_candidates) {
+		candidate.order = uint32_t(candidate.key) - r_usage.cursor;
+	}
+	struct CandidateSort {
+		_FORCE_INLINE_ bool operator()(const RTDynamicCandidate &p_a, const RTDynamicCandidate &p_b) const {
+			return p_a.score != p_b.score ? p_a.score > p_b.score : p_a.order < p_b.order;
+		}
+	};
+	r_candidates.sort_custom<CandidateSort>();
+
+	uint32_t selected = 0;
+	for (RTDynamicCandidate &candidate : r_candidates) {
+		if (p_budgets.max_operations > 0 && r_usage.operations >= uint64_t(p_budgets.max_operations)) {
+			break;
+		}
+		const bool fits_build = p_budgets.build_triangles <= 0 || r_usage.build_triangles == 0 || r_usage.build_triangles + candidate.triangles <= uint64_t(p_budgets.build_triangles);
+		const bool fits_update = p_budgets.update_triangles <= 0 || r_usage.update_triangles == 0 || r_usage.update_triangles + candidate.triangles <= uint64_t(p_budgets.update_triangles);
+		if (candidate.rebuild && fits_build) {
+			r_usage.build_triangles += candidate.triangles;
+		} else if ((!candidate.rebuild || !candidate.rebuild_only) && fits_update) {
+			candidate.downgraded = candidate.rebuild;
+			r_usage.update_triangles += candidate.triangles;
+		} else {
+			continue;
+		}
+		candidate.selected = true;
+		r_usage.operations++;
+		selected++;
+	}
+	r_usage.cursor += selected;
+	return selected;
 }
 
 bool RenderRaytracing::_dynamic_budgets_enabled() {
@@ -1721,7 +1765,7 @@ void RenderRaytracing::_schedule_dynamic_updates(const RenderDataRD *p_render_da
 			if (!vertex_buffer.is_valid() || (entry->cached_buffer_id == vertex_buffer.get_id() && entry->cached_change_stamp == mesh_storage->mesh_instance_get_last_change(inst->mesh_instance, surf->surface_index))) {
 				continue;
 			}
-			DynamicCandidate candidate;
+			RTDynamicCandidate candidate;
 			candidate.entry = entry;
 			candidate.aabb = inst->transformed_aabb;
 			candidate.key = (uint64_t(mi_index) << 16) | (surf->surface_index & 0xFFFFu);
@@ -1736,58 +1780,26 @@ void RenderRaytracing::_schedule_dynamic_updates(const RenderDataRD *p_render_da
 		return;
 	}
 
-	const int64_t max_operations = GLOBAL_GET_CACHED(int64_t, "rendering/pathtracing/dynamic_blas_max_operations");
-	const int64_t build_budget = GLOBAL_GET_CACHED(int64_t, "rendering/pathtracing/dynamic_blas_build_triangle_budget");
-	const int64_t update_budget = GLOBAL_GET_CACHED(int64_t, "rendering/pathtracing/dynamic_blas_update_triangle_budget");
-	const uint32_t max_stale = uint32_t(MAX(GLOBAL_GET_CACHED(int64_t, "rendering/pathtracing/dynamic_max_stale_frames"), int64_t(1)));
-	const float offscreen_weight = GLOBAL_GET_CACHED(float, "rendering/pathtracing/dynamic_offscreen_size_weight");
-	DynamicBudgetUsage &usage = dynamic_budget_usage;
+	RTDynamicBudgets budgets;
+	budgets.max_operations = GLOBAL_GET_CACHED(int64_t, "rendering/pathtracing/dynamic_blas_max_operations");
+	budgets.build_triangles = GLOBAL_GET_CACHED(int64_t, "rendering/pathtracing/dynamic_blas_build_triangle_budget");
+	budgets.update_triangles = GLOBAL_GET_CACHED(int64_t, "rendering/pathtracing/dynamic_blas_update_triangle_budget");
+	budgets.max_stale_frames = uint32_t(MAX(GLOBAL_GET_CACHED(int64_t, "rendering/pathtracing/dynamic_max_stale_frames"), int64_t(1)));
+	budgets.offscreen_weight = GLOBAL_GET_CACHED(float, "rendering/pathtracing/dynamic_offscreen_size_weight");
+	RTDynamicBudgetUsage &usage = dynamic_budget_usage;
 	if (usage.frame != current_frame) {
 		const uint32_t cursor = usage.cursor;
-		usage = DynamicBudgetUsage();
+		usage = RTDynamicBudgetUsage();
 		usage.frame = current_frame;
 		usage.cursor = cursor;
 	}
 
-	for (DynamicCandidate &candidate : dynamic_candidates) {
-		const real_t radius = candidate.aabb.size.length() * 0.5f;
-		float visibility = 0.0f;
-		if (radius > 0) {
-			const real_t ratio = radius / MAX(p_turns.camera_origin.distance_to(candidate.aabb.get_center()), radius);
-			visibility = float(ratio * ratio) * (candidate.in_view ? 1.0f : offscreen_weight);
-		}
-		const uint32_t waited = current_frame - candidate.entry->updated_frame;
-		candidate.score = MAX(visibility, 1e-4f) * float(1 + MIN(waited, max_stale)) + (waited >= max_stale ? 1e6f : 0.0f);
-		candidate.order = uint32_t(candidate.key) - usage.cursor;
+	for (RTDynamicCandidate &candidate : dynamic_candidates) {
+		const float visibility = rt_dynamic_visibility(candidate.aabb, candidate.in_view, p_turns.camera_origin, budgets.offscreen_weight);
+		candidate.score = rt_dynamic_score(visibility, current_frame - candidate.entry->updated_frame, budgets.max_stale_frames);
 	}
-	struct CandidateSort {
-		_FORCE_INLINE_ bool operator()(const DynamicCandidate &p_a, const DynamicCandidate &p_b) const {
-			return p_a.score != p_b.score ? p_a.score > p_b.score : p_a.order < p_b.order;
-		}
-	};
-	dynamic_candidates.sort_custom<CandidateSort>();
-
-	uint32_t selected = 0;
-	for (DynamicCandidate &candidate : dynamic_candidates) {
-		if (max_operations > 0 && usage.operations >= uint64_t(max_operations)) {
-			break;
-		}
-		const bool fits_build = build_budget <= 0 || usage.build_triangles == 0 || usage.build_triangles + candidate.triangles <= uint64_t(build_budget);
-		const bool fits_update = update_budget <= 0 || usage.update_triangles == 0 || usage.update_triangles + candidate.triangles <= uint64_t(update_budget);
-		if (candidate.rebuild && fits_build) {
-			usage.build_triangles += candidate.triangles;
-		} else if ((!candidate.rebuild || !candidate.rebuild_only) && fits_update) {
-			candidate.downgraded = candidate.rebuild;
-			usage.update_triangles += candidate.triangles;
-		} else {
-			continue;
-		}
-		candidate.selected = true;
-		usage.operations++;
-		selected++;
-	}
-	usage.cursor += selected;
-	for (const DynamicCandidate &candidate : dynamic_candidates) {
+	rt_dynamic_select(dynamic_candidates, budgets, usage);
+	for (const RTDynamicCandidate &candidate : dynamic_candidates) {
 		// A later view of the frame may select what an earlier one held.
 		candidate.entry->budget_held_frame = candidate.selected ? 0 : current_frame;
 		render_info_counters.budget_limited += candidate.selected ? 0 : 1;
@@ -2056,7 +2068,7 @@ void RenderRaytracing::_displace_surfaces(const RenderDataRD *p_render_data, con
 				continue;
 			}
 			if (dynamic_budgets && !required_rebuild) {
-				DynamicCandidate candidate;
+				RTDynamicCandidate candidate;
 				candidate.entry = entry;
 				candidate.aabb = inst->transformed_aabb;
 				candidate.key = surf->rt_deformed_handle.get_id();
@@ -2093,7 +2105,7 @@ void RenderRaytracing::_displace_surfaces(const RenderDataRD *p_render_data, con
 
 	if (dynamic_budgets) {
 		_schedule_dynamic_updates(p_render_data, p_turns);
-		for (const DynamicCandidate &candidate : dynamic_candidates) {
+		for (const RTDynamicCandidate &candidate : dynamic_candidates) {
 			if (candidate.pending == UINT32_MAX) {
 				continue;
 			}

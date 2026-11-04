@@ -800,6 +800,56 @@ struct RTViewportState {
 	uint32_t frame_counter = 0;
 };
 
+// GeometryInstance3D.rt_blas_update, else the shader's rt_blas render mode (NVIDIA's rt_resolve_blas_update()).
+constexpr RSE::RTBlasUpdate rt_resolve_blas_update(RSE::RTBlasUpdate p_instance, RSE::RTBlasUpdate p_shader) {
+	return p_instance != RSE::RT_BLAS_UPDATE_AUTO ? p_instance : p_shader;
+}
+
+// rendering/pathtracing/dynamic_blas_*: per-frame budgets of the updates of deforming geometry that can wait (refits,
+// periodic and RT_BLAS_UPDATE_REBUILD builds), ranked by apparent size and frames waited (NVIDIA's RTDynamicScheduler).
+// Off by default. A new or reshaped BLAS is built at once and not counted. Shared by the views of a frame
+// (RenderRaytracing::_schedule_dynamic_updates()).
+struct RTDynamicBudgets {
+	int64_t max_operations = 0; // 0: no limit, as the triangle budgets.
+	int64_t build_triangles = 0;
+	int64_t update_triangles = 0;
+	uint32_t max_stale_frames = 30; // dynamic_max_stale_frames: past it, an update ranks first.
+	float offscreen_weight = 0.25f; // dynamic_offscreen_size_weight.
+};
+
+struct RTDynamicCandidate {
+	RTDeformedCacheEntry *entry = nullptr;
+	AABB aabb; // World space.
+	uint64_t key = 0;
+	float score = 0.0f;
+	uint32_t order = 0;
+	uint32_t triangles = 0;
+	bool in_view = false;
+	uint32_t pending = UINT32_MAX; // A displaced surface's pending job in _displace_surfaces(); UINT32_MAX: skinned.
+	bool rebuild = false; // The update is a build.
+	bool rebuild_only = false; // RT_BLAS_UPDATE_REBUILD: it cannot become a refit.
+	bool selected = false;
+	bool downgraded = false; // A periodic build past the build budget, refit instead.
+};
+
+struct RTDynamicBudgetUsage {
+	uint32_t frame = UINT32_MAX;
+	uint32_t operations = 0;
+	uint64_t build_triangles = 0;
+	uint64_t update_triangles = 0;
+	uint32_t cursor = 0; // Rotates equal scores between frames.
+};
+
+// The apparent size NVIDIA's RTCpuVisibilityEstimator ranks by: (radius / max(distance, radius))^2 of the bounding sphere
+// of p_aabb, times p_offscreen_weight out of view.
+float rt_dynamic_visibility(const AABB &p_aabb, bool p_in_view, const Vector3 &p_camera_origin, float p_offscreen_weight);
+// p_visibility times 1 + the frames waited, at most p_max_stale_frames, past which the update ranks first.
+float rt_dynamic_score(float p_visibility, uint32_t p_waited, uint32_t p_max_stale_frames);
+// Ranks r_candidates by score, equal scores by key rotated by r_usage's cursor, and selects those within p_budgets less
+// what r_usage spent of them this frame; the first update of each kind passes whatever its size. Returns the number of
+// candidates selected and advances the cursor by it.
+uint32_t rt_dynamic_select(LocalVector<RTDynamicCandidate> &r_candidates, const RTDynamicBudgets &p_budgets, RTDynamicBudgetUsage &r_usage);
+
 class RenderRaytracing {
 	friend class RenderForwardClustered;
 	friend class RenderForwardClusteredPT;
@@ -924,31 +974,9 @@ class RenderRaytracing {
 		bool turn(const AABB &p_aabb, uint64_t p_key) const; // False when the update waits for a later frame.
 	};
 
-	// rendering/pathtracing/dynamic_blas_*: per-frame budgets of the updates of deforming geometry that can wait (refits,
-	// periodic and RT_BLAS_UPDATE_REBUILD builds), ranked by apparent size and frames waited (NVIDIA's RTDynamicScheduler).
-	// Off by default. A new or reshaped BLAS is built at once and not counted. Shared by the views of a frame.
-	struct DynamicCandidate {
-		RTDeformedCacheEntry *entry = nullptr;
-		AABB aabb; // World space.
-		uint64_t key = 0;
-		float score = 0.0f;
-		uint32_t order = 0;
-		uint32_t triangles = 0;
-		bool in_view = false;
-		uint32_t pending = UINT32_MAX; // A displaced surface's pending job in _displace_surfaces(); UINT32_MAX: skinned.
-		bool rebuild = false; // The update is a build.
-		bool rebuild_only = false; // RT_BLAS_UPDATE_REBUILD: it cannot become a refit.
-		bool selected = false;
-		bool downgraded = false; // A periodic build past the build budget, refit instead.
-	};
-	struct DynamicBudgetUsage {
-		uint32_t frame = UINT32_MAX;
-		uint32_t operations = 0;
-		uint64_t build_triangles = 0;
-		uint64_t update_triangles = 0;
-		uint32_t cursor = 0; // Rotates equal scores between frames.
-	} dynamic_budget_usage;
-	LocalVector<DynamicCandidate> dynamic_candidates;
+	// rendering/pathtracing/dynamic_blas_* (RTDynamicBudgets).
+	RTDynamicBudgetUsage dynamic_budget_usage;
+	LocalVector<RTDynamicCandidate> dynamic_candidates;
 	static bool _dynamic_budgets_enabled();
 	// Adds the skinned and blend shape surfaces whose update is due, ranks every candidate and selects those within the
 	// budgets; the others keep their BLAS this frame (RTDeformedCacheEntry::budget_held_frame).
