@@ -648,7 +648,8 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 		_render_buffers_ensure_depth_texture(p_render_data);
 	}
 
-	// The path traced reflections of the transparent surfaces, in place of their probes and sky where they match.
+	// The path traced reflections of the transparent surfaces, in place of their probes and sky where they match: read by
+	// _setup_environment() (the scene data's flag) and by the transparent pass' sets, until the last of them is made.
 	front_layer_reflection = (raytracing && raytracing->get_front_layer_instance_count() > 0) ? raytracing->rt_get_front_layer_texture(rb.ptr()) : RID();
 
 	const uint32_t transparent_pass_uniform_buffer_index = _setup_environment(p_render_data, false, screen_size, screen_size, p_default_bg_color, false);
@@ -658,18 +659,27 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 		rt_shadow_texture_set = raytracing->get_fragment_texture_set(scene_shader.default_shader_rt_shadows_rd, RT_SHADOW_TEXTURES_UNIFORM_SET);
 	}
 	const bool use_rt_shadows = rt_shadow_texture_set.is_valid();
-	if (use_rt_shadows) {
-		rt_shadow_tlas = rt_state->tlas;
-		rt_shadow_geometry_buffer = rt_state->geometry_buffer;
-		rt_shadow_material_buffer = rt_state->material_buffer;
-	}
-	const RID rp_uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_ALPHA, p_render_data, radiance_texture, samplers, transparent_pass_uniform_buffer_index, true);
-	rt_shadow_tlas = RID();
-	rt_shadow_geometry_buffer = RID();
-	rt_shadow_material_buffer = RID();
-	// The cards' depth pass' own render pass set, as raster's depth pre-pass builds it (its shaders bind other formats).
-	const RID depth_uniform_set = rasterized_count > 0 ? _setup_render_pass_uniform_set(RENDER_LIST_ALPHA, nullptr, RID(), samplers, transparent_pass_uniform_buffer_index) : RID();
-	front_layer_reflection = RID();
+	// The transparent pass' render pass set (rp_uniform_set) and the cards' depth pass' own (depth_uniform_set, as raster's
+	// depth pre-pass builds it: its shaders bind other formats). Made here for the rasterized cards, drawn before the screen
+	// and depth copies, and made again right before the transparent pass, where raster makes its own: after the copies and
+	// the post-opaque, post-sky and pre-transparent compositor effects. A set is freed with any resource it holds, and
+	// that window can free one (godot3d at load: "Parameter uniform_set is null" for the whole transparent pass).
+	// UniformSetCacheRD returns the same set when nothing changed.
+	RID rp_uniform_set;
+	RID depth_uniform_set;
+	auto setup_transparent_pass_sets = [&]() {
+		if (use_rt_shadows) {
+			rt_shadow_tlas = rt_state->tlas;
+			rt_shadow_geometry_buffer = rt_state->geometry_buffer;
+			rt_shadow_material_buffer = rt_state->material_buffer;
+		}
+		rp_uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_ALPHA, p_render_data, radiance_texture, samplers, transparent_pass_uniform_buffer_index, true);
+		rt_shadow_tlas = RID();
+		rt_shadow_geometry_buffer = RID();
+		rt_shadow_material_buffer = RID();
+		depth_uniform_set = rasterized_count > 0 ? _setup_render_pass_uniform_set(RENDER_LIST_ALPHA, nullptr, RID(), samplers, transparent_pass_uniform_buffer_index) : RID();
+	};
+	setup_transparent_pass_sets();
 
 	uint32_t transparent_color_pass_flags = (color_pass_flags | uint32_t(COLOR_PASS_FLAG_TRANSPARENT)) & ~uint32_t(COLOR_PASS_FLAG_SEPARATE_SPECULAR);
 	// Motion vectors should not be overwritten by transparent objects.
@@ -763,6 +773,10 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 		raytracing->dlss_rr_write_background_albedo(p_render_data);
 		copy_effects->copy_to_rect(rb->get_internal_texture(), raytracing->dlss_rr_get_color_before_transparency(rb.ptr()), Rect2i(Point2i(), rb->get_internal_size()));
 	}
+
+	// Where raster makes the transparent pass' set (see setup_transparent_pass_sets()).
+	setup_transparent_pass_sets();
+	front_layer_reflection = RID();
 
 	RID rr_transparency_layer;
 	{
