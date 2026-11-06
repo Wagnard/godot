@@ -3894,12 +3894,12 @@ void RenderingServer::init() {
 	GLOBAL_DEF("rendering/pathtracing/light_sampling_ris", true);
 	GLOBAL_DEF("rendering/pathtracing/russian_roulette", true);
 	GLOBAL_DEF("rendering/pathtracing/specular_motion_vectors", false);
-	GLOBAL_DEF("rendering/pathtracing/transparent_shadows", false);
-	GLOBAL_DEF("rendering/pathtracing/trace_gpu_particles", false);
+	GLOBAL_DEF("rendering/pathtracing/transparent_shadows", true);
+	GLOBAL_DEF("rendering/pathtracing/trace_gpu_particles", true);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/pathtracing/decals", PROPERTY_HINT_ENUM, "All Hits,Skip After Diffuse,Singular Only"), 0);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/pathtracing/max_transparency_layers", PROPERTY_HINT_RANGE, "0,64,1"), 0);
 	GLOBAL_DEF("rendering/pathtracing/shadow_groups", true);
-	GLOBAL_DEF("rendering/pathtracing/specular_energy_compensation", false);
+	GLOBAL_DEF("rendering/pathtracing/specular_energy_compensation", true);
 	GLOBAL_DEF("rendering/pathtracing/raster_brdf", true);
 	GLOBAL_DEF("rendering/pathtracing/volumetric_fog_shadows", false);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/pathtracing/volumetric_fog_positional_shadow_rays", PROPERTY_HINT_RANGE, "1,4,1"), 2);
