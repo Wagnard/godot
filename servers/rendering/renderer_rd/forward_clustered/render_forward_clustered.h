@@ -825,6 +825,9 @@ protected:
 			// rt_pass_flags only: drawn by the path tracer's raster pass, hidden from its camera rays (render_mode or
 			// instance flag pathtracing_rasterized).
 			FLAG_PT_RASTERIZED = 16,
+			// rt_pass_flags only, with FLAG_PT_RASTERIZED: an opaque or cut-out draw pass of a GPUParticles3D that is a card
+			// only because the path tracer does not trace it; traced instead while pt_traces_particles() is true.
+			FLAG_PT_PARTICLES_CARD = 32,
 			FLAG_USES_SHARED_SHADOW_MATERIAL = 128,
 			FLAG_USES_SUBSURFACE_SCATTERING = 2048,
 			FLAG_USES_SCREEN_TEXTURE = 4096,
@@ -1169,6 +1172,13 @@ protected:
 	LocalVector<RID> rt_precache_materials;
 	void _rt_precache_surface_material(const GeometryInstanceSurfaceDataCache *p_surface);
 	void _rt_precache_all_surface_materials();
+
+	// rendering/pathtracing/trace_gpu_particles: the path tracer traces this GPUParticles3D's opaque and cut-out draw
+	// passes (RenderRaytracing::build_tlas(), one TLAS instance per particle) instead of drawing them as cards
+	// (FLAG_PT_PARTICLES_CARD). Not with trails, nor where the TLAS instances cannot be written on the GPU.
+	static bool pt_traces_particles(const GeometryInstanceForwardClustered *p_instance);
+	// The same for one of its surfaces: those drawn as cards only because the particles were not traced.
+	static bool pt_traces_particles_surface(const GeometryInstanceSurfaceDataCache *p_surface);
 
 	// Global data about the scene that can be used to pre-allocate resources without relying on culling.
 	struct GlobalSurfaceData {

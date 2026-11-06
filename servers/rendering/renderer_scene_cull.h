@@ -1184,6 +1184,8 @@ public:
 		Vector3 rt_camera_origin;
 		real_t rt_culling_radius = 0.0;
 		real_t rt_culling_tan_half_angle = 0.0;
+		// rendering/pathtracing/trace_gpu_particles: particles enter the TLAS too.
+		bool rt_particles = false;
 	} cull;
 
 	struct VisibilityCullData {

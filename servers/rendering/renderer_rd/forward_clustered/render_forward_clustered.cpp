@@ -1979,7 +1979,7 @@ void RenderForwardClustered::_fill_render_list_chunk(FillRenderListChunk &p_chun
 				bool has_alpha_surface = false;
 				const GeometryInstanceSurfaceDataCache *s = inst->surface_caches;
 				while (s) {
-					if (s->rt_pass_flags & GeometryInstanceSurfaceDataCache::FLAG_PASS_ALPHA) {
+					if ((s->rt_pass_flags & GeometryInstanceSurfaceDataCache::FLAG_PASS_ALPHA) && !pt_traces_particles_surface(s)) {
 						has_alpha_surface = true;
 						break;
 					}
@@ -2082,6 +2082,11 @@ void RenderForwardClustered::_fill_render_list_chunk(FillRenderListChunk &p_chun
 		// which covers both raster-only and RT-only instances before this loop runs.
 
 		while (surf) {
+			if (p_alpha_only && pt_traces_particles_surface(surf)) {
+				// A traced GPUParticles3D's card (rendering/pathtracing/trace_gpu_particles): the camera rays see it.
+				surf = surf->next;
+				continue;
+			}
 			surf->sort.uses_forward_gi = 0;
 			surf->sort.uses_lightmap = 0;
 
@@ -6390,14 +6395,19 @@ void RenderForwardClustered::_geometry_instance_add_surface_with_material(Geomet
 		rt_pass_flags |= GeometryInstanceSurfaceDataCache::FLAG_PASS_DEPTH;
 		rt_pass_flags |= GeometryInstanceSurfaceDataCache::FLAG_PASS_SHADOW;
 	}
-	// GPUParticles3D are not traced (the TLAS takes meshes and MultiMeshes, RendererSceneCull's ray tracing cull): their
+	// GPUParticles3D are traced only with rendering/pathtracing/trace_gpu_particles (pt_traces_particles()): otherwise their
 	// opaque and cut-out draw passes are rasterized the same way, or nothing would draw them under path tracing.
 	const bool particles = ginstance->data->base_type == RSE::INSTANCE_PARTICLES;
-	if ((p_material->shader_data->pathtracing_rasterized || ginstance->data->pathtracing_rasterized || particles) && (rt_pass_flags & GeometryInstanceSurfaceDataCache::FLAG_PASS_OPAQUE)) {
+	const bool rasterized = p_material->shader_data->pathtracing_rasterized || ginstance->data->pathtracing_rasterized;
+	if ((rasterized || particles) && (rt_pass_flags & GeometryInstanceSurfaceDataCache::FLAG_PASS_OPAQUE)) {
 		// Drawn by the path tracer's raster pass (its alpha list, after a depth pass of its own) over the traced image;
 		// traced only for the other rays (RenderRaytracing::build_tlas(), not as a front layer surface). Opaque and cut-out
 		// surfaces only: a transparent one (a sprite's buff halo overlay) is drawn there already.
 		rt_pass_flags |= GeometryInstanceSurfaceDataCache::FLAG_PASS_ALPHA | GeometryInstanceSurfaceDataCache::FLAG_PT_RASTERIZED;
+		if (!rasterized) {
+			// Read every frame, as the setting: traced particles are seen by the camera rays, not drawn as cards.
+			rt_pass_flags |= GeometryInstanceSurfaceDataCache::FLAG_PT_PARTICLES_CARD;
+		}
 	}
 
 	if (p_material->shader_data->uses_particle_trails) {
@@ -7069,6 +7079,13 @@ void RenderForwardClustered::_rt_precache_surface_material(const GeometryInstanc
 	// The surfaces and the material RenderRaytracing::build_tlas() traces them with (override > surface > mesh).
 	const GeometryInstanceForwardClustered *ginstance = p_surface->owner;
 	const RSE::InstanceType base_type = ginstance->data->base_type;
+	if (base_type == RSE::INSTANCE_PARTICLES) {
+		// Traced particles: their opaque and cut-out draw passes, as build_tlas() takes them (a card's material).
+		if (pt_traces_particles(ginstance) && (p_surface->rt_pass_flags & GeometryInstanceSurfaceDataCache::FLAG_PT_RASTERIZED) && p_surface->material_rid.is_valid()) {
+			rt_precache_materials.push_back(p_surface->material_rid);
+		}
+		return;
+	}
 	if ((base_type != RSE::INSTANCE_MESH && base_type != RSE::INSTANCE_MULTIMESH) || ginstance->rt_procedural) {
 		return;
 	}
@@ -7102,6 +7119,21 @@ void RenderForwardClustered::_rt_precache_all_surface_materials() {
 	for (SelfList<GeometryInstanceSurfaceDataCache> *list = geometry_surface_compilation_all_list.first(); list; list = list->next()) {
 		_rt_precache_surface_material(list->self());
 	}
+}
+
+bool RenderForwardClustered::pt_traces_particles(const GeometryInstanceForwardClustered *p_instance) {
+	if (p_instance->data->base_type != RSE::INSTANCE_PARTICLES || !GLOBAL_GET_CACHED(bool, "rendering/pathtracing/trace_gpu_particles")) {
+		return false;
+	}
+	// The particles' TLAS instances are written on the GPU from their instance buffer (RenderRaytracing's
+	// tlas_expand_supported): without the standard instance layout, they would have to be read back to the CPU.
+	static const bool expand_supported = RD::get_singleton()->tlas_instance_layout_is_standard() && RD::get_singleton()->has_feature(RD::SUPPORTS_BUFFER_DEVICE_ADDRESS);
+	// A trail's sections are one mesh skinned by the trail's bind poses in the vertex stage: its BLAS cannot be the mesh's.
+	return expand_supported && p_instance->trail_steps <= 1 && RendererRD::ParticlesStorage::get_singleton()->particles_get_mode(p_instance->data->base) == RSE::PARTICLES_MODE_3D;
+}
+
+bool RenderForwardClustered::pt_traces_particles_surface(const GeometryInstanceSurfaceDataCache *p_surface) {
+	return (p_surface->rt_pass_flags & GeometryInstanceSurfaceDataCache::FLAG_PT_PARTICLES_CARD) && pt_traces_particles(p_surface->owner);
 }
 
 void RenderForwardClustered::_update_dirty_geometry_instances() {

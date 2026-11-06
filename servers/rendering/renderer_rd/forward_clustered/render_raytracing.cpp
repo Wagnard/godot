@@ -40,6 +40,7 @@
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/mesh_storage.h"
+#include "servers/rendering/renderer_rd/storage_rd/particles_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
 #include "servers/rendering/rendering_rt_material_state.h"
@@ -89,10 +90,13 @@ void RenderRaytracing::initialize(RenderForwardClustered *p_owner) {
 	if (tlas_expand_supported) {
 		Vector<String> expand_modes;
 		expand_modes.push_back("\n");
+		expand_modes.push_back("\n#define PARTICLES\n"); // rendering/pathtracing/trace_gpu_particles.
 		tlas_expand_shader.shader.initialize(expand_modes);
 		tlas_expand_shader.version = tlas_expand_shader.shader.version_create();
 		tlas_expand_shader.version_shader = tlas_expand_shader.shader.version_get_shader(tlas_expand_shader.version, 0);
 		tlas_expand_shader.pipeline = RD::get_singleton()->compute_pipeline_create(tlas_expand_shader.version_shader);
+		tlas_expand_shader.particles_version_shader = tlas_expand_shader.shader.version_get_shader(tlas_expand_shader.version, 1);
+		tlas_expand_shader.particles_pipeline = RD::get_singleton()->compute_pipeline_create(tlas_expand_shader.particles_version_shader);
 	}
 
 	Vector<String> fog_modes;
@@ -182,7 +186,7 @@ RenderRaytracing::~RenderRaytracing() {
 	if (tlas_expand_supported) {
 		tlas_expand_shader.shader.version_free(tlas_expand_shader.version);
 	}
-	for (RID buffer : { tlas_expand_job_buffer, tlas_expand_geometry_template_buffer, tlas_expand_material_template_buffer }) {
+	for (RID buffer : { tlas_expand_job_buffer, tlas_expand_geometry_template_buffer, tlas_expand_material_template_buffer, tlas_expand_particles_buffer }) {
 		if (buffer.is_valid()) {
 			RD::get_singleton()->free_rid(buffer);
 		}
@@ -3817,7 +3821,7 @@ void RenderRaytracing::_build_tlas_with_expanded_multimeshes(RTViewportState *p_
 	rd->buffer_update(tlas_expand_geometry_template_buffer, 0, template_count * sizeof(RT_GeometryData), tlas_expand_geometry_templates.ptr());
 	rd->buffer_update(tlas_expand_material_template_buffer, 0, template_count * sizeof(RT_MaterialData), tlas_expand_material_templates.ptr());
 
-	const LocalVector<RD::Uniform> uniforms = {
+	LocalVector<RD::Uniform> uniforms = {
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, tlas_expand_job_buffer),
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, tlas_expand_geometry_template_buffer),
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, tlas_expand_material_template_buffer),
@@ -3827,7 +3831,38 @@ void RenderRaytracing::_build_tlas_with_expanded_multimeshes(RTViewportState *p_
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, p_state->motion_index_buffer),
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, p_state->motion_transform_buffer),
 	};
-	const RID uniform_set = UniformSetCacheRD::get_singleton()->get_cache_vec(tlas_expand_shader.version_shader, 0, uniforms);
+
+	// rendering/pathtracing/trace_gpu_particles: with particle jobs, the PARTICLES variant and their data, one record per
+	// job. Without, the variant every frame used before them.
+	bool has_particles = false;
+	for (const TlasExpandJob &job : tlas_expand_jobs) {
+		if (job.particles.flags[0] != 0) {
+			has_particles = true;
+			break;
+		}
+	}
+	RID expand_shader = tlas_expand_shader.version_shader;
+	RID expand_pipeline = tlas_expand_shader.pipeline;
+	if (has_particles) {
+		thread_local LocalVector<RT_TlasExpandParticles> particles_data;
+		particles_data.resize(job_count);
+		for (uint32_t i = 0; i < job_count; i++) {
+			particles_data[i] = tlas_expand_jobs[i].particles;
+		}
+		if (tlas_expand_particles_capacity < job_count) {
+			if (tlas_expand_particles_buffer.is_valid()) {
+				rd->free_rid(tlas_expand_particles_buffer);
+			}
+			tlas_expand_particles_capacity = Math::next_power_of_2(job_count);
+			tlas_expand_particles_buffer = rd->storage_buffer_create(tlas_expand_particles_capacity * sizeof(RT_TlasExpandParticles));
+			rd->set_resource_name(tlas_expand_particles_buffer, "RT TLAS expand particles");
+		}
+		rd->buffer_update(tlas_expand_particles_buffer, 0, job_count * sizeof(RT_TlasExpandParticles), particles_data.ptr());
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, tlas_expand_particles_buffer));
+		expand_shader = tlas_expand_shader.particles_version_shader;
+		expand_pipeline = tlas_expand_shader.particles_pipeline;
+	}
+	const RID uniform_set = UniformSetCacheRD::get_singleton()->get_cache_vec(expand_shader, 0, uniforms);
 
 	struct {
 		uint32_t job_count;
@@ -3842,7 +3877,7 @@ void RenderRaytracing::_build_tlas_with_expanded_multimeshes(RTViewportState *p_
 		uint32_t(offsetof(RT_GeometryData, multimesh_offset) / 4), uint32_t(offsetof(RT_GeometryData, multimesh_previous_offset) / 4), 0 };
 
 	RD::ComputeListID compute_list = rd->compute_list_begin();
-	rd->compute_list_bind_compute_pipeline(compute_list, tlas_expand_shader.pipeline);
+	rd->compute_list_bind_compute_pipeline(compute_list, expand_pipeline);
 	rd->compute_list_bind_uniform_set(compute_list, uniform_set, 0);
 	rd->compute_list_set_push_constant(compute_list, &params, sizeof(params));
 	// Read through their addresses: the graph orders this pass after their updates.
@@ -4650,6 +4685,44 @@ static RenderingBillboard::Camera _billboard_camera(const Transform3D &p_transfo
 	return camera;
 }
 
+// rendering/pathtracing/trace_gpu_particles: what the expand pass applies to each particle of a draw pass, the billboard and
+// fixed_size render modes with RenderingBillboard's terms for the current and the previous camera (raytracing_tlas_expand.glsl
+// particle_world_transform(), billboard_inc.glsl's GPU mirror for a whole instance).
+static RT_TlasExpandParticles _particles_expand_data(const RenderingBillboard::Settings &p_settings, const RenderingBillboard::Camera &p_camera, const RenderingBillboard::Camera &p_prev_camera) {
+	RT_TlasExpandParticles data = {};
+	data.flags[0] = RT_EXPAND_PARTICLES;
+	if (p_settings.mode != RenderingBillboard::MODE_DISABLED) {
+		data.flags[0] |= RT_EXPAND_BILLBOARD;
+		if (p_settings.mode == RenderingBillboard::MODE_PARTICLES) {
+			data.flags[0] |= RT_EXPAND_BILLBOARD_ROTATION;
+		}
+		if (p_settings.keep_scale) {
+			data.flags[0] |= RT_EXPAND_BILLBOARD_KEEP_SCALE;
+		}
+	}
+	if (p_settings.fixed_size) {
+		data.flags[0] |= RT_EXPAND_FIXED_SIZE;
+	}
+	auto store = [&](const RenderingBillboard::Camera &p_cam, float *r_basis, float *r_fixed_size) {
+		const Basis basis = RenderingBillboard::facing_basis(p_settings.mode, p_cam.transform.basis);
+		for (int c = 0; c < 3; c++) {
+			const Vector3 column = basis.get_column(c);
+			r_basis[c * 4 + 0] = float(column.x);
+			r_basis[c * 4 + 1] = float(column.y);
+			r_basis[c * 4 + 2] = float(column.z);
+			r_basis[c * 4 + 3] = 0.0f;
+		}
+		const RenderingBillboard::FixedSizeScale scale = RenderingBillboard::fixed_size_scale(p_cam);
+		r_fixed_size[0] = float(scale.gradient.x);
+		r_fixed_size[1] = float(scale.gradient.y);
+		r_fixed_size[2] = float(scale.gradient.z);
+		r_fixed_size[3] = float(scale.offset);
+	};
+	store(p_camera, data.basis, data.fixed_size);
+	store(p_prev_camera, data.prev_basis, data.prev_fixed_size);
+	return data;
+}
+
 RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data, uint32_t p_rt_flags) {
 	// Before any early return: no surface counts as peeled by a build that put nothing in the TLAS.
 	tlas_build_serial++;
@@ -4781,6 +4854,10 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 		bool material_ready; // Not the stand-in of a hit group still compiling.
 		uint32_t inst_flags;
 		bool per_instance; // One TLAS instance per instance (_build_tlas_with_expanded_multimeshes()), not a merged BLAS.
+		// A GPUParticles3D's draw pass (rendering/pathtracing/trace_gpu_particles): mm_rid is the particles, mm_gpu_buffer
+		// their instance buffer, always one TLAS instance per particle.
+		bool particles = false;
+		RT_TlasExpandParticles particle_data = {};
 	};
 	LocalVector<PendingMMSurface> pending_mm_surfaces;
 
@@ -5159,6 +5236,98 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 			continue;
 		}
 
+		// GPUParticles3D (rendering/pathtracing/trace_gpu_particles, RendererSceneCull puts them in rt_instances with it): one
+		// TLAS instance per particle, sharing the draw pass mesh's BLAS, written on the GPU from the instance buffer raster
+		// draws them from, as a MultiMesh's (_build_tlas_with_expanded_multimeshes()). NVIDIA merges each draw pass into a
+		// BLAS built or refit every frame (49a825dc52 multimesh_merge.glsl); a TLAS instance per particle measured as cheap or
+		// cheaper with less memory (side-session-notes nvidia-sync-2026-11 step4-particles-study.md).
+		if (inst->data->base_type == RSE::INSTANCE_PARTICLES) {
+			if (!RenderForwardClustered::pt_traces_particles(inst)) {
+				if (inst->trail_steps > 1) {
+					WARN_PRINT_ONCE("rendering/pathtracing/trace_gpu_particles: GPUParticles3D with trails are not path traced; their opaque draw passes are drawn by the raster pass.");
+				}
+				continue;
+			}
+			RendererRD::ParticlesStorage *particles_storage = RendererRD::ParticlesStorage::get_singleton();
+			const RID particles_rid = inst->data->base;
+			const RID instance_buffer = particles_storage->particles_get_instance_buffer(particles_rid);
+			const uint32_t particle_count = inst->instance_count;
+			if (!instance_buffer.is_valid() || particle_count == 0) {
+				continue;
+			}
+			// In world space (local_coords off), the instance buffer holds world transforms and raster draws it without the
+			// node's (store_transform_cache).
+			const bool local_coords = particles_storage->particles_is_using_local_coords(particles_rid);
+			const bool transform_moved = local_coords && inst->transform_status == RenderForwardClustered::GeometryInstanceForwardClustered::TransformStatus::MOVED;
+			const RenderingBillboard::Camera billboard_camera = _billboard_camera(p_render_data->scene_data->cam_transform, p_render_data->scene_data->cam_projection);
+			const RenderingBillboard::Camera prev_billboard_camera = _billboard_camera(p_render_data->scene_data->prev_cam_transform, p_render_data->scene_data->prev_cam_projection);
+
+			for (const RenderForwardClustered::GeometryInstanceSurfaceDataCache *part_surf = inst->surface_caches; part_surf; part_surf = part_surf->next) {
+				// The opaque and cut-out draw passes (the cards of RenderForwardClustered::pt_traces_particles_surface(), or
+				// pathtracing_rasterized ones, traced for the other rays); transparent ones stay the raster transparent pass's.
+				if (!(part_surf->rt_pass_flags & RenderForwardClustered::GeometryInstanceSurfaceDataCache::FLAG_PT_RASTERIZED)) {
+					continue;
+				}
+				void *mesh_surface = part_surf->surface;
+				const uint32_t surface_counter = mesh_storage->mesh_surface_get_rt_invalidation_counter(mesh_surface);
+				const RID material_rid = part_surf->material_rid;
+				const uint16_t material_counter = material_storage->material_get_rt_invalidation_counter(material_rid);
+				RTMaterialData *mat_data = process_material(material_rid, material_counter);
+
+				bool material_ready = true;
+				if (mat_data->rt_sbt_offset > 0 && !rt_shader_singleton->is_hg_ready_in_bundle(mat_data->rt_sbt_offset, p_rt_flags)) {
+					material_ready = false;
+					render_info_counters.pending_surfaces++;
+					request_hit_group(mat_data->rt_sbt_offset, inst->transformed_aabb);
+					const SceneShaderForwardClustered::ShaderData *cut_shader = part_surf->shader;
+					mat_data = _compiling_material_fallback(mat_data, cut_shader && (cut_shader->uses_alpha || cut_shader->uses_blend_alpha || cut_shader->uses_alpha_clip || cut_shader->uses_alpha_antialiasing || cut_shader->uses_discard));
+					if (!mat_data) {
+						continue;
+					}
+				}
+
+				// As a MultiMesh's: forced opaque unless the material cuts out.
+				uint32_t inst_flags = 0;
+				if (mat_data->rt_sbt_offset > 0) {
+					const SceneShaderRaytracing::CustomShaderEntry *cse = rt_shader_singleton->get_custom_shader_entry(mat_data->rt_sbt_offset);
+					if (!cse || (!cse->uses_alpha_clip && cse->alpha_texture_buffer_offset == UINT32_MAX)) {
+						inst_flags |= RD::ACCELERATION_STRUCTURE_INSTANCE_FORCE_OPAQUE_BIT;
+					}
+				} else if (!(part_surf->shader && (part_surf->shader->uses_alpha_clip || part_surf->shader->uses_blend_alpha || part_surf->shader->uses_alpha))) {
+					inst_flags |= RD::ACCELERATION_STRUCTURE_INSTANCE_FORCE_OPAQUE_BIT;
+				}
+
+				PendingMMSurface pending;
+				pending.mm_rid = particles_rid;
+				pending.mm_gpu_buffer = instance_buffer;
+				pending.mm_surf = part_surf;
+				pending.mesh_surface = mesh_surface;
+				pending.mm_count = particle_count;
+				pending.surface_index = part_surf->surface_index;
+				pending.surface_counter = surface_counter;
+				pending.lod = 0;
+				pending.lod_view = nullptr;
+				pending.mm_slot = 0;
+				pending.displace = false;
+				pending.reevaluate = false;
+				pending.camera_dependent = false;
+				pending.rebuild_only = false;
+				pending.material_counter = material_counter;
+				pending.instance_transform = local_coords ? instance_transform : Transform3D();
+				pending.prev_instance_transform = local_coords ? prev_instance_transform : Transform3D();
+				pending.transform_moved = transform_moved;
+				pending.mat_data = mat_data;
+				pending.material_rid = material_rid;
+				pending.material_ready = material_ready;
+				pending.inst_flags = inst_flags;
+				pending.per_instance = true;
+				pending.particles = true;
+				pending.particle_data = _particles_expand_data(part_surf->shader ? part_surf->shader->billboard : RenderingBillboard::Settings(), billboard_camera, prev_billboard_camera);
+				pending_mm_surfaces.push_back(pending);
+			}
+			continue;
+		}
+
 		// Walk the surface cache linked list.
 		const RenderForwardClustered::GeometryInstanceSurfaceDataCache *surf = inst->surface_caches;
 		bool instance_static = inst->transform_status == RenderForwardClustered::GeometryInstanceForwardClustered::TransformStatus::NONE;
@@ -5497,7 +5666,22 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 			}
 
 			RT_GeometryData mm_geometry = surf_data->geometry;
-			if (_set_multimesh_instance_data(mm_geometry, pending.mm_rid, pending.mm_gpu_buffer, UINT32_MAX)) {
+			// A particle's instance: the 3D layout with color and custom data (particles_copy.glsl: 3 rows of transform, COLOR,
+			// INSTANCE_CUSTOM), current and previous copies as raster's motion vectors read them.
+			uint32_t particles_current_offset = 0;
+			uint32_t particles_prev_offset = 0;
+			if (pending.particles) {
+				RendererRD::ParticlesStorage::get_singleton()->particles_get_instance_buffer_motion_vectors_offsets(pending.mm_rid, particles_current_offset, particles_prev_offset);
+				const uint64_t address = RD::get_singleton()->buffer_get_device_address(pending.mm_gpu_buffer);
+				mm_geometry.multimesh_address_lo = uint32_t(address);
+				mm_geometry.multimesh_address_hi = uint32_t(address >> 32);
+				mm_geometry.multimesh_stride = RT_PARTICLE_INSTANCE_FLOATS;
+				mm_geometry.multimesh_offset = particles_current_offset;
+				mm_geometry.multimesh_previous_offset = particles_current_offset;
+				mm_geometry.multimesh_vertex_count = UINT32_MAX;
+				mm_geometry.multimesh_data_offsets = 12u | (16u << 16);
+				multimesh_buffers_read_this_frame.push_back(pending.mm_gpu_buffer);
+			} else if (_set_multimesh_instance_data(mm_geometry, pending.mm_rid, pending.mm_gpu_buffer, UINT32_MAX)) {
 				multimesh_buffers_read_this_frame.push_back(pending.mm_gpu_buffer);
 			}
 			mm_geometry.layer_mask = pending.mm_surf->owner->layer_mask;
@@ -5516,18 +5700,29 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 			const uint64_t mm_address = RD::get_singleton()->buffer_get_device_address(pending.mm_gpu_buffer);
 			job.data.mm_address_lo = uint32_t(mm_address);
 			job.data.mm_address_hi = uint32_t(mm_address >> 32);
-			job.data.mm_stride = mesh_storage->multimesh_get_stride(pending.mm_rid);
-			job.data.mm_offset = mesh_storage->multimesh_get_current_instance_offset(pending.mm_rid);
-			// The instances' previous transforms, as raster's motion vectors read them (while a viewport uses them).
-			uint32_t mm_motion_current_offset = 0;
-			uint32_t mm_prev_offset = 0;
-			const bool mm_moved = mesh_storage->_multimesh_get_motion_vectors_offsets(pending.mm_rid, mm_motion_current_offset, mm_prev_offset) && mm_prev_offset != job.data.mm_offset;
-			job.data.mm_prev_offset = mm_moved ? mm_prev_offset : job.data.mm_offset;
+			if (pending.particles) {
+				job.data.mm_stride = RT_PARTICLE_INSTANCE_FLOATS;
+				job.data.mm_offset = particles_current_offset;
+				// Equal when the copies did not alternate (ParticlesStorage::update_particles(): motion vectors used, index
+				// draw order, processed the previous frame).
+				job.data.mm_prev_offset = particles_prev_offset;
+				job.particles = pending.particle_data;
+			} else {
+				job.data.mm_stride = mesh_storage->multimesh_get_stride(pending.mm_rid);
+				job.data.mm_offset = mesh_storage->multimesh_get_current_instance_offset(pending.mm_rid);
+				// The instances' previous transforms, as raster's motion vectors read them (while a viewport uses them).
+				uint32_t mm_motion_current_offset = 0;
+				uint32_t mm_prev_offset = 0;
+				const bool mm_moved = mesh_storage->_multimesh_get_motion_vectors_offsets(pending.mm_rid, mm_motion_current_offset, mm_prev_offset) && mm_prev_offset != job.data.mm_offset;
+				job.data.mm_prev_offset = mm_moved ? mm_prev_offset : job.data.mm_offset;
+			}
 			job.data.template_index = tlas_expand_geometry_templates.size();
 			tlas_expand_geometry_templates.push_back(mm_geometry);
 			tlas_expand_material_templates.push_back(mm_material);
 			job.blas = surf_data->blas;
-			if (pending.material_ready && !(pending.inst_flags & RD::ACCELERATION_STRUCTURE_INSTANCE_FORCE_OPAQUE_BIT)) {
+			// Not for particles yet: their cut-out runs the any-hit shader (an opacity micromap is keyed by the mesh, which a
+			// particle surface cache does not name).
+			if (!pending.particles && pending.material_ready && !(pending.inst_flags & RD::ACCELERATION_STRUCTURE_INSTANCE_FORCE_OPAQUE_BIT)) {
 				RTOmmEntry *omm = _omm_entry(pending.mesh_surface, mesh_storage->multimesh_get_mesh(pending.mm_rid), pending.surface_index, pending.surface_counter, pending.material_rid, pending.material_counter, pending.mat_data, true);
 				const RID omm_blas = omm ? _omm_static_blas(omm, pending.mesh_surface, dirty_blas_list) : RID();
 				if (omm_blas.is_valid()) {
@@ -5539,6 +5734,10 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 			job.sbt_offset = pending.mat_data->rt_sbt_offset;
 			job.flags = pending.inst_flags | facing.instance_flags;
 			job.mask = instance_mask(pending.mm_surf->owner);
+			if (pending.particles && !RenderForwardClustered::pt_traces_particles_surface(pending.mm_surf) && (job.mask & RT_INSTANCE_MASK_CAMERA)) {
+				// pathtracing_rasterized particles: the raster pass draws them over the traced image, as a mesh's card.
+				job.mask = (job.mask & ~RT_INSTANCE_MASK_CAMERA) | RT_INSTANCE_MASK_SECONDARY;
+			}
 			tlas_expand_jobs.push_back(job);
 
 			if (collect_render_info) {

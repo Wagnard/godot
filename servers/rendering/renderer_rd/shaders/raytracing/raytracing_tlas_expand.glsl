@@ -69,6 +69,67 @@ layout(set = 0, binding = 7, std430) restrict writeonly buffer MotionTransforms 
 	vec4 motion_transforms[];
 };
 
+#ifdef PARTICLES
+// The variant of a frame with GPUParticles3D jobs (rendering/pathtracing/trace_gpu_particles), one record per job (zero
+// for a MultiMesh's): a particle's instance buffer has the 3D MultiMesh layout (transform, color, custom: 20 floats).
+#define EXPAND_PARTICLES 1u // Its dead particles are inactive instances.
+#define EXPAND_BILLBOARD 2u // Billboard render modes: the basis faces the camera (billboard_inc.glsl).
+#define EXPAND_BILLBOARD_ROTATION 4u // billboard_particles: turned by INSTANCE_CUSTOM.x.
+#define EXPAND_BILLBOARD_KEEP_SCALE 8u
+#define EXPAND_FIXED_SIZE 16u
+#define PARTICLE_CUSTOM_OFFSET 16u // INSTANCE_CUSTOM, in floats.
+
+struct ExpandParticles {
+	vec4 basis[3]; // The facing basis of the billboard mode for the camera, three columns (RenderingBillboard::facing_basis()).
+	vec4 prev_basis[3]; // For the previous frame's camera.
+	vec4 fixed_size; // fixed_size: the scale at an origin, dot(xyz, origin) + w (RenderingBillboard::fixed_size_scale()).
+	vec4 prev_fixed_size;
+	uvec4 flags; // x: EXPAND_*.
+};
+
+layout(set = 0, binding = 8, std430) restrict readonly buffer Particles {
+	ExpandParticles particles[];
+};
+
+// An instance's transform with the render modes the rasterizer applies to MODELVIEW_MATRIX (billboard_inc.glsl, its CPU
+// mirror RenderingBillboard::compute_world_transform()), before a compressed mesh's AABB transform.
+mat4 particle_world_transform(mat4 p_world, uint p_flags, mat3 p_facing, vec4 p_fixed_size, float p_rotation) {
+	if (bool(p_flags & EXPAND_BILLBOARD)) {
+		mat3 basis = p_facing;
+		if (bool(p_flags & EXPAND_BILLBOARD_ROTATION)) {
+			const float c = cos(p_rotation);
+			const float s = sin(p_rotation);
+			basis = basis * mat3(vec3(c, -s, 0.0), vec3(s, c, 0.0), vec3(0.0, 0.0, 1.0));
+		}
+		if (bool(p_flags & EXPAND_BILLBOARD_KEEP_SCALE)) {
+			basis[0] *= length(p_world[0].xyz);
+			basis[1] *= length(p_world[1].xyz);
+			basis[2] *= length(p_world[2].xyz);
+		}
+		p_world[0] = vec4(basis[0], 0.0);
+		p_world[1] = vec4(basis[1], 0.0);
+		p_world[2] = vec4(basis[2], 0.0);
+	}
+	if (bool(p_flags & EXPAND_FIXED_SIZE)) {
+		const float scale = dot(p_fixed_size.xyz, p_world[3].xyz) + p_fixed_size.w;
+		p_world[0] *= scale;
+		p_world[1] *= scale;
+		p_world[2] *= scale;
+	}
+	return p_world;
+}
+
+// particles_copy.glsl writes a dead particle with a zero basis at -INF: no instance may carry that transform. The exponent
+// bits, not isinf(): a compiler that assumes finite floats may fold isinf() and isnan() away.
+bool particle_is_dead(mat4 p_transform) {
+	const uvec3 exponent = floatBitsToUint(p_transform[3].xyz) & uvec3(0x7F800000u);
+	if (any(equal(exponent, uvec3(0x7F800000u)))) {
+		return true;
+	}
+	return all(equal(p_transform[0].xyz, vec3(0.0))) && all(equal(p_transform[1].xyz, vec3(0.0))) && all(equal(p_transform[2].xyz, vec3(0.0)));
+}
+#endif
+
 layout(push_constant, std430) uniform Params {
 	uint job_count;
 	uint first_slot; // Of the first instance written here: the instances the CPU wrote come first.
@@ -115,8 +176,42 @@ void main() {
 
 	MultiMeshBuffer mm = MultiMeshBuffer(packUint2x32(uvec2(jobs[j].mm_address_lo, jobs[j].mm_address_hi)));
 	const mat4 aabb = rows_to_mat4(jobs[j].aabb[0], jobs[j].aabb[1], jobs[j].aabb[2]);
+#ifdef PARTICLES
+	const uint flags = particles[j].flags.x;
+	const uint current_float = (jobs[j].mm_offset + index) * jobs[j].mm_stride;
+	uint previous_float = (jobs[j].mm_prev_offset + index) * jobs[j].mm_stride;
+	const mat4 current_instance = multimesh_transform(mm, current_float);
+	mat4 previous_instance = multimesh_transform(mm, previous_float);
+	bool dead = false;
+	if (bool(flags & EXPAND_PARTICLES)) {
+		dead = particle_is_dead(current_instance);
+		if (particle_is_dead(previous_instance)) {
+			// Born this frame (or dead): no motion.
+			previous_instance = current_instance;
+			previous_float = current_float;
+		}
+	}
+	mat4 current = rows_to_mat4(jobs[j].node[0], jobs[j].node[1], jobs[j].node[2]) * current_instance;
+	mat4 previous = rows_to_mat4(jobs[j].prev_node[0], jobs[j].prev_node[1], jobs[j].prev_node[2]) * previous_instance;
+	if (bool(flags & (EXPAND_BILLBOARD | EXPAND_FIXED_SIZE)) && !dead) {
+		// Each with its frame's camera: turning with the camera is motion too.
+		const ExpandParticles p = particles[j];
+		current = particle_world_transform(current, flags, mat3(p.basis[0].xyz, p.basis[1].xyz, p.basis[2].xyz), p.fixed_size, mm.v[current_float + PARTICLE_CUSTOM_OFFSET]);
+		previous = particle_world_transform(previous, flags, mat3(p.prev_basis[0].xyz, p.prev_basis[1].xyz, p.prev_basis[2].xyz), p.prev_fixed_size, mm.v[previous_float + PARTICLE_CUSTOM_OFFSET]);
+	}
+	current = current * aabb;
+	previous = previous * aabb;
+	if (dead) {
+		// An inactive instance: "one whose acceleration structure reference is 0" (Vulkan, Inactive Primitives and
+		// Instances), "NULL bottom level acceleration structure pointers" (DXR functional spec, Inactive primitives and
+		// instances). Its mask is 0 too and its transform finite.
+		current = mat4(0.0);
+		previous = mat4(0.0);
+	}
+#else
 	const mat4 current = rows_to_mat4(jobs[j].node[0], jobs[j].node[1], jobs[j].node[2]) * multimesh_transform(mm, (jobs[j].mm_offset + index) * jobs[j].mm_stride) * aabb;
 	const mat4 previous = rows_to_mat4(jobs[j].prev_node[0], jobs[j].prev_node[1], jobs[j].prev_node[2]) * multimesh_transform(mm, (jobs[j].mm_prev_offset + index) * jobs[j].mm_stride) * aabb;
+#endif
 
 	// The instance: the transform's rows, then the job's words with this slot as the custom index.
 	const mat4 current_rows = transpose(current);
@@ -127,10 +222,24 @@ void main() {
 		instances[instance_word + r * 4u + 2u] = floatBitsToUint(current_rows[r].z);
 		instances[instance_word + r * 4u + 3u] = floatBitsToUint(current_rows[r].w);
 	}
+#ifdef PARTICLES
+	if (dead) {
+		instances[instance_word + 12u] = slot & 0x00FFFFFFu;
+		instances[instance_word + 13u] = jobs[j].instance_tail.y;
+		instances[instance_word + 14u] = 0u;
+		instances[instance_word + 15u] = 0u;
+	} else {
+		instances[instance_word + 12u] = (jobs[j].instance_tail.x & 0xFF000000u) | (slot & 0x00FFFFFFu);
+		instances[instance_word + 13u] = jobs[j].instance_tail.y;
+		instances[instance_word + 14u] = jobs[j].instance_tail.z;
+		instances[instance_word + 15u] = jobs[j].instance_tail.w;
+	}
+#else
 	instances[instance_word + 12u] = (jobs[j].instance_tail.x & 0xFF000000u) | (slot & 0x00FFFFFFu);
 	instances[instance_word + 13u] = jobs[j].instance_tail.y;
 	instances[instance_word + 14u] = jobs[j].instance_tail.z;
 	instances[instance_word + 15u] = jobs[j].instance_tail.w;
+#endif
 
 	// The records: the MultiMesh's, at this instance in its buffer.
 	const uint geometry_src = jobs[j].template_index * params.geometry_words;

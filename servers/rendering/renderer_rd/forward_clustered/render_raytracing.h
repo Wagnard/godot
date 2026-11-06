@@ -200,6 +200,26 @@ struct RT_TlasExpandJob {
 };
 static_assert(sizeof(RT_TlasExpandJob) == 192, "RT_TlasExpandJob must be 192 bytes for std430");
 
+// A job's GPUParticles3D data (raytracing_tlas_expand.glsl PARTICLES variant, ExpandParticles, std430); zero for a
+// MultiMesh's job. rendering/pathtracing/trace_gpu_particles.
+struct RT_TlasExpandParticles {
+	float basis[12]; // The billboard mode's facing basis for the camera, three columns of 4 floats.
+	float prev_basis[12]; // For the previous frame's camera.
+	float fixed_size[4]; // The fixed_size scale at an origin: dot(xyz, origin) + w.
+	float prev_fixed_size[4];
+	uint32_t flags[4]; // [0]: RT_EXPAND_*.
+};
+static_assert(sizeof(RT_TlasExpandParticles) == 144, "RT_TlasExpandParticles must be 144 bytes for std430");
+
+// RT_TlasExpandParticles::flags[0], as raytracing_tlas_expand.glsl EXPAND_*.
+static constexpr uint32_t RT_EXPAND_PARTICLES = 1u; // Dead particles are inactive instances.
+static constexpr uint32_t RT_EXPAND_BILLBOARD = 2u;
+static constexpr uint32_t RT_EXPAND_BILLBOARD_ROTATION = 4u; // billboard_particles: by INSTANCE_CUSTOM.x.
+static constexpr uint32_t RT_EXPAND_BILLBOARD_KEEP_SCALE = 8u;
+static constexpr uint32_t RT_EXPAND_FIXED_SIZE = 16u;
+// A 3D particle's record in the instance buffer (particles_copy.glsl): 3 rows of transform, COLOR, INSTANCE_CUSTOM.
+static constexpr uint32_t RT_PARTICLE_INSTANCE_FLOATS = 20u;
+
 // Light types for raytracing (matches GLSL RT_LIGHT_TYPE_* defines).
 enum RTLightType : uint32_t {
 	RT_LIGHT_TYPE_OMNI = 0,
@@ -922,10 +942,14 @@ class RenderRaytracing {
 		RID version;
 		RID version_shader;
 		RID pipeline;
+		// The PARTICLES variant, for the frames with GPUParticles3D jobs (rendering/pathtracing/trace_gpu_particles).
+		RID particles_version_shader;
+		RID particles_pipeline;
 	} tlas_expand_shader;
 	bool tlas_expand_supported = false;
 	struct TlasExpandJob {
 		RT_TlasExpandJob data;
+		RT_TlasExpandParticles particles = {}; // A GPUParticles3D's job: its flags are not 0.
 		RID blas;
 		RID mm_gpu_buffer;
 		uint32_t count = 0;
@@ -933,6 +957,8 @@ class RenderRaytracing {
 		uint32_t flags = 0;
 		uint8_t mask = 0;
 	};
+	RID tlas_expand_particles_buffer; // RT_TlasExpandParticles, one per job, in the frames with particle jobs.
+	uint32_t tlas_expand_particles_capacity = 0;
 	LocalVector<TlasExpandJob> tlas_expand_jobs;
 	LocalVector<RT_GeometryData> tlas_expand_geometry_templates;
 	LocalVector<RT_MaterialData> tlas_expand_material_templates;

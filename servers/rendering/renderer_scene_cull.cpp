@@ -3049,6 +3049,7 @@ void RendererSceneCull::_scene_cull(CullData &cull_data, InstanceCullResult &cul
 	for (uint64_t i = p_from; i < p_to; i++) {
 		bool mesh_visible = false;
 		bool in_frustum = false;
+		bool particles_requested = false; // Their processing, by the camera's cull.
 
 		InstanceData &idata = cull_data.scenario->instance_data[i];
 		uint32_t visibility_flags = idata.flags & (InstanceData::FLAG_VISIBILITY_DEPENDENCY_HIDDEN_CLOSE_RANGE | InstanceData::FLAG_VISIBILITY_DEPENDENCY_HIDDEN | InstanceData::FLAG_VISIBILITY_DEPENDENCY_FADE_CHILDREN);
@@ -3129,6 +3130,7 @@ void RendererSceneCull::_scene_cull(CullData &cull_data, InstanceCullResult &cul
 						mesh_visible = true;
 					} else if (base_type == RSE::INSTANCE_PARTICLES) {
 						keep = _scene_particles_request_process(cull_data, cull_result, idata.base_rid);
+						particles_requested = true;
 					}
 
 					if (idata.parent_array_index != -1) {
@@ -3423,6 +3425,13 @@ void RendererSceneCull::_scene_cull(CullData &cull_data, InstanceCullResult &cul
 						} else if (base_type == RSE::INSTANCE_MESH || base_type == RSE::INSTANCE_MULTIMESH) {
 							cull_result.rt_geometry_instances.push_back(idata.instance_geometry);
 							mesh_visible = true; // For skinned/deformed meshes..
+						} else if (base_type == RSE::INSTANCE_PARTICLES && cull_data.cull->rt_particles) {
+							// rendering/pathtracing/trace_gpu_particles: a system only the rays see is processed too, as one in view
+							// is, or it would stand still in reflections and shadows (NVIDIA's particles_requested, 49a825dc52
+							// renderer_scene_cull.cpp:3361-3364). Inactive ones draw nothing.
+							if (particles_requested ? !RSG::particles_storage->particles_is_inactive(idata.base_rid) : _scene_particles_request_process(cull_data, cull_result, idata.base_rid)) {
+								cull_result.rt_geometry_instances.push_back(idata.instance_geometry);
+							}
 						}
 					}
 				}
@@ -3564,6 +3573,7 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 		cull.rt_culling_radius = scene_render->environment_get_pathtracing_culling_radius(p_environment);
 		cull.rt_culling_tan_half_angle = Math::tan(Math::deg_to_rad(scene_render->environment_get_pathtracing_culling_angle(p_environment)) * 0.5f);
 	}
+	cull.rt_particles = cull.rt_enabled && GLOBAL_GET_CACHED(bool, "rendering/pathtracing/trace_gpu_particles");
 
 	// A path traced view traces its shadows, its transparent pass's too: only the volumetric fog reads shadow maps then,
 	// those of the lights it scatters (volumetric fog energy), within its length.
