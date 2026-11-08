@@ -301,6 +301,28 @@ String ShaderCompiler::_get_sampler_name(ShaderLanguage::TextureFilter p_filter,
 	return String(name_mapping[p_filter + (p_repeat == ShaderLanguage::REPEAT_ENABLE ? ShaderLanguage::FILTER_DEFAULT : 0)]);
 }
 
+// Whether p_func or a function it calls, directly or not, reads TIME (time_functions, filled while their code is dumped).
+bool ShaderCompiler::_function_reads_time(const SL::ShaderNode *p_node, const StringName &p_func, HashSet<StringName> &r_visited) const {
+	if (r_visited.has(p_func)) {
+		return false;
+	}
+	r_visited.insert(p_func);
+	if (time_functions.has(p_func)) {
+		return true;
+	}
+	for (int i = 0; i < p_node->vfunctions.size(); i++) {
+		if (p_node->vfunctions[i].name == p_func) {
+			for (const StringName &E : p_node->vfunctions[i].uses_function) {
+				if (_function_reads_time(p_node, E, r_visited)) {
+					return true;
+				}
+			}
+			break;
+		}
+	}
+	return false;
+}
+
 void ShaderCompiler::_dump_function_deps(const SL::ShaderNode *p_node, const StringName &p_for_func, const HashMap<StringName, String> &p_func_code, String &r_to_add, HashSet<StringName> &added) {
 	int fidx = -1;
 
@@ -819,6 +841,22 @@ String ShaderCompiler::_dump_node_code(const SL::Node *p_node, int p_level, Gene
 					Stage dep_stage = (p_default_actions.suppress_varying_io && stage == STAGE_VERTEX) ? STAGE_FRAGMENT : stage;
 					_dump_function_deps(pnode, fnode->name, function_code, r_gen_code.stage_globals[dep_stage], added_funcs_per_stage[dep_stage]);
 					r_gen_code.code[fnode->name] = function_code[fnode->name];
+					// TIME read by a function the entry point calls (a helper in a .gdshaderinc) is TIME read by the stage:
+					// the flags above only saw the entry point's own body.
+					if (stage == STAGE_VERTEX || stage == STAGE_FRAGMENT) {
+						HashSet<StringName> visited;
+						visited.insert(fnode->name);
+						for (const StringName &E : pnode->vfunctions[i].uses_function) {
+							if (_function_reads_time(pnode, E, visited)) {
+								if (stage == STAGE_VERTEX) {
+									r_gen_code.uses_vertex_time = true;
+								} else {
+									r_gen_code.uses_fragment_time = true;
+								}
+								break;
+							}
+						}
+					}
 				}
 
 				function = nullptr;
@@ -1022,6 +1060,9 @@ String ShaderCompiler::_dump_node_code(const SL::Node *p_node, int p_level, Gene
 				if (p_actions.entry_point_stages.has(current_func_name) && p_actions.entry_point_stages[current_func_name] == STAGE_FRAGMENT) {
 					r_gen_code.uses_fragment_time = true;
 				}
+				if (!p_actions.entry_point_stages.has(current_func_name)) {
+					time_functions.insert(current_func_name);
+				}
 			}
 
 		} break;
@@ -1141,6 +1182,9 @@ String ShaderCompiler::_dump_node_code(const SL::Node *p_node, int p_level, Gene
 				}
 				if (p_actions.entry_point_stages.has(current_func_name) && p_actions.entry_point_stages[current_func_name] == STAGE_FRAGMENT) {
 					r_gen_code.uses_fragment_time = true;
+				}
+				if (!p_actions.entry_point_stages.has(current_func_name)) {
+					time_functions.insert(current_func_name);
 				}
 			}
 
@@ -1674,6 +1718,7 @@ Error ShaderCompiler::compile(RSE::ShaderMode p_mode, const String &p_code, Iden
 	used_rmode_defines.clear();
 	used_flag_pointers.clear();
 	fragment_varyings.clear();
+	time_functions.clear();
 
 	shader = parser.get_shader();
 	function = nullptr;

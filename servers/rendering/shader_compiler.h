@@ -127,12 +127,15 @@ private:
 	String _get_sampler_name(ShaderLanguage::TextureFilter p_filter, ShaderLanguage::TextureRepeat p_repeat);
 
 	void _dump_function_deps(const ShaderLanguage::ShaderNode *p_node, const StringName &p_for_func, const HashMap<StringName, String> &p_func_code, String &r_to_add, HashSet<StringName> &added);
+	bool _function_reads_time(const ShaderLanguage::ShaderNode *p_node, const StringName &p_func, HashSet<StringName> &r_visited) const;
 	String _dump_node_code(const ShaderLanguage::Node *p_node, int p_level, GeneratedCode &r_gen_code, IdentifierActions &p_actions, const DefaultIdentifierActions &p_default_actions, bool p_assigning, bool p_scope = true);
 
 	const ShaderLanguage::ShaderNode *shader = nullptr;
 	const ShaderLanguage::FunctionNode *function = nullptr;
 	StringName current_func_name;
 	StringName time_name;
+	// The functions other than the entry points that read TIME: an entry point calling one of them uses TIME too.
+	HashSet<StringName> time_functions;
 	HashSet<StringName> texture_functions;
 
 	HashSet<StringName> used_name_defines;
