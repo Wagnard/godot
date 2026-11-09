@@ -801,6 +801,15 @@ if env["nrd_enabled"]:
         )
         print_warning(nrd_outdated_message)
         atexit.register(print_warning, nrd_outdated_message)
+elif env["platform"] in ("windows", "linuxbsd"):
+    # The desktop platforms the path tracer runs on: without NRD, a GPU without DLSS Ray Reconstruction (AMD, Intel) has no
+    # path tracing denoiser. NRD stays optional (its licence keeps it out of this repository), so the build goes on.
+    nrd_missing_message = (
+        f"NVIDIA NRD not found at {nrd_path}: building without the NRD path tracing denoiser "
+        "(PT_DENOISER_NRD_REBLUR does nothing). Run python misc/scripts/install_nrd.py to enable it."
+    )
+    print_warning(nrd_missing_message)
+    atexit.register(print_warning, nrd_missing_message)
 
 platform_string = env["platform"]
 if env.get("simulator"):
