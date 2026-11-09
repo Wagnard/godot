@@ -5,6 +5,7 @@ EnsureSConsVersion(4, 4)
 EnsurePythonVersion(3, 9)
 
 # System
+import atexit
 import glob
 import os
 import pickle
@@ -769,6 +770,37 @@ if env["nrd_enabled"]:
     else:
         env.Append(LIBS=[File(library) for library in nrd_libraries])
     print(f"NVIDIA NRD denoiser: {nrd_path}")
+
+    # The install's stamp (install_nrd.py: GODOT_STAMP): the NRD release and the revision of this engine's NRD programs it
+    # compiled. An older or unstamped install still builds, without what it lacks (NRD_GODOT_SHADERS_* defines in its
+    # generated header); SCons only warns, at the start and again at the end of the build: install_nrd.py is run by hand.
+    NRD_VERSION = "4.18.0"  # install_nrd.py's nrd_version.
+    NRD_GODOT_SHADERS_REVISION = 1  # install_nrd.py's nrd_godot_shaders_revision.
+    nrd_stamp = {}
+    nrd_stamp_path = os.path.join(nrd_path, "GODOT_STAMP")
+    if os.path.isfile(nrd_stamp_path):
+        with open(nrd_stamp_path, encoding="utf-8") as stamp_file:
+            for line in stamp_file:
+                key, _, value = line.strip().partition("=")
+                nrd_stamp[key] = value
+    try:
+        nrd_stamp_revision = int(nrd_stamp.get("godot_shaders_revision", "0"))
+    except ValueError:
+        nrd_stamp_revision = 0
+    nrd_stamp_version = nrd_stamp.get("nrd_version", "")
+    if not nrd_stamp_version and os.path.isfile(os.path.join(nrd_path, "VERSION")):
+        # An install made before the stamp: its release is in VERSION.
+        with open(os.path.join(nrd_path, "VERSION"), encoding="utf-8") as version_file:
+            nrd_stamp_version = version_file.read().strip()
+    nrd_stamp_version = nrd_stamp_version or "unknown"
+    if nrd_stamp_revision < NRD_GODOT_SHADERS_REVISION or nrd_stamp_version != NRD_VERSION:
+        nrd_outdated_message = (
+            f"NRD install at {nrd_path} is outdated (NRD {nrd_stamp_version}, revision {nrd_stamp_revision}; "
+            f"expected NRD {NRD_VERSION}, revision {NRD_GODOT_SHADERS_REVISION}): run python misc/scripts/install_nrd.py. "
+            "Building without what it lacks (SIGMA's sun shadow denoising)."
+        )
+        print_warning(nrd_outdated_message)
+        atexit.register(print_warning, nrd_outdated_message)
 
 platform_string = env["platform"]
 if env.get("simulator"):

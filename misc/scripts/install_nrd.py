@@ -31,6 +31,10 @@ from misc.utility.color import Ansi, color_print
 
 # Check for latest version: https://github.com/NVIDIA-RTX/NRD/releases
 nrd_version = "4.18.0"
+# The revision of this engine's NRD programs this script compiles (shaders/effects/nrd_*.hlsl), written in the install's
+# GODOT_STAMP: bump it whenever they change, together with NRD_GODOT_SHADERS_REVISION in SConstruct, which warns about an
+# older install. 1: SIGMA's sun shadow front and back end.
+nrd_godot_shaders_revision = 1
 
 parser = argparse.ArgumentParser(description="Build NVIDIA NRD for the path tracer's PT_DENOISER_NRD_REBLUR.")
 parser.add_argument("--deps_folder", default="", help="Where to install (default: as SCons' `nrd_path` default).")
@@ -194,5 +198,7 @@ with open(os.path.join(nrd_folder, "include", "nrd_godot_shaders.gen.h"), "w", e
         f.write("};\n\n")
 with open(os.path.join(nrd_folder, "VERSION"), "w", encoding="utf-8") as f:
     f.write(nrd_version + "\n")
+with open(os.path.join(nrd_folder, "GODOT_STAMP"), "w", encoding="utf-8") as f:
+    f.write(f"nrd_version={nrd_version}\ngodot_shaders_revision={nrd_godot_shaders_revision}\n")
 
 color_print(f"{Ansi.GREEN}NRD {nrd_version} installed in {nrd_folder}.")
