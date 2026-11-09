@@ -175,6 +175,10 @@ public:
 	static constexpr uint32_t RT_PARAM_FLAG_DECALS_SINGULAR_ONLY = 1u << 2;
 	// The TLAS holds RT_INSTANCE_MASK_SHADOW_GROUP casters: read in the RT_FLAG_SHADOW_GROUPS variant only.
 	static constexpr uint32_t RT_PARAM_FLAG_SHADOW_GROUPS = 1u << 3;
+	// Bits 4-7: the light buffer index + 1 of the sun whose shadow NRD's SIGMA denoises (0: none), read in the
+	// RT_FLAG_NRD_ENABLED variant only (RenderRaytracing::update_uniform_set()).
+	static constexpr uint32_t RT_PARAM_FLAG_NRD_SUN_SHIFT = 4;
+	static constexpr uint32_t RT_PARAM_FLAG_NRD_SUN_MASK = 0xFu;
 	// Bits 8-14: rendering/pathtracing/max_transparency_layers (0-64), read in the RT_FLAG_TRANSPARENCY_PEELING variant only.
 	static constexpr uint32_t RT_PARAM_FLAG_PEEL_LAYERS_SHIFT = 8;
 	static constexpr uint32_t RT_PARAM_FLAG_PEEL_LAYERS_MASK = 0x7Fu;

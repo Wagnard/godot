@@ -596,6 +596,9 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 		// With NRD the raygen left each lobe's light of the primary surfaces apart: denoised by NRD's ReBLUR (where the engine
 		// was built with it), then back onto the output before the fog, which lies in front of them.
 		if ((rt_flags & SceneShaderRaytracing::RT_FLAG_NRD_ENABLED) && raytracing->nrd_has_buffers(rb.ptr())) {
+			// Whether SIGMA denoised the sun's shadow, which the composite then adds; the raygen picks a sun only when SIGMA
+			// is available (NRDDenoiser::is_sigma_available()).
+			bool nrd_sun = false;
 			if (RendererRD::NRDDenoiser::is_available()) {
 				if (!nrd_denoiser) {
 					nrd_denoiser = memnew(RendererRD::NRDDenoiser);
@@ -614,16 +617,20 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 				// In pixels, as the temporal upscalers take it (_render_3d_upscaling()).
 				params.jitter = p_render_data->scene_data->taa_jitter * Vector2(params.size) * 0.5f;
 				params.prev_jitter = p_render_data->scene_data->prev_taa_jitter * Vector2(params.size) * 0.5f;
+				// The sun the raygen lit apart (RenderRaytracing::update_uniform_set()), whose shadow SIGMA denoises.
+				if (raytracing->nrd_get_sigma_sun(p_render_data, params.sun_direction, params.sun_tan_angular_radius)) {
+					params.sun = raytracing->nrd_get_texture(rb.ptr(), RB_TEX_NRD_SUN);
+				}
 
 				RENDER_TIMESTAMP("NRD");
 				RD::get_singleton()->draw_command_begin_label("NRD");
-				nrd_denoiser->denoise(rb.ptr(), params);
+				nrd_sun = nrd_denoiser->denoise(rb.ptr(), params);
 				RD::get_singleton()->draw_command_end_label();
 			}
 
 			RENDER_TIMESTAMP("NRD Composite");
 			RD::get_singleton()->draw_command_begin_label("NRD Composite");
-			raytracing->nrd_composite(rb.ptr(), raytracing->nrd_get_texture(rb.ptr(), RB_TEX_NRD_DIFFUSE), raytracing->nrd_get_texture(rb.ptr(), RB_TEX_NRD_SPECULAR));
+			raytracing->nrd_composite(rb.ptr(), raytracing->nrd_get_texture(rb.ptr(), RB_TEX_NRD_DIFFUSE), raytracing->nrd_get_texture(rb.ptr(), RB_TEX_NRD_SPECULAR), nrd_sun);
 			RD::get_singleton()->draw_command_end_label();
 		}
 

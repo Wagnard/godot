@@ -365,9 +365,22 @@ bool shade_and_bounce(inout PathState ps, HitRecord r, vec3 p_ray_origin, vec3 p
 		vec3 hit_pos_back = offset_ray_origin(hit_pos, -r.geometry_normal);
 		bool is_indirect = (diffuse_bounces > 0u);
 #ifdef NRD_ENABLED
+		// SIGMA's sun at the primary hit: lit apart, its shadow denoised by SIGMA (lights_evaluate_sigma_sun()), and left out
+		// of the light choice below. What its shadow cannot take joins the lobes' direct light.
+		const uint nrd_sun = nrd_primary ? nrd_sigma_sun_index() : NRD_NO_LIGHT;
+		if (nrd_sun < rt_light_count && (rt_lights[nrd_sun].cull_mask & geometries[r.geometry_idx].layer_mask) != 0u) {
+			vec3 sun_specular;
+			vec3 sun_shadowable;
+			const vec3 sun_light = lights_evaluate_sigma_sun(rt_lights[nrd_sun], hit_pos_offset, hit_pos_back, r.geometry_normal, N, V, brdf_mat, r.backlight, (r.flags & HIT_FLAG_SPECULAR_DISABLED) != 0u, ps.rng_state RT_SHADOW_RECEIVER_OF(r.geometry_idx), sun_specular, sun_shadowable, ps.nrd_sun_occluder_t);
+			const vec3 scale = ps.throughput * mix(1.0, r.ao, r.ao_light_affect);
+			ps.radiance += sun_light * scale;
+			ps.nrd_diffuse_direct += (sun_light - sun_specular) * scale;
+			ps.nrd_specular_direct += sun_specular * scale;
+			ps.nrd_sun_light += sun_shadowable * scale;
+		}
 		vec3 direct_specular;
 		vec3 direct_light = lights_evaluate_direct_lighting(
-				hit_pos_offset, hit_pos_back, r.geometry_normal, N, V, brdf_mat, r.backlight, (r.flags & HIT_FLAG_SPECULAR_DISABLED) != 0u, ps.rng_state, is_indirect, rt_light_count, geometries[r.geometry_idx].layer_mask RT_SHADOW_RECEIVER_OF(r.geometry_idx), direct_specular);
+				hit_pos_offset, hit_pos_back, r.geometry_normal, N, V, brdf_mat, r.backlight, (r.flags & HIT_FLAG_SPECULAR_DISABLED) != 0u, ps.rng_state, is_indirect, rt_light_count, geometries[r.geometry_idx].layer_mask RT_SHADOW_RECEIVER_OF(r.geometry_idx), nrd_sun, direct_specular);
 #else
 		vec3 direct_light = lights_evaluate_direct_lighting(
 				hit_pos_offset, hit_pos_back, r.geometry_normal, N, V, brdf_mat, r.backlight, (r.flags & HIT_FLAG_SPECULAR_DISABLED) != 0u, ps.rng_state, is_indirect, rt_light_count, geometries[r.geometry_idx].layer_mask RT_SHADOW_RECEIVER_OF(r.geometry_idx));

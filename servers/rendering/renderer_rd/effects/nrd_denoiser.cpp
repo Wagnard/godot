@@ -73,9 +73,28 @@ Vector<uint8_t> RendererRD::NRDDenoiser::make_cache_file(const Vector<uint8_t> &
 
 namespace RendererRD {
 
-// ReBLUR's diffuse and specular denoiser, the one NRD instance's only one.
+// ReBLUR's diffuse and specular denoiser, and SIGMA's shadow denoiser for the sun when a view has one (NRD's README: "SIGMA -
+// per-light shadow-only denoiser", for "Shadows from an infinite light source (sun, moon)").
 static constexpr nrd::Identifier NRD_IDENTIFIER = 1;
 static constexpr nrd::Denoiser NRD_DENOISER = nrd::Denoiser::REBLUR_DIFFUSE_SPECULAR;
+static constexpr nrd::Identifier NRD_SIGMA_IDENTIFIER = 2;
+static constexpr nrd::Denoiser NRD_SIGMA_DENOISER = nrd::Denoiser::SIGMA_SHADOW;
+
+// An install made before SIGMA's front and back end (install_nrd.py) has no SIGMA.
+#ifdef NRD_GODOT_SHADERS_SIGMA
+static constexpr bool NRD_SIGMA_BUILT = true;
+#else
+static constexpr bool NRD_SIGMA_BUILT = false;
+#endif
+
+// The instance's denoisers: ReBLUR, and SIGMA with p_sigma.
+static nrd::Result _create_instance(bool p_sigma, nrd::Instance *&r_instance) {
+	const nrd::DenoiserDesc denoiser_descs[2] = { { NRD_IDENTIFIER, NRD_DENOISER }, { NRD_SIGMA_IDENTIFIER, NRD_SIGMA_DENOISER } };
+	nrd::InstanceCreationDesc creation_desc = {};
+	creation_desc.denoisers = denoiser_descs;
+	creation_desc.denoisersNum = p_sigma ? 2 : 1;
+	return nrd::CreateInstance(creation_desc, r_instance);
+}
 
 // What a view's denoising keeps from frame to frame: NRD's instance, its history (the permanent pool), its inputs in its
 // encodings and its outputs. Freed when the view's buffers are reconfigured; denoise() makes it again.
@@ -98,6 +117,11 @@ public:
 	RID in_normal_roughness;
 	RID out_diffuse;
 	RID out_specular;
+	// With SIGMA (the instance made with it): IN_PENUMBRA (nrd_sigma_frontend.hlsl writes it) and OUT_SHADOW_TRANSLUCENCY
+	// (nrd_sigma_backend.hlsl reads it).
+	bool sigma = false;
+	RID in_penumbra;
+	RID out_shadow;
 
 	virtual void configure(RenderSceneBuffersRD *p_render_buffers) override {
 		free_data();
@@ -111,7 +135,7 @@ public:
 			}
 			rids->clear();
 		}
-		for (RID *rid : { &in_diffuse, &in_specular, &in_normal_roughness, &out_diffuse, &out_specular }) {
+		for (RID *rid : { &in_diffuse, &in_specular, &in_normal_roughness, &out_diffuse, &out_specular, &in_penumbra, &out_shadow }) {
 			if (rid->is_valid()) {
 				rd->free_rid(*rid);
 				*rid = RID();
@@ -123,6 +147,7 @@ public:
 		}
 		size = Size2i();
 		frame_index = 0;
+		sigma = false;
 	}
 
 	virtual ~NRDContext() override {
@@ -153,6 +178,8 @@ struct NRDDenoiser::State {
 	HashMap<String, NRDPipeline> pipelines;
 	NRDPipeline frontend;
 	NRDPipeline backend;
+	NRDPipeline sigma_frontend; // Without SIGMA (NRD_SIGMA_BUILT), none.
+	NRDPipeline sigma_backend;
 	RID samplers[2]; // nrd::Sampler: NEAREST_CLAMP, LINEAR_CLAMP.
 	NRDBinaryCache cache;
 };
@@ -278,6 +305,10 @@ static void _store_matrix(float *r_dst, const Projection &p_matrix) {
 // The programs' names, in their binaries and their cache keys.
 static const char *NRD_FRONTEND_NAME = "NRD front end";
 static const char *NRD_BACKEND_NAME = "NRD back end";
+#ifdef NRD_GODOT_SHADERS_SIGMA
+static const char *NRD_SIGMA_FRONTEND_NAME = "NRD SIGMA front end";
+static const char *NRD_SIGMA_BACKEND_NAME = "NRD SIGMA back end";
+#endif
 
 static String _pass_name(const String &p_shader_identifier) {
 	return "NRD " + p_shader_identifier.get_slicec('|', 0);
@@ -390,6 +421,10 @@ bool NRDDenoiser::is_available() {
 	return true;
 }
 
+bool NRDDenoiser::is_sigma_available() {
+	return NRD_SIGMA_BUILT;
+}
+
 void NRDDenoiser::get_bake_programs(LocalVector<BakeProgram> &r_programs) {
 	auto add = [&r_programs](const String &p_name, const uint8_t *p_spirv, uint64_t p_size) {
 		BakeProgram program;
@@ -401,14 +436,15 @@ void NRDDenoiser::get_bake_programs(LocalVector<BakeProgram> &r_programs) {
 	};
 	add(NRD_FRONTEND_NAME, nrd_frontend_spirv, sizeof(nrd_frontend_spirv));
 	add(NRD_BACKEND_NAME, nrd_backend_spirv, sizeof(nrd_backend_spirv));
+#ifdef NRD_GODOT_SHADERS_SIGMA
+	add(NRD_SIGMA_FRONTEND_NAME, nrd_sigma_frontend_spirv, sizeof(nrd_sigma_frontend_spirv));
+	add(NRD_SIGMA_BACKEND_NAME, nrd_sigma_backend_spirv, sizeof(nrd_sigma_backend_spirv));
+#endif
 
-	// Every pass denoise() dispatches: an instance's pipelines, as it makes them (no GPU work).
-	const nrd::DenoiserDesc denoiser_desc = { NRD_IDENTIFIER, NRD_DENOISER };
-	nrd::InstanceCreationDesc creation_desc = {};
-	creation_desc.denoisers = &denoiser_desc;
-	creation_desc.denoisersNum = 1;
+	// Every pass denoise() dispatches: an instance's pipelines, as it makes them (no GPU work). With SIGMA, ReBLUR's and
+	// SIGMA's (an instance without SIGMA has the same ReBLUR pipelines, by shader identifier).
 	nrd::Instance *instance = nullptr;
-	ERR_FAIL_COND_MSG(nrd::CreateInstance(creation_desc, instance) != nrd::Result::SUCCESS, "NRD: could not create its instance.");
+	ERR_FAIL_COND_MSG(_create_instance(NRD_SIGMA_BUILT, instance) != nrd::Result::SUCCESS, "NRD: could not create its instance.");
 	const nrd::InstanceDesc &instance_desc = *nrd::GetInstanceDesc(*instance);
 	for (uint32_t i = 0; i < instance_desc.pipelinesNum; i++) {
 		const nrd::PipelineDesc &pipeline_desc = instance_desc.pipelines[i];
@@ -430,6 +466,12 @@ NRDDenoiser::NRDDenoiser() {
 	state->cache.init();
 	state->frontend = _create_pipeline(state->cache, nrd_frontend_spirv, sizeof(nrd_frontend_spirv), NRD_FRONTEND_NAME);
 	state->backend = _create_pipeline(state->cache, nrd_backend_spirv, sizeof(nrd_backend_spirv), NRD_BACKEND_NAME);
+#ifdef NRD_GODOT_SHADERS_SIGMA
+	state->sigma_frontend = _create_pipeline(state->cache, nrd_sigma_frontend_spirv, sizeof(nrd_sigma_frontend_spirv), NRD_SIGMA_FRONTEND_NAME);
+	state->sigma_backend = _create_pipeline(state->cache, nrd_sigma_backend_spirv, sizeof(nrd_sigma_backend_spirv), NRD_SIGMA_BACKEND_NAME);
+#else
+	WARN_PRINT("NRD: this engine was built with an NRD install made before SIGMA's programs: the sun's shadow is denoised by ReBLUR (softer). Rerun misc/scripts/install_nrd.py and rebuild the engine.");
+#endif
 }
 
 NRDDenoiser::~NRDDenoiser() {
@@ -437,7 +479,7 @@ NRDDenoiser::~NRDDenoiser() {
 	for (const KeyValue<String, NRDPipeline> &E : state->pipelines) {
 		rd->free_rid(E.value.shader); // Frees its pipeline too.
 	}
-	for (const RID &shader : { state->frontend.shader, state->backend.shader }) {
+	for (const RID &shader : { state->frontend.shader, state->backend.shader, state->sigma_frontend.shader, state->sigma_backend.shader }) {
 		if (shader.is_valid()) {
 			rd->free_rid(shader);
 		}
@@ -448,9 +490,9 @@ NRDDenoiser::~NRDDenoiser() {
 	memdelete(state);
 }
 
-void NRDDenoiser::denoise(RenderSceneBuffersRD *p_render_buffers, const Parameters &p_params) {
-	ERR_FAIL_NULL(p_render_buffers);
-	ERR_FAIL_COND(state->frontend.pipeline.is_null() || state->backend.pipeline.is_null());
+bool NRDDenoiser::denoise(RenderSceneBuffersRD *p_render_buffers, const Parameters &p_params) {
+	ERR_FAIL_NULL_V(p_render_buffers, false);
+	ERR_FAIL_COND_V(state->frontend.pipeline.is_null() || state->backend.pipeline.is_null(), false);
 	RD *rd = RD::get_singleton();
 	UniformSetCacheRD *uniform_set_cache = UniformSetCacheRD::get_singleton();
 
@@ -462,14 +504,14 @@ void NRDDenoiser::denoise(RenderSceneBuffersRD *p_render_buffers, const Paramete
 		p_render_buffers->set_custom_data(RB_NRD_CONTEXT, context);
 	}
 
-	if (!context->instance || context->size != p_params.size) {
+	// SIGMA runs when the view has a sun this frame. Its pools are only made then (~56 MB at 1440p, NRD's README): a view whose
+	// sun comes or goes makes its instance again, restarting both denoisers' history.
+	const bool sigma = NRD_SIGMA_BUILT && p_params.sun.is_valid() && state->sigma_frontend.pipeline.is_valid() && state->sigma_backend.pipeline.is_valid();
+	if (!context->instance || context->size != p_params.size || context->sigma != sigma) {
 		context->free_data();
-		const nrd::DenoiserDesc denoiser_desc = { NRD_IDENTIFIER, NRD_DENOISER };
-		nrd::InstanceCreationDesc creation_desc = {};
-		creation_desc.denoisers = &denoiser_desc;
-		creation_desc.denoisersNum = 1;
-		ERR_FAIL_COND_MSG(nrd::CreateInstance(creation_desc, context->instance) != nrd::Result::SUCCESS, "NRD: could not create its instance.");
+		ERR_FAIL_COND_V_MSG(_create_instance(sigma, context->instance) != nrd::Result::SUCCESS, false, "NRD: could not create its instance.");
 		context->size = p_params.size;
+		context->sigma = sigma;
 
 		const nrd::InstanceDesc &instance_desc = *nrd::GetInstanceDesc(*context->instance);
 		for (uint32_t i = 0; i < instance_desc.permanentPoolSize; i++) {
@@ -491,6 +533,11 @@ void NRDDenoiser::denoise(RenderSceneBuffersRD *p_render_buffers, const Paramete
 		context->in_normal_roughness = _create_texture(normal_format, p_params.size, "NRD IN_NORMAL_ROUGHNESS");
 		context->out_diffuse = _create_texture(RD::DATA_FORMAT_R16G16B16A16_SFLOAT, p_params.size, "NRD OUT_DIFF_RADIANCE_HITDIST");
 		context->out_specular = _create_texture(RD::DATA_FORMAT_R16G16B16A16_SFLOAT, p_params.size, "NRD OUT_SPEC_RADIANCE_HITDIST");
+		if (sigma) {
+			// NRDDescs.h: IN_PENUMBRA "R16f+", OUT_SHADOW_TRANSLUCENCY "R8+" (R16F here).
+			context->in_penumbra = _create_texture(RD::DATA_FORMAT_R16_SFLOAT, p_params.size, "NRD IN_PENUMBRA");
+			context->out_shadow = _create_texture(RD::DATA_FORMAT_R16_SFLOAT, p_params.size, "NRD OUT_SHADOW_TRANSLUCENCY");
+		}
 	}
 
 	const nrd::InstanceDesc &instance_desc = *nrd::GetInstanceDesc(*context->instance);
@@ -521,13 +568,24 @@ void NRDDenoiser::denoise(RenderSceneBuffersRD *p_render_buffers, const Paramete
 	common.resourceSize[1] = common.resourceSizePrev[1] = common.rectSize[1] = common.rectSizePrev[1] = uint16_t(p_params.size.height);
 	common.frameIndex = context->frame_index;
 	common.accumulationMode = context->frame_index == 0 ? nrd::AccumulationMode::CLEAR_AND_RESTART : nrd::AccumulationMode::CONTINUE;
-	ERR_FAIL_COND(nrd::SetCommonSettings(*context->instance, common) != nrd::Result::SUCCESS);
+	ERR_FAIL_COND_V(nrd::SetCommonSettings(*context->instance, common) != nrd::Result::SUCCESS, false);
 
 	// The raygen picks the primary hit's lobe with a probability clamped to [1/4, 3/4] against Bayer dithering, as
 	// AREA_3X3 asks (raytracing_inc.glsl, nrd_lobe_threshold()); the rest is NRD's defaults.
 	nrd::ReblurSettings settings;
 	settings.hitDistanceReconstructionMode = nrd::HitDistanceReconstructionMode::AREA_3X3;
-	ERR_FAIL_COND(nrd::SetDenoiserSettings(*context->instance, NRD_IDENTIFIER, &settings) != nrd::Result::SUCCESS);
+	ERR_FAIL_COND_V(nrd::SetDenoiserSettings(*context->instance, NRD_IDENTIFIER, &settings) != nrd::Result::SUCCESS, false);
+
+	// SIGMA's settings: its defaults, and the direction to the sun ("needed only for directional light sources"). The world's
+	// rotation is the camera's own (the matrices above only move its origin).
+	if (sigma) {
+		nrd::SigmaSettings sigma_settings;
+		const Vector3 to_sun = p_params.sun_direction.normalized();
+		sigma_settings.lightDirection[0] = to_sun.x;
+		sigma_settings.lightDirection[1] = to_sun.y;
+		sigma_settings.lightDirection[2] = to_sun.z;
+		ERR_FAIL_COND_V(nrd::SetDenoiserSettings(*context->instance, NRD_SIGMA_IDENTIFIER, &sigma_settings) != nrd::Result::SUCCESS, false);
+	}
 
 	const uint32_t groups_x = (p_params.size.width + 7) / 8;
 	const uint32_t groups_y = (p_params.size.height + 7) / 8;
@@ -563,11 +621,35 @@ void NRDDenoiser::denoise(RenderSceneBuffersRD *p_render_buffers, const Paramete
 		rd->compute_list_end();
 	}
 
+	// SIGMA's front end: the sun's distance to the occluder into its penumbra.
+	if (sigma) {
+		struct {
+			uint32_t size[2];
+			float tan_angular_radius;
+			uint32_t pad;
+		} push_constant = {};
+		push_constant.size[0] = p_params.size.width;
+		push_constant.size[1] = p_params.size.height;
+		push_constant.tan_angular_radius = p_params.sun_tan_angular_radius;
+
+		RD::ComputeListID compute_list = rd->compute_list_begin();
+		rd->compute_list_bind_compute_pipeline(compute_list, state->sigma_frontend.pipeline);
+		rd->compute_list_bind_uniform_set(compute_list,
+				uniform_set_cache->get_cache(state->sigma_frontend.shader, 0,
+						RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 0, p_params.sun),
+						RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 1, context->in_penumbra)),
+				0);
+		rd->compute_list_set_push_constant(compute_list, &push_constant, sizeof(push_constant));
+		rd->compute_list_dispatch(compute_list, groups_x, groups_y, 1);
+		rd->compute_list_end();
+	}
+
 	// NRD's dispatches. Each in a compute list of its own: RenderingDevice's graph orders them and their barriers by what
 	// each reads and writes.
+	const nrd::Identifier identifiers[2] = { NRD_IDENTIFIER, NRD_SIGMA_IDENTIFIER };
 	const nrd::DispatchDesc *dispatches = nullptr;
 	uint32_t dispatch_count = 0;
-	ERR_FAIL_COND(nrd::GetComputeDispatches(*context->instance, &NRD_IDENTIFIER, 1, dispatches, dispatch_count) != nrd::Result::SUCCESS);
+	ERR_FAIL_COND_V(nrd::GetComputeDispatches(*context->instance, identifiers, sigma ? 2 : 1, dispatches, dispatch_count) != nrd::Result::SUCCESS, false);
 
 	uint32_t constant_buffer_index = 0;
 	RID constant_buffer;
@@ -580,7 +662,7 @@ void NRDDenoiser::denoise(RenderSceneBuffersRD *p_render_buffers, const Paramete
 		if (!pipeline) {
 			pipeline = &state->pipelines.insert(identifier, _create_pipeline(state->cache, (const uint8_t *)pipeline_desc.computeShaderSPIRV.bytecode, pipeline_desc.computeShaderSPIRV.size, _pass_name(identifier)))->value;
 		}
-		ERR_FAIL_COND(pipeline->pipeline.is_null());
+		ERR_FAIL_COND_V(pipeline->pipeline.is_null(), false);
 
 		// Set resourcesSpaceIndex: the textures, then the storage images, each range from the base register, at the
 		// SPIR-V binding offsets of their kind (LibraryDesc::spirvBindingOffsets).
@@ -615,6 +697,12 @@ void NRDDenoiser::denoise(RenderSceneBuffersRD *p_render_buffers, const Paramete
 					case nrd::ResourceType::OUT_SPEC_RADIANCE_HITDIST:
 						texture = context->out_specular;
 						break;
+					case nrd::ResourceType::IN_PENUMBRA:
+						texture = context->in_penumbra;
+						break;
+					case nrd::ResourceType::OUT_SHADOW_TRANSLUCENCY:
+						texture = context->out_shadow;
+						break;
 					case nrd::ResourceType::TRANSIENT_POOL:
 						texture = context->transient_pool[resource.indexInPool];
 						break;
@@ -622,8 +710,9 @@ void NRDDenoiser::denoise(RenderSceneBuffersRD *p_render_buffers, const Paramete
 						texture = context->permanent_pool[resource.indexInPool];
 						break;
 					default:
-						ERR_FAIL_MSG(vformat("NRD: unexpected resource %s.", nrd::GetResourceTypeString(resource.type)));
+						ERR_FAIL_V_MSG(false, vformat("NRD: unexpected resource %s.", nrd::GetResourceTypeString(resource.type)));
 				}
+				ERR_FAIL_COND_V_MSG(texture.is_null(), false, vformat("NRD: no texture for %s.", nrd::GetResourceTypeString(resource.type)));
 				resources.push_back(RD::Uniform(storage ? RD::UNIFORM_TYPE_IMAGE : RD::UNIFORM_TYPE_TEXTURE, binding_offset + instance_desc.resourcesBaseRegisterIndex + k, texture));
 			}
 		}
@@ -678,7 +767,29 @@ void NRDDenoiser::denoise(RenderSceneBuffersRD *p_render_buffers, const Paramete
 		rd->compute_list_end();
 	}
 
+	// SIGMA's back end: the denoised shadow into the sun's texture, whose light the composite multiplies by it.
+	if (sigma) {
+		struct {
+			uint32_t size[2];
+			uint32_t pad[2];
+		} push_constant = {};
+		push_constant.size[0] = p_params.size.width;
+		push_constant.size[1] = p_params.size.height;
+
+		RD::ComputeListID compute_list = rd->compute_list_begin();
+		rd->compute_list_bind_compute_pipeline(compute_list, state->sigma_backend.pipeline);
+		rd->compute_list_bind_uniform_set(compute_list,
+				uniform_set_cache->get_cache(state->sigma_backend.shader, 0,
+						RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 0, context->out_shadow),
+						RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 1, p_params.sun)),
+				0);
+		rd->compute_list_set_push_constant(compute_list, &push_constant, sizeof(push_constant));
+		rd->compute_list_dispatch(compute_list, groups_x, groups_y, 1);
+		rd->compute_list_end();
+	}
+
 	context->frame_index++;
+	return sigma;
 }
 
 } // namespace RendererRD
@@ -693,9 +804,15 @@ bool NRDDenoiser::is_available() {
 	return false;
 }
 
+bool NRDDenoiser::is_sigma_available() {
+	return false;
+}
+
 void NRDDenoiser::get_bake_programs(LocalVector<BakeProgram> &r_programs) {}
 
-void NRDDenoiser::denoise(RenderSceneBuffersRD *p_render_buffers, const Parameters &p_params) {}
+bool NRDDenoiser::denoise(RenderSceneBuffersRD *p_render_buffers, const Parameters &p_params) {
+	return false;
+}
 
 NRDDenoiser::NRDDenoiser() {}
 

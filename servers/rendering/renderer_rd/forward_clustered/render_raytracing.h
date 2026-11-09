@@ -80,6 +80,7 @@
 #define RB_TEX_NRD_SPECULAR_ALBEDO SNAME("specular_albedo")
 #define RB_TEX_NRD_NORMAL_ROUGHNESS SNAME("normal_roughness")
 #define RB_TEX_NRD_VIEW_Z SNAME("view_z")
+#define RB_TEX_NRD_SUN SNAME("sun")
 
 class RenderDataRD;
 class RenderSceneBuffersRD;
@@ -816,6 +817,11 @@ struct RTViewportState {
 	uint32_t tlas_instance_buffer_capacity = 0;
 
 	RID light_buffer;
+	// With NRD, the light buffer index of the sun whose shadow SIGMA denoises (update_uniform_set()), -1: none; the direction
+	// to it and the tangent of its angular radius.
+	int32_t nrd_sigma_light = -1;
+	Vector3 nrd_sigma_light_direction;
+	float nrd_sigma_tan_angular_radius = 0.0f;
 	// The lights each cell can receive light from (build_light_grid()), uploaded when it changes.
 	RID light_grid_buffer;
 	uint32_t light_grid_buffer_capacity = 0;
@@ -1124,7 +1130,8 @@ class RenderRaytracing {
 	struct NRDCompositeShader {
 		struct PushConstant {
 			int32_t size[2];
-			uint32_t pad[2];
+			uint32_t sun; // 1: add the sun's light times SIGMA's shadow (binding 6).
+			uint32_t pad;
 		};
 		RaytracingNrdCompositeShaderRD shader;
 		RID version;
@@ -1442,9 +1449,12 @@ public:
 	bool nrd_has_buffers(RenderSceneBuffersRD *p_render_buffers) const;
 	// One of the RB_TEX_NRD_* textures.
 	RID nrd_get_texture(RenderSceneBuffersRD *p_render_buffers, const StringName &p_name) const;
+	// The sun SIGMA denoises this frame in the view, if any: the direction to it, the tangent of its angular radius.
+	bool nrd_get_sigma_sun(const RenderDataRD *p_render_data, Vector3 &r_direction, float &r_tan_angular_radius) const;
 	// Multiplies the denoised light of each lobe (or, before a denoiser runs, the raygen's own) back by its albedo onto the
-	// path tracer's output, which holds the light that is not denoised (raytracing_nrd_composite.glsl).
-	void nrd_composite(RenderSceneBuffersRD *p_render_buffers, RID p_diffuse, RID p_specular);
+	// path tracer's output, which holds the light that is not denoised (raytracing_nrd_composite.glsl). p_sun: SIGMA ran, the
+	// sun's light times its denoised shadow is added too (RB_TEX_NRD_SUN).
+	void nrd_composite(RenderSceneBuffersRD *p_render_buffers, RID p_diffuse, RID p_specular, bool p_sun);
 
 	void register_raytracing_buffer_dependencies(RD::RaytracingListID p_list);
 	// The buffers written per frame that the shaders read through the addresses in RT_GeometryData and RT_MaterialData.

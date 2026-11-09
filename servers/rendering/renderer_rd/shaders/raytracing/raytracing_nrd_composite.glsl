@@ -20,10 +20,13 @@ layout(set = 0, binding = 2) uniform texture2D diffuse_albedo_texture;
 layout(set = 0, binding = 3) uniform texture2D specular_albedo_texture;
 layout(r32f, set = 0, binding = 4) uniform restrict readonly image2D depth_image;
 layout(rgba16f, set = 0, binding = 5) uniform restrict image2D output_image;
+// The sun whose shadow NRD's SIGMA denoised: its light without its shadow (rgb), SIGMA's shadow unpacked by its back end (a).
+layout(set = 0, binding = 6) uniform texture2D sun_texture;
 
 layout(push_constant, std430) uniform Params {
 	ivec2 size;
-	uint pad[2];
+	uint sun; // 1: SIGMA ran this frame, the sun's light times its shadow is added.
+	uint pad;
 }
 params;
 
@@ -40,5 +43,9 @@ void main() {
 	const vec3 specular = texelFetch(specular_texture, pixel, 0).rgb * max(texelFetch(specular_albedo_texture, pixel, 0).rgb, vec3(NRD_ALBEDO_MIN));
 	vec4 color = imageLoad(output_image, pixel);
 	color.rgb += diffuse + specular;
+	if (params.sun != 0u) {
+		const vec4 sun = texelFetch(sun_texture, pixel, 0);
+		color.rgb += sun.rgb * sun.a;
+	}
 	imageStore(output_image, pixel, color);
 }

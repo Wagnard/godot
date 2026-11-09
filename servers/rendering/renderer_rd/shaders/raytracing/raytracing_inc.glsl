@@ -31,6 +31,9 @@
 #define RT_PARAM_FLAG_RUSSIAN_ROULETTE 2u // Bit 1: rendering/pathtracing/russian_roulette
 #define RT_PARAM_FLAG_DECALS_SINGULAR_ONLY 4u // Bit 2: rendering/pathtracing/decals Singular Only (RT_DECAL_MODE variant)
 #define RT_PARAM_FLAG_SHADOW_GROUPS 8u // Bit 3: the TLAS holds RT_MASK_SHADOW_GROUP casters (RT_SHADOW_GROUPS variant)
+// Bits 4-7: the light index + 1 of the sun whose shadow NRD's SIGMA denoises, 0: none (NRD_ENABLED variant)
+#define RT_PARAM_FLAG_NRD_SUN_SHIFT 4u
+#define RT_PARAM_FLAG_NRD_SUN_MASK 0xFu
 // Bits 8-14: rendering/pathtracing/max_transparency_layers, the layers a camera ray peels (RT_TRANSPARENCY_PEELING variant)
 #define RT_PARAM_FLAG_PEEL_LAYERS_SHIFT 8u
 #define RT_PARAM_FLAG_PEEL_LAYERS_MASK 0x7Fu
@@ -264,9 +267,14 @@ struct PathState {
 	// A camera path's light split for NRD (shade_and_bounce()): what it gathered up to its primary hit's own emission (not
 	// denoised), the direct light the hit's diffuse and specular lobes reflect, the hit distance of the ray its bounce
 	// traced, and NRD_PATH_* with the lobe that bounce took. The rest of the path's light is that lobe's indirect light.
+	// nrd_sun_light: SIGMA's sun's light at the primary hit that its shadow can take, without that shadow
+	// (raytracing_nrd_composite.glsl multiplies it by SIGMA's), and nrd_sun_occluder_t the distance to the occluder of its
+	// ray (lights_evaluate_sigma_sun()).
 	vec3 nrd_emission;
 	vec3 nrd_diffuse_direct;
 	vec3 nrd_specular_direct;
+	vec3 nrd_sun_light;
+	float nrd_sun_occluder_t;
 	float nrd_hit_t;
 	uint nrd_state;
 #endif
@@ -287,11 +295,17 @@ struct PathState {
 // The specular part of the direct light, which the split needs: a parameter of lights_evaluate_direct_lighting(),
 // lights_evaluate_light() and rt_environment_nee() in this variant only, so that the others' code is unchanged.
 #define NRD_SPECULAR_PARAM , out vec3 r_specular
+// lights_evaluate_direct_lighting() also leaves out p_skip_light (SIGMA's sun at a primary hit, lit apart; NRD_NO_LIGHT:
+// none).
+#define NRD_DIRECT_LIGHTING_PARAMS , uint p_skip_light, out vec3 r_specular
+#define NRD_NO_LIGHT 0xFFFFFFFFu
 
 void nrd_path_init(inout PathState ps, bool p_camera_path) {
 	ps.nrd_emission = vec3(0.0);
 	ps.nrd_diffuse_direct = vec3(0.0);
 	ps.nrd_specular_direct = vec3(0.0);
+	ps.nrd_sun_light = vec3(0.0);
+	ps.nrd_sun_occluder_t = NRD_MISS_HIT_T; // No sun light here: nothing for SIGMA to shadow.
 	ps.nrd_hit_t = 0.0;
 	ps.nrd_state = p_camera_path ? NRD_PATH_PRIMARY : NRD_PATH_NONE;
 }
@@ -311,6 +325,7 @@ float nrd_lobe_threshold(uvec2 p_pixel, uint p_frame) {
 }
 #else
 #define NRD_SPECULAR_PARAM
+#define NRD_DIRECT_LIGHTING_PARAMS
 #endif
 
 // Bounce count helpers (bits 0-3: total, bits 4-7: diffuse). A path ends at RT_MAX_BOUNCES (8) and MAX_DIFFUSE_BOUNCES.

@@ -33,6 +33,7 @@
 #include "core/object/callable_mp.h"
 #include "core/os/os.h"
 #include "core/templates/pair.h"
+#include "servers/rendering/renderer_rd/effects/nrd_denoiser.h"
 #include "servers/rendering/renderer_rd/environment/fog.h"
 #include "servers/rendering/renderer_rd/environment/sky.h"
 #include "servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.h"
@@ -447,6 +448,18 @@ void RenderRaytracing::nrd_ensure_buffers(RenderSceneBuffersRD *p_render_buffers
 	p_render_buffers->create_texture(RB_SCOPE_NRD, RB_TEX_NRD_NORMAL_ROUGHNESS, RD::DATA_FORMAT_R16G16B16A16_SFLOAT, usage_bits, RD::TEXTURE_SAMPLES_1);
 	// NRD's IN_VIEWZ ("R16f+"): R32F, the view depth of far surfaces needs it.
 	p_render_buffers->create_texture(RB_SCOPE_NRD, RB_TEX_NRD_VIEW_Z, RD::DATA_FORMAT_R32_SFLOAT, usage_bits, RD::TEXTURE_SAMPLES_1);
+	// SIGMA's sun: its light without its shadow (rgb), the distance to the occluder (a), replaced by the denoised shadow.
+	p_render_buffers->create_texture(RB_SCOPE_NRD, RB_TEX_NRD_SUN, RD::DATA_FORMAT_R16G16B16A16_SFLOAT, usage_bits, RD::TEXTURE_SAMPLES_1);
+}
+
+bool RenderRaytracing::nrd_get_sigma_sun(const RenderDataRD *p_render_data, Vector3 &r_direction, float &r_tan_angular_radius) const {
+	const RTViewportState *state = _get_viewport_state(p_render_data);
+	if (!state || state->nrd_sigma_light < 0) {
+		return false;
+	}
+	r_direction = state->nrd_sigma_light_direction;
+	r_tan_angular_radius = state->nrd_sigma_tan_angular_radius;
+	return true;
 }
 
 void RenderRaytracing::nrd_free_buffers(RenderSceneBuffersRD *p_render_buffers) {
@@ -463,7 +476,7 @@ RID RenderRaytracing::nrd_get_texture(RenderSceneBuffersRD *p_render_buffers, co
 	return p_render_buffers->get_texture(RB_SCOPE_NRD, p_name);
 }
 
-void RenderRaytracing::nrd_composite(RenderSceneBuffersRD *p_render_buffers, RID p_diffuse, RID p_specular) {
+void RenderRaytracing::nrd_composite(RenderSceneBuffersRD *p_render_buffers, RID p_diffuse, RID p_specular, bool p_sun) {
 	ERR_FAIL_NULL(p_render_buffers);
 	if (!nrd_has_buffers(p_render_buffers) || !rt_has_texture(p_render_buffers) || !rt_has_depth_texture(p_render_buffers)) {
 		return;
@@ -473,6 +486,7 @@ void RenderRaytracing::nrd_composite(RenderSceneBuffersRD *p_render_buffers, RID
 	const Size2i size = p_render_buffers->get_internal_size();
 	push_constant.size[0] = size.width;
 	push_constant.size[1] = size.height;
+	push_constant.sun = p_sun ? 1 : 0;
 
 	RD::Uniform diffuse(RD::UNIFORM_TYPE_TEXTURE, 0, p_diffuse);
 	RD::Uniform specular(RD::UNIFORM_TYPE_TEXTURE, 1, p_specular);
@@ -480,11 +494,12 @@ void RenderRaytracing::nrd_composite(RenderSceneBuffersRD *p_render_buffers, RID
 	RD::Uniform specular_albedo(RD::UNIFORM_TYPE_TEXTURE, 3, nrd_get_texture(p_render_buffers, RB_TEX_NRD_SPECULAR_ALBEDO));
 	RD::Uniform depth(RD::UNIFORM_TYPE_IMAGE, 4, rt_get_depth_texture(p_render_buffers));
 	RD::Uniform output(RD::UNIFORM_TYPE_IMAGE, 5, rt_get_texture(p_render_buffers));
+	RD::Uniform sun(RD::UNIFORM_TYPE_TEXTURE, 6, nrd_get_texture(p_render_buffers, RB_TEX_NRD_SUN));
 
 	RD *rd = RD::get_singleton();
 	RD::ComputeListID compute_list = rd->compute_list_begin();
 	rd->compute_list_bind_compute_pipeline(compute_list, nrd_composite_shader.pipeline);
-	rd->compute_list_bind_uniform_set(compute_list, UniformSetCacheRD::get_singleton()->get_cache(nrd_composite_shader.version_shader, 0, diffuse, specular, diffuse_albedo, specular_albedo, depth, output), 0);
+	rd->compute_list_bind_uniform_set(compute_list, UniformSetCacheRD::get_singleton()->get_cache(nrd_composite_shader.version_shader, 0, diffuse, specular, diffuse_albedo, specular_albedo, depth, output, sun), 0);
 	rd->compute_list_set_push_constant(compute_list, &push_constant, sizeof(NRDCompositeShader::PushConstant));
 	rd->compute_list_dispatch_threads(compute_list, size.width, size.height, 1);
 	rd->compute_list_end();
@@ -7084,6 +7099,29 @@ RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderD
 		rt_ubo.params[SceneShaderRaytracing::RT_PARAM_LIGHT_COUNT] = float(rt_light_count);
 		rt_ubo.params[SceneShaderRaytracing::RT_PARAM_DECAL_COUNT] = float(gather_decals(p_state, p_render_data));
 
+		// With NRD, the sun whose shadow SIGMA denoises: the brightest directional light with path traced shadows. The raygen
+		// lights the primary surfaces with it apart from the other lights (scene_raytracing_raygen.glsl, nrd_sun_image).
+		p_state->nrd_sigma_light = -1;
+		if ((p_rt_flags & SceneShaderRaytracing::RT_FLAG_NRD_ENABLED) && RendererRD::NRDDenoiser::is_sigma_available()) {
+			float brightest = 0.0f;
+			for (uint32_t i = 0; i < rt_light_count && i < SceneShaderRaytracing::RT_PARAM_FLAG_NRD_SUN_MASK; i++) {
+				const RT_LightData &ld = rt_light_data[i];
+				const float luminance = ld.emission[0] * 0.2126f + ld.emission[1] * 0.7152f + ld.emission[2] * 0.0722f;
+				if (ld.type == RT_LIGHT_TYPE_DIRECTIONAL && ld.shadow_opacity > 0.0f && luminance > brightest) {
+					brightest = luminance;
+					p_state->nrd_sigma_light = int32_t(i);
+				}
+			}
+			if (p_state->nrd_sigma_light >= 0) {
+				const RT_LightData &sun = rt_light_data[p_state->nrd_sigma_light];
+				// gather_lights() stores the direction the light travels and its angular radius.
+				p_state->nrd_sigma_light_direction = -Vector3(sun.position[0], sun.position[1], sun.position[2]);
+				p_state->nrd_sigma_tan_angular_radius = Math::tan(sun.radius);
+				rt_param_flags |= uint32_t(p_state->nrd_sigma_light + 1) << SceneShaderRaytracing::RT_PARAM_FLAG_NRD_SUN_SHIFT;
+				rt_ubo.params[SceneShaderRaytracing::RT_PARAM_FLAGS] = float(rt_param_flags);
+			}
+		}
+
 		// Upload light buffer.
 		{
 			uint32_t buf_size = RT_LIGHTS_MAX * sizeof(RT_LightData);
@@ -7190,6 +7228,8 @@ RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderD
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 43, nrd_get_texture(rb, RB_TEX_NRD_SPECULAR)));
 		// Binding 39, Ray Reconstruction's depth guide in its variant: NRD's view depth.
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 39, nrd_get_texture(rb, RB_TEX_NRD_VIEW_Z)));
+		// Binding 48: the sun's light and distance to the occluder, for SIGMA (written whether or not a sun is picked).
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 48, nrd_get_texture(rb, RB_TEX_NRD_SUN)));
 	}
 
 	// Binding 13: Light buffer (SSBO).

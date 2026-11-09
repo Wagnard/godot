@@ -70,9 +70,18 @@ public:
 		Transform3D prev_cam_transform;
 		Vector2 jitter;
 		Vector2 prev_jitter;
+
+		// SIGMA's sun shadow (is_sigma_available()): the raygen's nrd_sun_image, the sun's light without its shadow in rgb and
+		// the distance to the occluder in alpha, which receives SIGMA's denoised shadow; the direction to the sun (world
+		// space) and the tangent of its angular radius. Invalid: no sun this frame, SIGMA does not run.
+		RID sun;
+		Vector3 sun_direction;
+		float sun_tan_angular_radius = 0.0f;
 	};
 
 	static bool is_available();
+	// Whether SIGMA can denoise the sun's shadow: NRD installed with its front and back end (install_nrd.py).
+	static bool is_sigma_available();
 
 	// The binaries of NRD's programs are kept under the shader cache (CACHE_FOLDER), keyed by their SPIR-V: on D3D12 each one
 	// would otherwise be translated to DXIL again at every launch. The shader baker (ShaderBakerExportPlugin) writes the same
@@ -88,8 +97,9 @@ public:
 	static String get_cache_file_name(const String &p_key, const String &p_api);
 	static Vector<uint8_t> make_cache_file(const Vector<uint8_t> &p_binary);
 
-	// Denoises p_params.diffuse and specular, keeping its history in p_render_buffers.
-	void denoise(RenderSceneBuffersRD *p_render_buffers, const Parameters &p_params);
+	// Denoises p_params.diffuse and specular, and the sun's shadow into p_params.sun, keeping its history in p_render_buffers.
+	// Returns whether the sun's shadow was denoised (its texture's alpha is then the shadow, else still the distance).
+	bool denoise(RenderSceneBuffersRD *p_render_buffers, const Parameters &p_params);
 
 	NRDDenoiser();
 	~NRDDenoiser();

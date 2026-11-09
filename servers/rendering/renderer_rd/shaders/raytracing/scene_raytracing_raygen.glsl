@@ -61,6 +61,10 @@ layout(set = 0, binding = 43, rgba16f) uniform image2D nrd_specular_image;
 // NRD's IN_VIEWZ: the primary hit's view depth, NRD_SKY_VIEW_Z where the camera ray missed. Ray Reconstruction's depth
 // guide binding: the two are never in the same variant.
 layout(set = 0, binding = 39, r32f) uniform image2D nrd_view_z_image;
+// SIGMA's sun (lights_evaluate_sigma_sun()): rgb its light its shadow can take, without that shadow, a the distance to the
+// occluder of its ray, which nrd_sigma_frontend.hlsl packs into SIGMA's penumbra and nrd_sigma_backend.hlsl replaces by the
+// denoised shadow (effects/nrd_denoiser.cpp).
+layout(set = 0, binding = 48, rgba16f) uniform image2D nrd_sun_image;
 // Past NRD's CommonSettings::denoisingRange (500000 by default, effects/nrd_denoiser.cpp): NRD leaves the pixel out.
 #define NRD_SKY_VIEW_Z 1e7
 #endif
@@ -245,6 +249,7 @@ void debug_transparency_layers(uvec2 p_pixel, vec3 p_origin, vec3 p_direction) {
 	imageStore(nrd_diffuse_image, pixel, vec4(0.0));
 	imageStore(nrd_specular_image, pixel, vec4(0.0));
 	imageStore(nrd_view_z_image, pixel, vec4(NRD_SKY_VIEW_Z));
+	imageStore(nrd_sun_image, pixel, vec4(0.0, 0.0, 0.0, NRD_MISS_HIT_T));
 #endif
 #ifdef DLSS_RR_ENABLED
 	imageStore(dlss_rr_depth, pixel, imageLoad(rt_depth_image, pixel));
@@ -379,6 +384,10 @@ void main() {
 	vec3 nrd_specular = vec3(0.0);
 	vec2 nrd_hit_t_sum = vec2(0.0);
 	vec2 nrd_hit_t_count = vec2(0.0);
+	// SIGMA's sun: its light summed over the samples, and the first sample's distance to the occluder (SIGMA takes one
+	// visibility ray's).
+	vec3 nrd_sun = vec3(0.0);
+	float nrd_sun_occluder_t = NRD_MISS_HIT_T;
 #endif
 
 	const uint max_bounces = RT_GET_MAX_BOUNCES();
@@ -457,6 +466,10 @@ void main() {
 			nrd_emission += ps.nrd_emission;
 			nrd_diffuse += ps.nrd_diffuse_direct;
 			nrd_specular += ps.nrd_specular_direct;
+			nrd_sun += ps.nrd_sun_light;
+			if (sample_idx == 0u) {
+				nrd_sun_occluder_t = ps.nrd_sun_occluder_t;
+			}
 			if (nrd_stage == NRD_PATH_SHADED) {
 				nrd_emission += indirect; // No bounce: only the rounding of the sums above.
 			} else if (specular) {
@@ -501,6 +514,7 @@ void main() {
 		imageStore(image, nrd_pixel, vec4(nrd_emission * inv_samples, 1.0));
 		imageStore(nrd_diffuse_image, nrd_pixel, vec4(nrd_diffuse * inv_samples / diffuse_albedo, hit_t.x));
 		imageStore(nrd_specular_image, nrd_pixel, vec4(nrd_specular * inv_samples / specular_albedo, hit_t.y));
+		imageStore(nrd_sun_image, nrd_pixel, vec4(nrd_sun * inv_samples, nrd_sun_occluder_t));
 	}
 #else
 	imageStore(image, ivec2(pixel), vec4(final_radiance, 1.0));
