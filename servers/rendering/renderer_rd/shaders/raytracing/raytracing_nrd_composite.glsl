@@ -23,10 +23,14 @@ layout(rgba16f, set = 0, binding = 5) uniform restrict image2D output_image;
 // The sun whose shadow NRD's SIGMA denoised: its light without its shadow (rgb), SIGMA's shadow unpacked by its back end (a).
 layout(set = 0, binding = 6) uniform texture2D sun_texture;
 
+// The direct light signal (rendering/pathtracing/nrd_direct_light_denoising): the light choice's diffuse light over the
+// diffuse albedo, denoised by NRD's second ReBLUR.
+layout(set = 0, binding = 7) uniform texture2D direct_texture;
+
 layout(push_constant, std430) uniform Params {
 	ivec2 size;
 	uint sun; // 1: SIGMA ran this frame, the sun's light times its shadow is added.
-	uint pad;
+	uint direct; // 1: the direct light signal is added (the raygen moved it out of the diffuse lobe).
 }
 params;
 
@@ -43,6 +47,9 @@ void main() {
 	const vec3 specular = texelFetch(specular_texture, pixel, 0).rgb * max(texelFetch(specular_albedo_texture, pixel, 0).rgb, vec3(NRD_ALBEDO_MIN));
 	vec4 color = imageLoad(output_image, pixel);
 	color.rgb += diffuse + specular;
+	if (params.direct != 0u) {
+		color.rgb += texelFetch(direct_texture, pixel, 0).rgb * max(texelFetch(diffuse_albedo_texture, pixel, 0).rgb, vec3(NRD_ALBEDO_MIN));
+	}
 	if (params.sun != 0u) {
 		const vec4 sun = texelFetch(sun_texture, pixel, 0);
 		color.rgb += sun.rgb * sun.a;

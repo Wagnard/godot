@@ -379,8 +379,12 @@ bool shade_and_bounce(inout PathState ps, HitRecord r, vec3 p_ray_origin, vec3 p
 			ps.nrd_sun_light += sun_shadowable * scale;
 		}
 		vec3 direct_specular;
+		float direct_hit_t;
+		// rendering/pathtracing/nrd_direct_light_denoising: the light choice's diffuse light at the primary hit goes to a
+		// signal of its own, with its hit distance (the distance to the occluder or the light).
+		const bool nrd_direct_signal = nrd_primary && (uint(get_rt_param(RT_PARAM_FLAGS)) & RT_PARAM_FLAG_NRD_DIRECT_LIGHT) != 0u;
 		vec3 direct_light = lights_evaluate_direct_lighting(
-				hit_pos_offset, hit_pos_back, r.geometry_normal, N, V, brdf_mat, r.backlight, (r.flags & HIT_FLAG_SPECULAR_DISABLED) != 0u, ps.rng_state, is_indirect, rt_light_count, geometries[r.geometry_idx].layer_mask RT_SHADOW_RECEIVER_OF(r.geometry_idx), nrd_sun, direct_specular);
+				hit_pos_offset, hit_pos_back, r.geometry_normal, N, V, brdf_mat, r.backlight, (r.flags & HIT_FLAG_SPECULAR_DISABLED) != 0u, ps.rng_state, is_indirect, rt_light_count, geometries[r.geometry_idx].layer_mask RT_SHADOW_RECEIVER_OF(r.geometry_idx), nrd_sun, nrd_direct_signal, direct_specular, direct_hit_t);
 #else
 		vec3 direct_light = lights_evaluate_direct_lighting(
 				hit_pos_offset, hit_pos_back, r.geometry_normal, N, V, brdf_mat, r.backlight, (r.flags & HIT_FLAG_SPECULAR_DISABLED) != 0u, ps.rng_state, is_indirect, rt_light_count, geometries[r.geometry_idx].layer_mask RT_SHADOW_RECEIVER_OF(r.geometry_idx));
@@ -391,6 +395,12 @@ bool shade_and_bounce(inout PathState ps, HitRecord r, vec3 p_ray_origin, vec3 p
 			const vec3 scale = ps.throughput * mix(1.0, r.ao, r.ao_light_affect);
 			ps.nrd_diffuse_direct += (direct_light - direct_specular) * scale;
 			ps.nrd_specular_direct += direct_specular * scale;
+			if (nrd_direct_signal) {
+				// Also in nrd_diffuse_direct, which the raygen needs to find the indirect light; it moves it out of the
+				// ReBLUR diffuse signal into nrd_direct_image.
+				ps.nrd_direct_light += (direct_light - direct_specular) * scale;
+				ps.nrd_direct_hit_t = direct_hit_t;
+			}
 		}
 #endif
 	}

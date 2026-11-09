@@ -77,11 +77,18 @@ public:
 		RID sun;
 		Vector3 sun_direction;
 		float sun_tan_angular_radius = 0.0f;
+
+		// The direct light signal (rendering/pathtracing/nrd_direct_light_denoising, is_direct_light_available()): the light
+		// choice's diffuse light at the primary hits over the diffuse albedo, and its distance to the occluder or the light;
+		// denoised in place by a second ReBLUR (REBLUR_DIFFUSE). Invalid: the raygen kept that light in `diffuse`.
+		RID direct;
 	};
 
 	static bool is_available();
 	// Whether SIGMA can denoise the sun's shadow: NRD installed with its front and back end (install_nrd.py).
 	static bool is_sigma_available();
+	// Whether the direct light signal can be denoised: NRD installed with its front and back end (install_nrd.py revision 2).
+	static bool is_direct_light_available();
 
 	// The binaries of NRD's programs are kept under the shader cache (CACHE_FOLDER), keyed by their SPIR-V: on D3D12 each one
 	// would otherwise be translated to DXIL again at every launch. The shader baker (ShaderBakerExportPlugin) writes the same

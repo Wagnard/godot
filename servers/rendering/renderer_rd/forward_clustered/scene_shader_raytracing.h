@@ -179,6 +179,8 @@ public:
 	// RT_FLAG_NRD_ENABLED variant only (RenderRaytracing::update_uniform_set()).
 	static constexpr uint32_t RT_PARAM_FLAG_NRD_SUN_SHIFT = 4;
 	static constexpr uint32_t RT_PARAM_FLAG_NRD_SUN_MASK = 0xFu;
+	// Bit 15: rendering/pathtracing/nrd_direct_light_denoising, read in the RT_FLAG_NRD_ENABLED variant only.
+	static constexpr uint32_t RT_PARAM_FLAG_NRD_DIRECT_LIGHT = 1u << 15;
 	// Bits 8-14: rendering/pathtracing/max_transparency_layers (0-64), read in the RT_FLAG_TRANSPARENCY_PEELING variant only.
 	static constexpr uint32_t RT_PARAM_FLAG_PEEL_LAYERS_SHIFT = 8;
 	static constexpr uint32_t RT_PARAM_FLAG_PEEL_LAYERS_MASK = 0x7Fu;

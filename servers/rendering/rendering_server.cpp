@@ -3893,6 +3893,7 @@ void RenderingServer::init() {
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/pathtracing/vertex_capture_mode", PROPERTY_HINT_ENUM, "Automatic,Opt-in,Disabled"), 2);
 	GLOBAL_DEF("rendering/pathtracing/light_sampling_ris", true);
 	GLOBAL_DEF("rendering/pathtracing/russian_roulette", true);
+	GLOBAL_DEF("rendering/pathtracing/nrd_direct_light_denoising", true);
 	GLOBAL_DEF("rendering/pathtracing/specular_motion_vectors", false);
 	GLOBAL_DEF("rendering/pathtracing/transparent_shadows", true);
 	GLOBAL_DEF("rendering/pathtracing/trace_gpu_particles", true);

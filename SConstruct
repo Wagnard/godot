@@ -775,7 +775,7 @@ if env["nrd_enabled"]:
     # compiled. An older or unstamped install still builds, without what it lacks (NRD_GODOT_SHADERS_* defines in its
     # generated header); SCons only warns, at the start and again at the end of the build: install_nrd.py is run by hand.
     NRD_VERSION = "4.18.0"  # install_nrd.py's nrd_version.
-    NRD_GODOT_SHADERS_REVISION = 1  # install_nrd.py's nrd_godot_shaders_revision.
+    NRD_GODOT_SHADERS_REVISION = 2  # install_nrd.py's nrd_godot_shaders_revision.
     nrd_stamp = {}
     nrd_stamp_path = os.path.join(nrd_path, "GODOT_STAMP")
     if os.path.isfile(nrd_stamp_path):
@@ -797,7 +797,7 @@ if env["nrd_enabled"]:
         nrd_outdated_message = (
             f"NRD install at {nrd_path} is outdated (NRD {nrd_stamp_version}, revision {nrd_stamp_revision}; "
             f"expected NRD {NRD_VERSION}, revision {NRD_GODOT_SHADERS_REVISION}): run python misc/scripts/install_nrd.py. "
-            "Building without what it lacks (SIGMA's sun shadow denoising)."
+            "Building without what it lacks (revision 1: SIGMA's sun shadow denoising; 2: the direct light signal)."
         )
         print_warning(nrd_outdated_message)
         atexit.register(print_warning, nrd_outdated_message)

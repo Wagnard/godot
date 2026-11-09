@@ -34,6 +34,9 @@
 // Bits 4-7: the light index + 1 of the sun whose shadow NRD's SIGMA denoises, 0: none (NRD_ENABLED variant)
 #define RT_PARAM_FLAG_NRD_SUN_SHIFT 4u
 #define RT_PARAM_FLAG_NRD_SUN_MASK 0xFu
+// Bit 15: rendering/pathtracing/nrd_direct_light_denoising, the RIS lights' diffuse light at the primary hits in a signal of
+// its own, nrd_direct_image (NRD_ENABLED variant)
+#define RT_PARAM_FLAG_NRD_DIRECT_LIGHT (1u << 15u)
 // Bits 8-14: rendering/pathtracing/max_transparency_layers, the layers a camera ray peels (RT_TRANSPARENCY_PEELING variant)
 #define RT_PARAM_FLAG_PEEL_LAYERS_SHIFT 8u
 #define RT_PARAM_FLAG_PEEL_LAYERS_MASK 0x7Fu
@@ -275,6 +278,10 @@ struct PathState {
 	vec3 nrd_specular_direct;
 	vec3 nrd_sun_light;
 	float nrd_sun_occluder_t;
+	// With RT_PARAM_FLAG_NRD_DIRECT_LIGHT, nrd_direct_light: the light choice's diffuse light at the primary hit (also in
+	// nrd_diffuse_direct, which the raygen needs to find the indirect light), and nrd_direct_hit_t its hit distance.
+	vec3 nrd_direct_light;
+	float nrd_direct_hit_t;
 	float nrd_hit_t;
 	uint nrd_state;
 #endif
@@ -297,7 +304,8 @@ struct PathState {
 #define NRD_SPECULAR_PARAM , out vec3 r_specular
 // lights_evaluate_direct_lighting() also leaves out p_skip_light (SIGMA's sun at a primary hit, lit apart; NRD_NO_LIGHT:
 // none).
-#define NRD_DIRECT_LIGHTING_PARAMS , uint p_skip_light, out vec3 r_specular
+#define NRD_DIRECT_LIGHTING_PARAMS , uint p_skip_light, bool p_want_hit_t, out vec3 r_specular, out float r_hit_t
+#define NRD_LIGHT_PARAMS , bool p_want_hit_t, out vec3 r_specular, out float r_hit_t
 #define NRD_NO_LIGHT 0xFFFFFFFFu
 
 void nrd_path_init(inout PathState ps, bool p_camera_path) {
@@ -306,6 +314,8 @@ void nrd_path_init(inout PathState ps, bool p_camera_path) {
 	ps.nrd_specular_direct = vec3(0.0);
 	ps.nrd_sun_light = vec3(0.0);
 	ps.nrd_sun_occluder_t = NRD_MISS_HIT_T; // No sun light here: nothing for SIGMA to shadow.
+	ps.nrd_direct_light = vec3(0.0);
+	ps.nrd_direct_hit_t = 0.0;
 	ps.nrd_hit_t = 0.0;
 	ps.nrd_state = p_camera_path ? NRD_PATH_PRIMARY : NRD_PATH_NONE;
 }
@@ -326,6 +336,7 @@ float nrd_lobe_threshold(uvec2 p_pixel, uint p_frame) {
 #else
 #define NRD_SPECULAR_PARAM
 #define NRD_DIRECT_LIGHTING_PARAMS
+#define NRD_LIGHT_PARAMS
 #endif
 
 // Bounce count helpers (bits 0-3: total, bits 4-7: diffuse). A path ends at RT_MAX_BOUNCES (8) and MAX_DIFFUSE_BOUNCES.

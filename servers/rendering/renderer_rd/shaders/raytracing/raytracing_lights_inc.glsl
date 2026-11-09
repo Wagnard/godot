@@ -494,7 +494,10 @@ float lights_target_weight(RTLightData p_light, vec3 p_hit_pos, vec3 p_N, bool p
 	return weight * max(cos_theta, 0.05);
 }
 
-vec3 lights_evaluate_light(RTLightData light, vec3 hit_pos, vec3 hit_pos_back, vec3 geometry_normal, vec3 N, vec3 V, MaterialProperties material, vec3 backlight, bool specular_disabled, inout uint rng_state, bool is_indirect_bounce RT_SHADOW_RECEIVER_PARAM NRD_SPECULAR_PARAM);
+vec3 lights_evaluate_light(RTLightData light, vec3 hit_pos, vec3 hit_pos_back, vec3 geometry_normal, vec3 N, vec3 V, MaterialProperties material, vec3 backlight, bool specular_disabled, inout uint rng_state, bool is_indirect_bounce RT_SHADOW_RECEIVER_PARAM NRD_LIGHT_PARAMS);
+#if defined(NRD_ENABLED) && defined(RT_STAGE_RAYGEN)
+float nrd_occluder_distance(vec3 p_origin, vec3 p_direction, float p_max_dist);
+#endif
 
 // Evaluate direct lighting using NEE: one light, picked among those that can light the point in proportion to
 // lights_target_weight() (resampled importance sampling with each of them as a candidate: Talbot et al. 2005, "Importance
@@ -507,7 +510,7 @@ vec3 lights_evaluate_light(RTLightData light, vec3 hit_pos, vec3 hit_pos_back, v
 // A light behind the surface reaches it only through BACKLIGHT, and its shadow ray then leaves from hit_pos_back, on
 // that side of the surface. With NRD, r_specular: the part of the returned light the specular lobe reflects; p_skip_light
 // is left out of the choice (SIGMA's sun, lit apart at a primary hit: the choice among the others estimates their sum,
-// unbiased as before).
+// unbiased as before); with p_want_hit_t, r_hit_t: the sampled light's hit distance (lights_evaluate_light()), else 0.
 vec3 lights_evaluate_direct_lighting(
 		vec3 hit_pos,
 		vec3 hit_pos_back,
@@ -523,6 +526,7 @@ vec3 lights_evaluate_direct_lighting(
 		uint layer_mask RT_SHADOW_RECEIVER_PARAM NRD_DIRECT_LIGHTING_PARAMS) {
 #ifdef NRD_ENABLED
 	r_specular = vec3(0.0);
+	r_hit_t = 0.0;
 #endif
 	// Wrap and toon materials take lights behind the shading normal too: weighed as for BACKLIGHT, so that the light choice
 	// stays unbiased.
@@ -608,7 +612,7 @@ vec3 lights_evaluate_direct_lighting(
 	}
 
 #ifdef NRD_ENABLED
-	const vec3 light = lights_evaluate_light(rt_lights[selected_idx], hit_pos, hit_pos_back, geometry_normal, N, V, material, backlight, specular_disabled, rng_state, is_indirect_bounce RT_SHADOW_RECEIVER_ARG, r_specular);
+	const vec3 light = lights_evaluate_light(rt_lights[selected_idx], hit_pos, hit_pos_back, geometry_normal, N, V, material, backlight, specular_disabled, rng_state, is_indirect_bounce RT_SHADOW_RECEIVER_ARG, p_want_hit_t, r_specular, r_hit_t);
 	r_specular /= max(light_select_pdf, 1e-10);
 	return light / max(light_select_pdf, 1e-10);
 #else
@@ -617,7 +621,10 @@ vec3 lights_evaluate_direct_lighting(
 }
 
 // The light one light brings to the point, before the probability of having picked it: one shadow ray toward it.
-// With NRD, r_specular: the part of it the specular lobe reflects.
+// With NRD, r_specular: the part of it the specular lobe reflects; with p_want_hit_t, r_hit_t: its hit distance for NRD's
+// direct light signal, the distance to the light along the shadow ray (NRD_MISS_HIT_T for a directional light), or to the
+// nearest occluder when the ray is blocked (NRD's README, "Other": "For direct lighting a distance to an occluder or a light
+// source is needed"); 0 where the light cannot reach the point.
 vec3 lights_evaluate_light(
 		RTLightData light,
 		vec3 hit_pos,
@@ -629,9 +636,10 @@ vec3 lights_evaluate_light(
 		vec3 backlight,
 		bool specular_disabled,
 		inout uint rng_state,
-		bool is_indirect_bounce RT_SHADOW_RECEIVER_PARAM NRD_SPECULAR_PARAM) {
+		bool is_indirect_bounce RT_SHADOW_RECEIVER_PARAM NRD_LIGHT_PARAMS) {
 #ifdef NRD_ENABLED
 	r_specular = vec3(0.0);
+	r_hit_t = 0.0;
 #endif
 	bool has_backlight = any(greaterThan(backlight, vec3(0.0)));
 	vec2 u = rand2(rng_state);
@@ -686,6 +694,11 @@ vec3 lights_evaluate_light(
 
 		bool through = has_backlight && dot(geometry_normal, L) < 0.0;
 		RT_SHADOW_VISIBILITY visibility = lights_shadow_visibility(light, through ? hit_pos_back : hit_pos, L, shadow_dist, rng_state RT_SHADOW_RECEIVER_ARG);
+#if defined(NRD_ENABLED) && defined(RT_STAGE_RAYGEN)
+		if (p_want_hit_t) {
+			r_hit_t = RT_SHADOW_BLOCKED(visibility) ? nrd_occluder_distance(through ? hit_pos_back : hit_pos, L, shadow_dist) : shadow_dist;
+		}
+#endif
 		if (RT_SHADOW_BLOCKED(visibility)) {
 			return vec3(0.0);
 		}
@@ -731,6 +744,11 @@ vec3 lights_evaluate_light(
 
 		bool through = has_backlight && dot(geometry_normal, L) < 0.0;
 		RT_SHADOW_VISIBILITY visibility = lights_shadow_visibility(light, through ? hit_pos_back : hit_pos, L, ls.max_distance, rng_state RT_SHADOW_RECEIVER_ARG);
+#if defined(NRD_ENABLED) && defined(RT_STAGE_RAYGEN)
+		if (p_want_hit_t) {
+			r_hit_t = RT_SHADOW_BLOCKED(visibility) ? nrd_occluder_distance(through ? hit_pos_back : hit_pos, L, ls.max_distance) : NRD_MISS_HIT_T;
+		}
+#endif
 		if (RT_SHADOW_BLOCKED(visibility)) {
 			return vec3(0.0);
 		}
@@ -759,11 +777,11 @@ uint nrd_sigma_sun_index() {
 	return ((uint(get_rt_param(RT_PARAM_FLAGS)) >> RT_PARAM_FLAG_NRD_SUN_SHIFT) & RT_PARAM_FLAG_NRD_SUN_MASK) - 1u;
 }
 
-// The distance to the nearest opaque occluder along a ray toward the sun, as NRD's README asks of SIGMA's input ("Distance
+// The distance to the nearest opaque occluder along a ray toward a light, as NRD's README asks of SIGMA's input ("Distance
 // to occluder (SIGMA)": cast from the point toward the light, and "ACCEPT_FIRST_HIT_AND_END_SEARCH ray flag can't be used",
-// so the search runs to the nearest hit). Cut-outs through the alpha test; procedural geometry is not found (its
-// intersection code runs in its hit group only): 0, a hard edge.
-float nrd_sigma_occluder_distance(vec3 p_origin, vec3 p_direction, float p_max_dist) {
+// so the search runs to the nearest hit) and of the direct light signal's hit distance. Cut-outs through the alpha test;
+// procedural geometry is not found (its intersection code runs in its hit group only): 0, a hard edge.
+float nrd_occluder_distance(vec3 p_origin, vec3 p_direction, float p_max_dist) {
 	rayQueryEXT rq;
 	rayQueryInitializeEXT(rq, tlas, RT_SHADOW_RAY_FLAGS, RT_MASK_SHADOW, p_origin, 0.001, p_direction, p_max_dist - 0.001);
 	while (rayQueryProceedEXT(rq)) {
@@ -846,7 +864,7 @@ vec3 lights_evaluate_sigma_sun(
 	const float opacity = light.shadow_opacity;
 	if (all(lessThanEqual(transmittance, vec3(0.0)))) {
 		r_shadowable = light_value * opacity;
-		r_occluder_t = light.radius > 0.0 ? nrd_sigma_occluder_distance(origin, L, ls.max_distance) : 1.0;
+		r_occluder_t = light.radius > 0.0 ? nrd_occluder_distance(origin, L, ls.max_distance) : 1.0;
 	} else {
 		r_shadowable = light_value * opacity * transmittance;
 		r_occluder_t = NRD_MISS_HIT_T;

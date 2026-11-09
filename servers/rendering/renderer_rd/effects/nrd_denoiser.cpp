@@ -87,12 +87,33 @@ static constexpr bool NRD_SIGMA_BUILT = true;
 static constexpr bool NRD_SIGMA_BUILT = false;
 #endif
 
-// The instance's denoisers: ReBLUR, and SIGMA with p_sigma.
-static nrd::Result _create_instance(bool p_sigma, nrd::Instance *&r_instance) {
-	const nrd::DenoiserDesc denoiser_descs[2] = { { NRD_IDENTIFIER, NRD_DENOISER }, { NRD_SIGMA_IDENTIFIER, NRD_SIGMA_DENOISER } };
+// The direct light signal's denoiser (rendering/pathtracing/nrd_direct_light_denoising): a second ReBLUR, diffuse only, for
+// the light choice's diffuse light at the primary hits, whose hit distance is the distance to the occluder or the light
+// (NRD's README, "Other": "For direct lighting a distance to an occluder or a light source is needed"). The first ReBLUR
+// then denoises the indirect light (and the sky's next event estimation) only.
+static constexpr nrd::Identifier NRD_DIRECT_IDENTIFIER = 3;
+static constexpr nrd::Denoiser NRD_DIRECT_DENOISER = nrd::Denoiser::REBLUR_DIFFUSE;
+
+// An install made before the direct light signal's front and back end (install_nrd.py revision 2) has no such signal.
+#ifdef NRD_GODOT_SHADERS_DIRECT
+static constexpr bool NRD_DIRECT_BUILT = true;
+#else
+static constexpr bool NRD_DIRECT_BUILT = false;
+#endif
+
+// The instance's denoisers: ReBLUR, SIGMA with p_sigma, the direct light signal's ReBLUR with p_direct.
+static nrd::Result _create_instance(bool p_sigma, nrd::Instance *&r_instance, bool p_direct) {
+	LocalVector<nrd::DenoiserDesc> denoiser_descs;
+	denoiser_descs.push_back({ NRD_IDENTIFIER, NRD_DENOISER });
+	if (p_sigma) {
+		denoiser_descs.push_back({ NRD_SIGMA_IDENTIFIER, NRD_SIGMA_DENOISER });
+	}
+	if (p_direct) {
+		denoiser_descs.push_back({ NRD_DIRECT_IDENTIFIER, NRD_DIRECT_DENOISER });
+	}
 	nrd::InstanceCreationDesc creation_desc = {};
-	creation_desc.denoisers = denoiser_descs;
-	creation_desc.denoisersNum = p_sigma ? 2 : 1;
+	creation_desc.denoisers = denoiser_descs.ptr();
+	creation_desc.denoisersNum = denoiser_descs.size();
 	return nrd::CreateInstance(creation_desc, r_instance);
 }
 
@@ -122,6 +143,11 @@ public:
 	bool sigma = false;
 	RID in_penumbra;
 	RID out_shadow;
+	// With the direct light signal's ReBLUR: its IN_DIFF_RADIANCE_HITDIST (nrd_direct_frontend.hlsl writes it) and
+	// OUT_DIFF_RADIANCE_HITDIST (nrd_direct_backend.hlsl reads it).
+	bool direct = false;
+	RID in_direct;
+	RID out_direct;
 
 	virtual void configure(RenderSceneBuffersRD *p_render_buffers) override {
 		free_data();
@@ -135,7 +161,7 @@ public:
 			}
 			rids->clear();
 		}
-		for (RID *rid : { &in_diffuse, &in_specular, &in_normal_roughness, &out_diffuse, &out_specular, &in_penumbra, &out_shadow }) {
+		for (RID *rid : { &in_diffuse, &in_specular, &in_normal_roughness, &out_diffuse, &out_specular, &in_penumbra, &out_shadow, &in_direct, &out_direct }) {
 			if (rid->is_valid()) {
 				rd->free_rid(*rid);
 				*rid = RID();
@@ -148,6 +174,7 @@ public:
 		size = Size2i();
 		frame_index = 0;
 		sigma = false;
+		direct = false;
 	}
 
 	virtual ~NRDContext() override {
@@ -180,6 +207,8 @@ struct NRDDenoiser::State {
 	NRDPipeline backend;
 	NRDPipeline sigma_frontend; // Without SIGMA (NRD_SIGMA_BUILT), none.
 	NRDPipeline sigma_backend;
+	NRDPipeline direct_frontend; // Without the direct light signal (NRD_DIRECT_BUILT), none.
+	NRDPipeline direct_backend;
 	RID samplers[2]; // nrd::Sampler: NEAREST_CLAMP, LINEAR_CLAMP.
 	NRDBinaryCache cache;
 };
@@ -309,6 +338,10 @@ static const char *NRD_BACKEND_NAME = "NRD back end";
 static const char *NRD_SIGMA_FRONTEND_NAME = "NRD SIGMA front end";
 static const char *NRD_SIGMA_BACKEND_NAME = "NRD SIGMA back end";
 #endif
+#ifdef NRD_GODOT_SHADERS_DIRECT
+static const char *NRD_DIRECT_FRONTEND_NAME = "NRD direct light front end";
+static const char *NRD_DIRECT_BACKEND_NAME = "NRD direct light back end";
+#endif
 
 static String _pass_name(const String &p_shader_identifier) {
 	return "NRD " + p_shader_identifier.get_slicec('|', 0);
@@ -425,6 +458,10 @@ bool NRDDenoiser::is_sigma_available() {
 	return NRD_SIGMA_BUILT;
 }
 
+bool NRDDenoiser::is_direct_light_available() {
+	return NRD_DIRECT_BUILT;
+}
+
 void NRDDenoiser::get_bake_programs(LocalVector<BakeProgram> &r_programs) {
 	auto add = [&r_programs](const String &p_name, const uint8_t *p_spirv, uint64_t p_size) {
 		BakeProgram program;
@@ -440,11 +477,15 @@ void NRDDenoiser::get_bake_programs(LocalVector<BakeProgram> &r_programs) {
 	add(NRD_SIGMA_FRONTEND_NAME, nrd_sigma_frontend_spirv, sizeof(nrd_sigma_frontend_spirv));
 	add(NRD_SIGMA_BACKEND_NAME, nrd_sigma_backend_spirv, sizeof(nrd_sigma_backend_spirv));
 #endif
+#ifdef NRD_GODOT_SHADERS_DIRECT
+	add(NRD_DIRECT_FRONTEND_NAME, nrd_direct_frontend_spirv, sizeof(nrd_direct_frontend_spirv));
+	add(NRD_DIRECT_BACKEND_NAME, nrd_direct_backend_spirv, sizeof(nrd_direct_backend_spirv));
+#endif
 
-	// Every pass denoise() dispatches: an instance's pipelines, as it makes them (no GPU work). With SIGMA, ReBLUR's and
-	// SIGMA's (an instance without SIGMA has the same ReBLUR pipelines, by shader identifier).
+	// Every pass denoise() dispatches: an instance's pipelines, as it makes them (no GPU work). With every denoiser the
+	// install has (an instance with fewer has the same pipelines for those it has, by shader identifier).
 	nrd::Instance *instance = nullptr;
-	ERR_FAIL_COND_MSG(_create_instance(NRD_SIGMA_BUILT, instance) != nrd::Result::SUCCESS, "NRD: could not create its instance.");
+	ERR_FAIL_COND_MSG(_create_instance(NRD_SIGMA_BUILT, instance, NRD_DIRECT_BUILT) != nrd::Result::SUCCESS, "NRD: could not create its instance.");
 	const nrd::InstanceDesc &instance_desc = *nrd::GetInstanceDesc(*instance);
 	for (uint32_t i = 0; i < instance_desc.pipelinesNum; i++) {
 		const nrd::PipelineDesc &pipeline_desc = instance_desc.pipelines[i];
@@ -472,6 +513,12 @@ NRDDenoiser::NRDDenoiser() {
 #else
 	WARN_PRINT("NRD: this engine was built with an NRD install made before SIGMA's programs: the sun's shadow is denoised by ReBLUR (softer). Rerun misc/scripts/install_nrd.py and rebuild the engine.");
 #endif
+#ifdef NRD_GODOT_SHADERS_DIRECT
+	state->direct_frontend = _create_pipeline(state->cache, nrd_direct_frontend_spirv, sizeof(nrd_direct_frontend_spirv), NRD_DIRECT_FRONTEND_NAME);
+	state->direct_backend = _create_pipeline(state->cache, nrd_direct_backend_spirv, sizeof(nrd_direct_backend_spirv), NRD_DIRECT_BACKEND_NAME);
+#else
+	WARN_PRINT("NRD: this engine was built with an NRD install made before the direct light signal's programs: rendering/pathtracing/nrd_direct_light_denoising has no effect (local lights' shadows softer). Rerun misc/scripts/install_nrd.py and rebuild the engine.");
+#endif
 }
 
 NRDDenoiser::~NRDDenoiser() {
@@ -479,7 +526,7 @@ NRDDenoiser::~NRDDenoiser() {
 	for (const KeyValue<String, NRDPipeline> &E : state->pipelines) {
 		rd->free_rid(E.value.shader); // Frees its pipeline too.
 	}
-	for (const RID &shader : { state->frontend.shader, state->backend.shader, state->sigma_frontend.shader, state->sigma_backend.shader }) {
+	for (const RID &shader : { state->frontend.shader, state->backend.shader, state->sigma_frontend.shader, state->sigma_backend.shader, state->direct_frontend.shader, state->direct_backend.shader }) {
 		if (shader.is_valid()) {
 			rd->free_rid(shader);
 		}
@@ -507,11 +554,15 @@ bool NRDDenoiser::denoise(RenderSceneBuffersRD *p_render_buffers, const Paramete
 	// SIGMA runs when the view has a sun this frame. Its pools are only made then (~56 MB at 1440p, NRD's README): a view whose
 	// sun comes or goes makes its instance again, restarting both denoisers' history.
 	const bool sigma = NRD_SIGMA_BUILT && p_params.sun.is_valid() && state->sigma_frontend.pipeline.is_valid() && state->sigma_backend.pipeline.is_valid();
-	if (!context->instance || context->size != p_params.size || context->sigma != sigma) {
+	// The direct light signal's ReBLUR runs when the raygen wrote that signal (the setting can change at run time: the
+	// instance is made again then, as for SIGMA).
+	const bool direct = NRD_DIRECT_BUILT && p_params.direct.is_valid() && state->direct_frontend.pipeline.is_valid() && state->direct_backend.pipeline.is_valid();
+	if (!context->instance || context->size != p_params.size || context->sigma != sigma || context->direct != direct) {
 		context->free_data();
-		ERR_FAIL_COND_V_MSG(_create_instance(sigma, context->instance) != nrd::Result::SUCCESS, false, "NRD: could not create its instance.");
+		ERR_FAIL_COND_V_MSG(_create_instance(sigma, context->instance, direct) != nrd::Result::SUCCESS, false, "NRD: could not create its instance.");
 		context->size = p_params.size;
 		context->sigma = sigma;
+		context->direct = direct;
 
 		const nrd::InstanceDesc &instance_desc = *nrd::GetInstanceDesc(*context->instance);
 		for (uint32_t i = 0; i < instance_desc.permanentPoolSize; i++) {
@@ -537,6 +588,10 @@ bool NRDDenoiser::denoise(RenderSceneBuffersRD *p_render_buffers, const Paramete
 			// NRDDescs.h: IN_PENUMBRA "R16f+", OUT_SHADOW_TRANSLUCENCY "R8+" (R16F here).
 			context->in_penumbra = _create_texture(RD::DATA_FORMAT_R16_SFLOAT, p_params.size, "NRD IN_PENUMBRA");
 			context->out_shadow = _create_texture(RD::DATA_FORMAT_R16_SFLOAT, p_params.size, "NRD OUT_SHADOW_TRANSLUCENCY");
+		}
+		if (direct) {
+			context->in_direct = _create_texture(RD::DATA_FORMAT_R16G16B16A16_SFLOAT, p_params.size, "NRD direct light IN_DIFF_RADIANCE_HITDIST");
+			context->out_direct = _create_texture(RD::DATA_FORMAT_R16G16B16A16_SFLOAT, p_params.size, "NRD direct light OUT_DIFF_RADIANCE_HITDIST");
 		}
 	}
 
@@ -586,6 +641,11 @@ bool NRDDenoiser::denoise(RenderSceneBuffersRD *p_render_buffers, const Paramete
 		sigma_settings.lightDirection[2] = to_sun.z;
 		ERR_FAIL_COND_V(nrd::SetDenoiserSettings(*context->instance, NRD_SIGMA_IDENTIFIER, &sigma_settings) != nrd::Result::SUCCESS, false);
 	}
+	// The direct light signal's ReBLUR: NRD's defaults (no lobe is skipped there: no hit distance reconstruction).
+	nrd::ReblurSettings direct_settings;
+	if (direct) {
+		ERR_FAIL_COND_V(nrd::SetDenoiserSettings(*context->instance, NRD_DIRECT_IDENTIFIER, &direct_settings) != nrd::Result::SUCCESS, false);
+	}
 
 	const uint32_t groups_x = (p_params.size.width + 7) / 8;
 	const uint32_t groups_y = (p_params.size.height + 7) / 8;
@@ -621,6 +681,32 @@ bool NRDDenoiser::denoise(RenderSceneBuffersRD *p_render_buffers, const Paramete
 		rd->compute_list_end();
 	}
 
+	// The direct light signal's front end: into the second ReBLUR's encoding.
+	if (direct) {
+		struct {
+			float hit_distance_parameters[4];
+			uint32_t size[2];
+			uint32_t pad[2];
+		} push_constant = {};
+		push_constant.hit_distance_parameters[0] = direct_settings.hitDistanceParameters.A;
+		push_constant.hit_distance_parameters[1] = direct_settings.hitDistanceParameters.B;
+		push_constant.hit_distance_parameters[2] = direct_settings.hitDistanceParameters.C;
+		push_constant.size[0] = p_params.size.width;
+		push_constant.size[1] = p_params.size.height;
+
+		RD::ComputeListID compute_list = rd->compute_list_begin();
+		rd->compute_list_bind_compute_pipeline(compute_list, state->direct_frontend.pipeline);
+		rd->compute_list_bind_uniform_set(compute_list,
+				uniform_set_cache->get_cache(state->direct_frontend.shader, 0,
+						RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 0, p_params.direct),
+						RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 1, p_params.view_z),
+						RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 2, context->in_direct)),
+				0);
+		rd->compute_list_set_push_constant(compute_list, &push_constant, sizeof(push_constant));
+		rd->compute_list_dispatch(compute_list, groups_x, groups_y, 1);
+		rd->compute_list_end();
+	}
+
 	// SIGMA's front end: the sun's distance to the occluder into its penumbra.
 	if (sigma) {
 		struct {
@@ -646,10 +732,17 @@ bool NRDDenoiser::denoise(RenderSceneBuffersRD *p_render_buffers, const Paramete
 
 	// NRD's dispatches. Each in a compute list of its own: RenderingDevice's graph orders them and their barriers by what
 	// each reads and writes.
-	const nrd::Identifier identifiers[2] = { NRD_IDENTIFIER, NRD_SIGMA_IDENTIFIER };
+	LocalVector<nrd::Identifier> identifiers;
+	identifiers.push_back(NRD_IDENTIFIER);
+	if (sigma) {
+		identifiers.push_back(NRD_SIGMA_IDENTIFIER);
+	}
+	if (direct) {
+		identifiers.push_back(NRD_DIRECT_IDENTIFIER);
+	}
 	const nrd::DispatchDesc *dispatches = nullptr;
 	uint32_t dispatch_count = 0;
-	ERR_FAIL_COND_V(nrd::GetComputeDispatches(*context->instance, identifiers, sigma ? 2 : 1, dispatches, dispatch_count) != nrd::Result::SUCCESS, false);
+	ERR_FAIL_COND_V(nrd::GetComputeDispatches(*context->instance, identifiers.ptr(), identifiers.size(), dispatches, dispatch_count) != nrd::Result::SUCCESS, false);
 
 	uint32_t constant_buffer_index = 0;
 	RID constant_buffer;
@@ -686,13 +779,13 @@ bool NRDDenoiser::denoise(RenderSceneBuffersRD *p_render_buffers, const Paramete
 						texture = p_params.view_z;
 						break;
 					case nrd::ResourceType::IN_DIFF_RADIANCE_HITDIST:
-						texture = context->in_diffuse;
+						texture = dispatch.identifier == NRD_DIRECT_IDENTIFIER ? context->in_direct : context->in_diffuse;
 						break;
 					case nrd::ResourceType::IN_SPEC_RADIANCE_HITDIST:
 						texture = context->in_specular;
 						break;
 					case nrd::ResourceType::OUT_DIFF_RADIANCE_HITDIST:
-						texture = context->out_diffuse;
+						texture = dispatch.identifier == NRD_DIRECT_IDENTIFIER ? context->out_direct : context->out_diffuse;
 						break;
 					case nrd::ResourceType::OUT_SPEC_RADIANCE_HITDIST:
 						texture = context->out_specular;
@@ -767,6 +860,27 @@ bool NRDDenoiser::denoise(RenderSceneBuffersRD *p_render_buffers, const Paramete
 		rd->compute_list_end();
 	}
 
+	// The direct light signal's back end: the denoised light back into the raygen's texture, which the composite adds.
+	if (direct) {
+		struct {
+			uint32_t size[2];
+			uint32_t pad[2];
+		} push_constant = {};
+		push_constant.size[0] = p_params.size.width;
+		push_constant.size[1] = p_params.size.height;
+
+		RD::ComputeListID compute_list = rd->compute_list_begin();
+		rd->compute_list_bind_compute_pipeline(compute_list, state->direct_backend.pipeline);
+		rd->compute_list_bind_uniform_set(compute_list,
+				uniform_set_cache->get_cache(state->direct_backend.shader, 0,
+						RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 0, context->out_direct),
+						RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 1, p_params.direct)),
+				0);
+		rd->compute_list_set_push_constant(compute_list, &push_constant, sizeof(push_constant));
+		rd->compute_list_dispatch(compute_list, groups_x, groups_y, 1);
+		rd->compute_list_end();
+	}
+
 	// SIGMA's back end: the denoised shadow into the sun's texture, whose light the composite multiplies by it.
 	if (sigma) {
 		struct {
@@ -805,6 +919,10 @@ bool NRDDenoiser::is_available() {
 }
 
 bool NRDDenoiser::is_sigma_available() {
+	return false;
+}
+
+bool NRDDenoiser::is_direct_light_available() {
 	return false;
 }
 

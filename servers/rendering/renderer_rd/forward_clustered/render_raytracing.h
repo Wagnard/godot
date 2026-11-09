@@ -81,6 +81,7 @@
 #define RB_TEX_NRD_NORMAL_ROUGHNESS SNAME("normal_roughness")
 #define RB_TEX_NRD_VIEW_Z SNAME("view_z")
 #define RB_TEX_NRD_SUN SNAME("sun")
+#define RB_TEX_NRD_DIRECT SNAME("direct")
 
 class RenderDataRD;
 class RenderSceneBuffersRD;
@@ -822,6 +823,8 @@ struct RTViewportState {
 	int32_t nrd_sigma_light = -1;
 	Vector3 nrd_sigma_light_direction;
 	float nrd_sigma_tan_angular_radius = 0.0f;
+	// With NRD, whether the raygen writes the direct light signal (RT_PARAM_FLAG_NRD_DIRECT_LIGHT).
+	bool nrd_direct_light = false;
 	// The lights each cell can receive light from (build_light_grid()), uploaded when it changes.
 	RID light_grid_buffer;
 	uint32_t light_grid_buffer_capacity = 0;
@@ -1131,7 +1134,7 @@ class RenderRaytracing {
 		struct PushConstant {
 			int32_t size[2];
 			uint32_t sun; // 1: add the sun's light times SIGMA's shadow (binding 6).
-			uint32_t pad;
+			uint32_t direct; // 1: add the direct light signal (binding 7).
 		};
 		RaytracingNrdCompositeShaderRD shader;
 		RID version;
@@ -1454,7 +1457,11 @@ public:
 	// Multiplies the denoised light of each lobe (or, before a denoiser runs, the raygen's own) back by its albedo onto the
 	// path tracer's output, which holds the light that is not denoised (raytracing_nrd_composite.glsl). p_sun: SIGMA ran, the
 	// sun's light times its denoised shadow is added too (RB_TEX_NRD_SUN).
-	void nrd_composite(RenderSceneBuffersRD *p_render_buffers, RID p_diffuse, RID p_specular, bool p_sun);
+	// p_direct: the raygen wrote the direct light signal this frame (RB_TEX_NRD_DIRECT), which is added too.
+	void nrd_composite(RenderSceneBuffersRD *p_render_buffers, RID p_diffuse, RID p_specular, bool p_sun, bool p_direct);
+	// Whether the raygen writes the direct light signal in this view this frame (rendering/pathtracing/
+	// nrd_direct_light_denoising, update_uniform_set()).
+	bool nrd_get_direct_light(const RenderDataRD *p_render_data) const;
 
 	void register_raytracing_buffer_dependencies(RD::RaytracingListID p_list);
 	// The buffers written per frame that the shaders read through the addresses in RT_GeometryData and RT_MaterialData.

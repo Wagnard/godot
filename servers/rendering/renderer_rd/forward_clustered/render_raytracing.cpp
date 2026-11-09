@@ -450,6 +450,13 @@ void RenderRaytracing::nrd_ensure_buffers(RenderSceneBuffersRD *p_render_buffers
 	p_render_buffers->create_texture(RB_SCOPE_NRD, RB_TEX_NRD_VIEW_Z, RD::DATA_FORMAT_R32_SFLOAT, usage_bits, RD::TEXTURE_SAMPLES_1);
 	// SIGMA's sun: its light without its shadow (rgb), the distance to the occluder (a), replaced by the denoised shadow.
 	p_render_buffers->create_texture(RB_SCOPE_NRD, RB_TEX_NRD_SUN, RD::DATA_FORMAT_R16G16B16A16_SFLOAT, usage_bits, RD::TEXTURE_SAMPLES_1);
+	// The direct light signal (binding 49): light over the diffuse albedo, hit distance; written zero when it is off.
+	p_render_buffers->create_texture(RB_SCOPE_NRD, RB_TEX_NRD_DIRECT, RD::DATA_FORMAT_R16G16B16A16_SFLOAT, usage_bits, RD::TEXTURE_SAMPLES_1);
+}
+
+bool RenderRaytracing::nrd_get_direct_light(const RenderDataRD *p_render_data) const {
+	const RTViewportState *state = _get_viewport_state(p_render_data);
+	return state && state->nrd_direct_light;
 }
 
 bool RenderRaytracing::nrd_get_sigma_sun(const RenderDataRD *p_render_data, Vector3 &r_direction, float &r_tan_angular_radius) const {
@@ -476,7 +483,7 @@ RID RenderRaytracing::nrd_get_texture(RenderSceneBuffersRD *p_render_buffers, co
 	return p_render_buffers->get_texture(RB_SCOPE_NRD, p_name);
 }
 
-void RenderRaytracing::nrd_composite(RenderSceneBuffersRD *p_render_buffers, RID p_diffuse, RID p_specular, bool p_sun) {
+void RenderRaytracing::nrd_composite(RenderSceneBuffersRD *p_render_buffers, RID p_diffuse, RID p_specular, bool p_sun, bool p_direct) {
 	ERR_FAIL_NULL(p_render_buffers);
 	if (!nrd_has_buffers(p_render_buffers) || !rt_has_texture(p_render_buffers) || !rt_has_depth_texture(p_render_buffers)) {
 		return;
@@ -487,6 +494,7 @@ void RenderRaytracing::nrd_composite(RenderSceneBuffersRD *p_render_buffers, RID
 	push_constant.size[0] = size.width;
 	push_constant.size[1] = size.height;
 	push_constant.sun = p_sun ? 1 : 0;
+	push_constant.direct = p_direct ? 1 : 0;
 
 	RD::Uniform diffuse(RD::UNIFORM_TYPE_TEXTURE, 0, p_diffuse);
 	RD::Uniform specular(RD::UNIFORM_TYPE_TEXTURE, 1, p_specular);
@@ -495,11 +503,12 @@ void RenderRaytracing::nrd_composite(RenderSceneBuffersRD *p_render_buffers, RID
 	RD::Uniform depth(RD::UNIFORM_TYPE_IMAGE, 4, rt_get_depth_texture(p_render_buffers));
 	RD::Uniform output(RD::UNIFORM_TYPE_IMAGE, 5, rt_get_texture(p_render_buffers));
 	RD::Uniform sun(RD::UNIFORM_TYPE_TEXTURE, 6, nrd_get_texture(p_render_buffers, RB_TEX_NRD_SUN));
+	RD::Uniform direct(RD::UNIFORM_TYPE_TEXTURE, 7, nrd_get_texture(p_render_buffers, RB_TEX_NRD_DIRECT));
 
 	RD *rd = RD::get_singleton();
 	RD::ComputeListID compute_list = rd->compute_list_begin();
 	rd->compute_list_bind_compute_pipeline(compute_list, nrd_composite_shader.pipeline);
-	rd->compute_list_bind_uniform_set(compute_list, UniformSetCacheRD::get_singleton()->get_cache(nrd_composite_shader.version_shader, 0, diffuse, specular, diffuse_albedo, specular_albedo, depth, output, sun), 0);
+	rd->compute_list_bind_uniform_set(compute_list, UniformSetCacheRD::get_singleton()->get_cache(nrd_composite_shader.version_shader, 0, diffuse, specular, diffuse_albedo, specular_albedo, depth, output, sun, direct), 0);
 	rd->compute_list_set_push_constant(compute_list, &push_constant, sizeof(NRDCompositeShader::PushConstant));
 	rd->compute_list_dispatch_threads(compute_list, size.width, size.height, 1);
 	rd->compute_list_end();
@@ -7066,6 +7075,13 @@ RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderD
 		if (p_state->shadow_groups_used) {
 			rt_param_flags |= SceneShaderRaytracing::RT_PARAM_FLAG_SHADOW_GROUPS;
 		}
+		// rendering/pathtracing/nrd_direct_light_denoising: with NRD, the light choice's diffuse light at the primary hits in
+		// a signal of its own (binding 49), denoised by NRD's second ReBLUR, when the NRD install has its programs.
+		p_state->nrd_direct_light = (p_rt_flags & SceneShaderRaytracing::RT_FLAG_NRD_ENABLED) && RendererRD::NRDDenoiser::is_direct_light_available() &&
+				GLOBAL_GET_CACHED(bool, "rendering/pathtracing/nrd_direct_light_denoising");
+		if (p_state->nrd_direct_light) {
+			rt_param_flags |= SceneShaderRaytracing::RT_PARAM_FLAG_NRD_DIRECT_LIGHT;
+		}
 		rt_ubo.params[SceneShaderRaytracing::RT_PARAM_FLAGS] = float(rt_param_flags);
 		if (p_background_is_color) {
 			rt_ubo.params[SceneShaderRaytracing::RT_PARAM_BACKGROUND_COLOR + 0] = p_background_color.r;
@@ -7230,6 +7246,8 @@ RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderD
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 39, nrd_get_texture(rb, RB_TEX_NRD_VIEW_Z)));
 		// Binding 48: the sun's light and distance to the occluder, for SIGMA (written whether or not a sun is picked).
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 48, nrd_get_texture(rb, RB_TEX_NRD_SUN)));
+		// Binding 49: the direct light signal (rendering/pathtracing/nrd_direct_light_denoising).
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 49, nrd_get_texture(rb, RB_TEX_NRD_DIRECT)));
 	}
 
 	// Binding 13: Light buffer (SSBO).

@@ -621,6 +621,10 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 				if (raytracing->nrd_get_sigma_sun(p_render_data, params.sun_direction, params.sun_tan_angular_radius)) {
 					params.sun = raytracing->nrd_get_texture(rb.ptr(), RB_TEX_NRD_SUN);
 				}
+				// The direct light signal the raygen wrote (rendering/pathtracing/nrd_direct_light_denoising).
+				if (raytracing->nrd_get_direct_light(p_render_data)) {
+					params.direct = raytracing->nrd_get_texture(rb.ptr(), RB_TEX_NRD_DIRECT);
+				}
 
 				RENDER_TIMESTAMP("NRD");
 				RD::get_singleton()->draw_command_begin_label("NRD");
@@ -630,7 +634,7 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 
 			RENDER_TIMESTAMP("NRD Composite");
 			RD::get_singleton()->draw_command_begin_label("NRD Composite");
-			raytracing->nrd_composite(rb.ptr(), raytracing->nrd_get_texture(rb.ptr(), RB_TEX_NRD_DIFFUSE), raytracing->nrd_get_texture(rb.ptr(), RB_TEX_NRD_SPECULAR), nrd_sun);
+			raytracing->nrd_composite(rb.ptr(), raytracing->nrd_get_texture(rb.ptr(), RB_TEX_NRD_DIFFUSE), raytracing->nrd_get_texture(rb.ptr(), RB_TEX_NRD_SPECULAR), nrd_sun, raytracing->nrd_get_direct_light(p_render_data));
 			RD::get_singleton()->draw_command_end_label();
 		}
 
