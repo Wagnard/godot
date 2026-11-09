@@ -139,6 +139,11 @@ public:
 		// (material flags RT_MAT_DIFFUSE_MODE_SHIFT / RT_MAT_SPECULAR_MODE_SHIFT), Hammon's G2 (raster's V_GGX), diffuse and
 		// specular added without (1 - F). A project setting too, off by default: the other variants keep their code unchanged.
 		RT_FLAG_RASTER_BRDF = (1 << 13),
+		// rendering/pathtracing/nrd_direct_light_denoising (NRD_DIRECT_LIGHT), with RT_FLAG_NRD_ENABLED: the light choice's
+		// diffuse light at the primary hits in a signal of its own (binding 49), denoised by NRD's second ReBLUR. Injected
+		// into the raygen stage only (_build_variant_compile_context()): the hit groups and every other variant keep their
+		// code. A project setting too, on by default; the shader baker bakes the variant the export preset picks.
+		RT_FLAG_NRD_DIRECT_LIGHT = (1 << 14),
 	};
 
 	// rendering/pathtracing/decals: which path vertices receive decals.
@@ -179,8 +184,6 @@ public:
 	// RT_FLAG_NRD_ENABLED variant only (RenderRaytracing::update_uniform_set()).
 	static constexpr uint32_t RT_PARAM_FLAG_NRD_SUN_SHIFT = 4;
 	static constexpr uint32_t RT_PARAM_FLAG_NRD_SUN_MASK = 0xFu;
-	// Bit 15: rendering/pathtracing/nrd_direct_light_denoising, read in the RT_FLAG_NRD_ENABLED variant only.
-	static constexpr uint32_t RT_PARAM_FLAG_NRD_DIRECT_LIGHT = 1u << 15;
 	// Bits 8-14: rendering/pathtracing/max_transparency_layers (0-64), read in the RT_FLAG_TRANSPARENCY_PEELING variant only.
 	static constexpr uint32_t RT_PARAM_FLAG_PEEL_LAYERS_SHIFT = 8;
 	static constexpr uint32_t RT_PARAM_FLAG_PEEL_LAYERS_MASK = 0x7Fu;
@@ -703,10 +706,14 @@ public:
 	// p_specular_energy_compensation and p_raster_brdf: the project's rendering/pathtracing/use_simple_shadows,
 	// use_shader_execution_reordering, specular_motion_vectors, transparent_shadows, decals other than All Hits,
 	// max_transparency_layers above 0, shadow_groups, specular_energy_compensation and raster_brdf.
-	void get_bake_programs(bool p_simple_shadows, bool p_ser, bool p_specular_motion_vectors, bool p_transparent_shadows, bool p_decal_mode, bool p_transparency_peeling, bool p_shadow_groups, bool p_specular_energy_compensation, bool p_raster_brdf, LocalVector<BakeProgram> &r_programs);
+	// p_nrd_direct_light: the project's rendering/pathtracing/nrd_direct_light_denoising (the NRD variant baked with it).
+	void get_bake_programs(bool p_simple_shadows, bool p_ser, bool p_specular_motion_vectors, bool p_transparent_shadows, bool p_decal_mode, bool p_transparency_peeling, bool p_shadow_groups, bool p_specular_energy_compensation, bool p_raster_brdf, bool p_nrd_direct_light, LocalVector<BakeProgram> &r_programs);
 	// p_material's hit group in every such variant, and its displacement and opacity micromap bake programs; nothing for a
 	// material path traced by hit group 0.
-	void get_material_bake_programs(RID p_material, bool p_simple_shadows, bool p_ser, bool p_specular_motion_vectors, bool p_transparent_shadows, bool p_decal_mode, bool p_transparency_peeling, bool p_shadow_groups, bool p_specular_energy_compensation, bool p_raster_brdf, LocalVector<BakeProgram> &r_programs);
+	void get_material_bake_programs(RID p_material, bool p_simple_shadows, bool p_ser, bool p_specular_motion_vectors, bool p_transparent_shadows, bool p_decal_mode, bool p_transparency_peeling, bool p_shadow_groups, bool p_specular_energy_compensation, bool p_raster_brdf, bool p_nrd_direct_light, LocalVector<BakeProgram> &r_programs);
+	// RT_FLAG_NRD_DIRECT_LIGHT when the NRD variant takes it (rendering/pathtracing/nrd_direct_light_denoising, and an NRD
+	// install with its programs), else 0. Read every frame.
+	static uint32_t nrd_direct_light_flag();
 	static String get_binary_cache_file_name(const String &p_key, const String &p_api);
 	static Vector<uint8_t> make_binary_cache_file(const Vector<uint8_t> &p_binary);
 	// Null when the path tracer's shaders were never initialized (no Forward+ renderer).

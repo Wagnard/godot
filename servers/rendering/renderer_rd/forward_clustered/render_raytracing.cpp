@@ -7075,13 +7075,10 @@ RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderD
 		if (p_state->shadow_groups_used) {
 			rt_param_flags |= SceneShaderRaytracing::RT_PARAM_FLAG_SHADOW_GROUPS;
 		}
-		// rendering/pathtracing/nrd_direct_light_denoising: with NRD, the light choice's diffuse light at the primary hits in
-		// a signal of its own (binding 49), denoised by NRD's second ReBLUR, when the NRD install has its programs.
-		p_state->nrd_direct_light = (p_rt_flags & SceneShaderRaytracing::RT_FLAG_NRD_ENABLED) && RendererRD::NRDDenoiser::is_direct_light_available() &&
-				GLOBAL_GET_CACHED(bool, "rendering/pathtracing/nrd_direct_light_denoising");
-		if (p_state->nrd_direct_light) {
-			rt_param_flags |= SceneShaderRaytracing::RT_PARAM_FLAG_NRD_DIRECT_LIGHT;
-		}
+		// rendering/pathtracing/nrd_direct_light_denoising: with NRD, the raygen variant that writes the light choice's diffuse
+		// light at the primary hits to a signal of its own (binding 49), denoised by NRD's second ReBLUR
+		// (SceneShaderRaytracing::nrd_direct_light_flag()).
+		p_state->nrd_direct_light = (p_rt_flags & SceneShaderRaytracing::RT_FLAG_NRD_ENABLED) && (p_rt_flags & SceneShaderRaytracing::RT_FLAG_NRD_DIRECT_LIGHT);
 		rt_ubo.params[SceneShaderRaytracing::RT_PARAM_FLAGS] = float(rt_param_flags);
 		if (p_background_is_color) {
 			rt_ubo.params[SceneShaderRaytracing::RT_PARAM_BACKGROUND_COLOR + 0] = p_background_color.r;

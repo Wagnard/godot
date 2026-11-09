@@ -65,11 +65,13 @@ layout(set = 0, binding = 39, r32f) uniform image2D nrd_view_z_image;
 // occluder of its ray, which nrd_sigma_frontend.hlsl packs into SIGMA's penumbra and nrd_sigma_backend.hlsl replaces by the
 // denoised shadow (effects/nrd_denoiser.cpp).
 layout(set = 0, binding = 48, rgba16f) uniform image2D nrd_sun_image;
-// rendering/pathtracing/nrd_direct_light_denoising (RT_PARAM_FLAG_NRD_DIRECT_LIGHT): the light choice's diffuse light at the
-// primary hit over the diffuse albedo, and its distance to the occluder or the light (NRD's README, "Other": "For direct
-// lighting a distance to an occluder or a light source is needed"), which NRD's second ReBLUR denoises
-// (effects/nrd_denoiser.cpp). That light then leaves nrd_diffuse_image. Zero when the setting is off.
+#ifdef NRD_DIRECT_LIGHT
+// rendering/pathtracing/nrd_direct_light_denoising: the light choice's diffuse light at the primary hit over the diffuse
+// albedo, and its distance to the occluder or the light (NRD's README, "Other": "For direct lighting a distance to an
+// occluder or a light source is needed"), which NRD's second ReBLUR denoises (effects/nrd_denoiser.cpp). That light then
+// leaves nrd_diffuse_image.
 layout(set = 0, binding = 49, rgba16f) uniform image2D nrd_direct_image;
+#endif
 // Past NRD's CommonSettings::denoisingRange (500000 by default, effects/nrd_denoiser.cpp): NRD leaves the pixel out.
 #define NRD_SKY_VIEW_Z 1e7
 #endif
@@ -255,7 +257,9 @@ void debug_transparency_layers(uvec2 p_pixel, vec3 p_origin, vec3 p_direction) {
 	imageStore(nrd_specular_image, pixel, vec4(0.0));
 	imageStore(nrd_view_z_image, pixel, vec4(NRD_SKY_VIEW_Z));
 	imageStore(nrd_sun_image, pixel, vec4(0.0, 0.0, 0.0, NRD_MISS_HIT_T));
+#ifdef NRD_DIRECT_LIGHT
 	imageStore(nrd_direct_image, pixel, vec4(0.0));
+#endif
 #endif
 #ifdef DLSS_RR_ENABLED
 	imageStore(dlss_rr_depth, pixel, imageLoad(rt_depth_image, pixel));
@@ -394,9 +398,11 @@ void main() {
 	// visibility ray's).
 	vec3 nrd_sun = vec3(0.0);
 	float nrd_sun_occluder_t = NRD_MISS_HIT_T;
+#ifdef NRD_DIRECT_LIGHT
 	// The direct light signal: the samples' sum, the first sample's hit distance (its light choice and shadow ray).
 	vec3 nrd_direct = vec3(0.0);
 	float nrd_direct_hit_t = 0.0;
+#endif
 #endif
 
 	const uint max_bounces = RT_GET_MAX_BOUNCES();
@@ -473,11 +479,15 @@ void main() {
 			// nothing and the chosen one its direct light over its chance (NRD's README), and less of ReBLUR's darkening
 			// (denoiser study, 2026-10-30); the skipped lobe's hit distance stays 0, which NRD rebuilds.
 			nrd_emission += ps.nrd_emission;
+#ifdef NRD_DIRECT_LIGHT
 			nrd_diffuse += ps.nrd_diffuse_direct - ps.nrd_direct_light;
 			nrd_direct += ps.nrd_direct_light;
 			if (sample_idx == 0u) {
 				nrd_direct_hit_t = ps.nrd_direct_hit_t;
 			}
+#else
+			nrd_diffuse += ps.nrd_diffuse_direct;
+#endif
 			nrd_specular += ps.nrd_specular_direct;
 			nrd_sun += ps.nrd_sun_light;
 			if (sample_idx == 0u) {
@@ -528,7 +538,9 @@ void main() {
 		imageStore(nrd_diffuse_image, nrd_pixel, vec4(nrd_diffuse * inv_samples / diffuse_albedo, hit_t.x));
 		imageStore(nrd_specular_image, nrd_pixel, vec4(nrd_specular * inv_samples / specular_albedo, hit_t.y));
 		imageStore(nrd_sun_image, nrd_pixel, vec4(nrd_sun * inv_samples, nrd_sun_occluder_t));
+#ifdef NRD_DIRECT_LIGHT
 		imageStore(nrd_direct_image, nrd_pixel, vec4(nrd_direct * inv_samples / diffuse_albedo, nrd_direct_hit_t));
+#endif
 	}
 #else
 	imageStore(image, ivec2(pixel), vec4(final_radiance, 1.0));

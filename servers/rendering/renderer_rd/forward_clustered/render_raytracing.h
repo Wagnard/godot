@@ -823,7 +823,7 @@ struct RTViewportState {
 	int32_t nrd_sigma_light = -1;
 	Vector3 nrd_sigma_light_direction;
 	float nrd_sigma_tan_angular_radius = 0.0f;
-	// With NRD, whether the raygen writes the direct light signal (RT_PARAM_FLAG_NRD_DIRECT_LIGHT).
+	// With NRD, whether the raygen writes the direct light signal (the RT_FLAG_NRD_DIRECT_LIGHT variant).
 	bool nrd_direct_light = false;
 	// The lights each cell can receive light from (build_light_grid()), uploaded when it changes.
 	RID light_grid_buffer;

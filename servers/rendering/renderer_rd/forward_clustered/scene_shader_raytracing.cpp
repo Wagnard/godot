@@ -42,6 +42,7 @@
 #include "core/os/thread.h"
 #include "core/string/string_builder.h"
 #include "core/version.h"
+#include "servers/rendering/renderer_rd/effects/nrd_denoiser.h"
 #include "servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.h"
 #include "servers/rendering/renderer_rd/forward_clustered/render_raytracing.h"
 #include "servers/rendering/renderer_rd/forward_clustered/rt_alpha_dependencies.h"
@@ -1350,7 +1351,7 @@ uint32_t SceneShaderRaytracing::compute_rt_flags(RID p_environment) {
 				flags |= RT_FLAG_DLSS_RR_SPECULAR_MOTION_VECTORS;
 			}
 		} else if (denoiser == RSE::PT_DENOISER_NRD_REBLUR) {
-			flags |= RT_FLAG_NRD_ENABLED;
+			flags |= RT_FLAG_NRD_ENABLED | nrd_direct_light_flag();
 		}
 	}
 
@@ -1527,6 +1528,14 @@ bool SceneShaderRaytracing::_build_variant_compile_context(uint32_t p_rt_flags, 
 	if (p_rt_flags & RT_FLAG_RASTER_BRDF) {
 		inject_define(sources, "#define RT_RASTER_BRDF\n");
 	}
+	// rendering/pathtracing/nrd_direct_light_denoising: the raygen stage only (it shades; hit shaders only evaluate the
+	// material). Every hit group's binary carries the raygen, so this variant still compiles, caches and bakes hit groups
+	// of its own, as RT_RASTER_BRDF's does; the shader baker bakes the one the export preset's setting picks.
+	if ((p_rt_flags & RT_FLAG_NRD_DIRECT_LIGHT) && (p_rt_flags & RT_FLAG_NRD_ENABLED) && sources.size() > RD::SHADER_STAGE_RAYGEN) {
+		Vector<String> raygen_source = { sources[RD::SHADER_STAGE_RAYGEN] };
+		inject_define(raygen_source, "#define NRD_DIRECT_LIGHT\n");
+		sources.write[RD::SHADER_STAGE_RAYGEN] = raygen_source[0];
+	}
 
 	// Procedural templates come from intersection stage; strip from base HG0 path.
 	String intersection_source_template;
@@ -1606,15 +1615,17 @@ SceneShaderRaytracing *SceneShaderRaytracing::get_singleton_if_initialized() {
 	return singleton && singleton->raygen_shader_version.is_valid() ? singleton : nullptr;
 }
 
-// The flags that change a variant's sources (RAYGEN_SHADER_OPTIONS and the injected RT_RASTER_BRDF; the debug draw is left out): every combination a run of the project can trace with.
-static LocalVector<uint32_t> _bake_rt_flags(bool p_simple_shadows, bool p_ser, bool p_specular_motion_vectors, bool p_transparent_shadows, bool p_decal_mode, bool p_transparency_peeling, bool p_shadow_groups, bool p_specular_energy_compensation, bool p_raster_brdf) {
+// The flags that change a variant's sources (RAYGEN_SHADER_OPTIONS and the injected RT_RASTER_BRDF and NRD_DIRECT_LIGHT; the debug draw is left out): every combination a run of the project can trace with.
+static LocalVector<uint32_t> _bake_rt_flags(bool p_simple_shadows, bool p_ser, bool p_specular_motion_vectors, bool p_transparent_shadows, bool p_decal_mode, bool p_transparency_peeling, bool p_shadow_groups, bool p_specular_energy_compensation, bool p_raster_brdf, bool p_nrd_direct_light) {
 	LocalVector<uint32_t> flags;
 	const uint32_t shadows = (p_simple_shadows ? SceneShaderRaytracing::RT_FLAG_RAY_QUERY_SHADOWS_ENABLED : 0) | (p_transparent_shadows ? SceneShaderRaytracing::RT_FLAG_TRANSPARENT_SHADOWS : 0) | (p_decal_mode ? SceneShaderRaytracing::RT_FLAG_DECAL_MODE : 0) |
 			(p_transparency_peeling ? SceneShaderRaytracing::RT_FLAG_TRANSPARENCY_PEELING : 0) | (p_shadow_groups ? SceneShaderRaytracing::RT_FLAG_SHADOW_GROUPS : 0) |
 			(p_specular_energy_compensation ? SceneShaderRaytracing::RT_FLAG_SPECULAR_ENERGY_COMPENSATION : 0) | (p_raster_brdf ? SceneShaderRaytracing::RT_FLAG_RASTER_BRDF : 0);
 	// Ray Reconstruction with the project's specular motion vectors (compute_rt_flags()).
 	const uint32_t rr_flags = SceneShaderRaytracing::RT_FLAG_DLSS_RR_ENABLED | (p_specular_motion_vectors ? SceneShaderRaytracing::RT_FLAG_DLSS_RR_SPECULAR_MOTION_VECTORS : 0);
-	for (const uint32_t rr : { uint32_t(0), rr_flags, uint32_t(SceneShaderRaytracing::RT_FLAG_NRD_ENABLED) }) {
+	// NRD with the project's rendering/pathtracing/nrd_direct_light_denoising (compute_rt_flags()).
+	const uint32_t nrd_flags = SceneShaderRaytracing::RT_FLAG_NRD_ENABLED | (p_nrd_direct_light ? SceneShaderRaytracing::RT_FLAG_NRD_DIRECT_LIGHT : 0);
+	for (const uint32_t rr : { uint32_t(0), rr_flags, nrd_flags }) {
 		// The hardware decides at run time (compute_rt_flags()): both when the project asks for it.
 		for (const uint32_t set : { uint32_t(0), uint32_t(p_ser ? SceneShaderRaytracing::RT_FLAG_SER_ENABLED : 0) }) {
 			// Opacity micromaps likewise, whatever the project: the player's device has them or not.
@@ -1638,8 +1649,8 @@ static SceneShaderRaytracing::BakeProgram _compute_bake_program(const String &p_
 	return program;
 }
 
-void SceneShaderRaytracing::get_bake_programs(bool p_simple_shadows, bool p_ser, bool p_specular_motion_vectors, bool p_transparent_shadows, bool p_decal_mode, bool p_transparency_peeling, bool p_shadow_groups, bool p_specular_energy_compensation, bool p_raster_brdf, LocalVector<BakeProgram> &r_programs) {
-	LocalVector<uint32_t> variants = _bake_rt_flags(p_simple_shadows, p_ser, p_specular_motion_vectors, p_transparent_shadows, p_decal_mode, p_transparency_peeling, p_shadow_groups, p_specular_energy_compensation, p_raster_brdf);
+void SceneShaderRaytracing::get_bake_programs(bool p_simple_shadows, bool p_ser, bool p_specular_motion_vectors, bool p_transparent_shadows, bool p_decal_mode, bool p_transparency_peeling, bool p_shadow_groups, bool p_specular_energy_compensation, bool p_raster_brdf, bool p_nrd_direct_light, LocalVector<BakeProgram> &r_programs) {
+	LocalVector<uint32_t> variants = _bake_rt_flags(p_simple_shadows, p_ser, p_specular_motion_vectors, p_transparent_shadows, p_decal_mode, p_transparency_peeling, p_shadow_groups, p_specular_energy_compensation, p_raster_brdf, p_nrd_direct_light);
 	if (!variants.has(RT_FLAG_NONE)) {
 		variants.push_back(RT_FLAG_NONE); // init()'s probe builds its base.
 	}
@@ -1674,7 +1685,11 @@ void SceneShaderRaytracing::get_bake_programs(bool p_simple_shadows, bool p_ser,
 	}
 }
 
-void SceneShaderRaytracing::get_material_bake_programs(RID p_material, bool p_simple_shadows, bool p_ser, bool p_specular_motion_vectors, bool p_transparent_shadows, bool p_decal_mode, bool p_transparency_peeling, bool p_shadow_groups, bool p_specular_energy_compensation, bool p_raster_brdf, LocalVector<BakeProgram> &r_programs) {
+uint32_t SceneShaderRaytracing::nrd_direct_light_flag() {
+	return (RendererRD::NRDDenoiser::is_direct_light_available() && GLOBAL_GET_CACHED(bool, "rendering/pathtracing/nrd_direct_light_denoising")) ? RT_FLAG_NRD_DIRECT_LIGHT : 0;
+}
+
+void SceneShaderRaytracing::get_material_bake_programs(RID p_material, bool p_simple_shadows, bool p_ser, bool p_specular_motion_vectors, bool p_transparent_shadows, bool p_decal_mode, bool p_transparency_peeling, bool p_shadow_groups, bool p_specular_energy_compensation, bool p_raster_brdf, bool p_nrd_direct_light, LocalVector<BakeProgram> &r_programs) {
 	RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
 	// Only spatial materials have hit groups: the export walks every material, particle process, canvas item, sky and fog
 	// ones included, which the hit group compiler would reject ("Invalid render mode").
@@ -1698,7 +1713,7 @@ void SceneShaderRaytracing::get_material_bake_programs(RID p_material, bool p_si
 	}
 	entry.name = material_storage->material_get_shader_path_hint(p_material);
 
-	for (const uint32_t flags : _bake_rt_flags(p_simple_shadows, p_ser, p_specular_motion_vectors, p_transparent_shadows, p_decal_mode, p_transparency_peeling, p_shadow_groups, p_specular_energy_compensation, p_raster_brdf)) {
+	for (const uint32_t flags : _bake_rt_flags(p_simple_shadows, p_ser, p_specular_motion_vectors, p_transparent_shadows, p_decal_mode, p_transparency_peeling, p_shadow_groups, p_specular_energy_compensation, p_raster_brdf, p_nrd_direct_light)) {
 		if (!bake_compile_contexts.has(flags)) {
 			VariantCompileContext ctx;
 			if (!_build_variant_compile_context(flags, ctx)) {

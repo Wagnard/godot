@@ -108,6 +108,7 @@ protected:
 	bool raytracing_shadow_groups = false;
 	bool raytracing_specular_energy_compensation = false;
 	bool raytracing_raster_brdf = false;
+	bool raytracing_nrd_direct_light = false; // rendering/pathtracing/nrd_direct_light_denoising, where NRD has its programs.
 	RenderingShaderContainerFormat *shader_container_format = nullptr;
 	String shader_container_driver;
 	Vector<Ref<ShaderBakerExportPluginPlatform>> platforms;

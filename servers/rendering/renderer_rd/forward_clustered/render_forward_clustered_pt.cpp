@@ -348,7 +348,7 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 			rr_runs = false;
 #endif
 			if (!rr_runs) {
-				rt_flags = (rt_flags & ~(SceneShaderRaytracing::RT_FLAG_DLSS_RR_ENABLED | SceneShaderRaytracing::RT_FLAG_DLSS_RR_SPECULAR_MOTION_VECTORS)) | SceneShaderRaytracing::RT_FLAG_NRD_ENABLED;
+				rt_flags = (rt_flags & ~(SceneShaderRaytracing::RT_FLAG_DLSS_RR_ENABLED | SceneShaderRaytracing::RT_FLAG_DLSS_RR_SPECULAR_MOTION_VECTORS)) | SceneShaderRaytracing::RT_FLAG_NRD_ENABLED | SceneShaderRaytracing::nrd_direct_light_flag();
 			}
 		}
 
