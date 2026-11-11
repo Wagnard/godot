@@ -3902,7 +3902,7 @@ void RenderingServer::init() {
 	GLOBAL_DEF("rendering/pathtracing/shadow_groups", true);
 	GLOBAL_DEF("rendering/pathtracing/specular_energy_compensation", true);
 	GLOBAL_DEF("rendering/pathtracing/raster_brdf", true);
-	GLOBAL_DEF("rendering/pathtracing/ray_cones", false);
+	GLOBAL_DEF("rendering/pathtracing/ray_cones", true);
 	GLOBAL_DEF("rendering/pathtracing/volumetric_fog_shadows", false);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/pathtracing/volumetric_fog_positional_shadow_rays", PROPERTY_HINT_RANGE, "1,4,1"), 2);
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/pathtracing/debug_heatmap_max_ticks", PROPERTY_HINT_RANGE, "1,10000000,1,or_greater"), 100000.0);
