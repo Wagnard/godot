@@ -145,8 +145,29 @@ vec3 camera_ray_near_point(vec2 p_pixel) {
 	return (inv_view * vec4(target.xyz / target.w, 1.0)).xyz;
 }
 
+#ifdef RT_RAY_CONES
+// rendering/pathtracing/ray_cones: the cone of the ray that hit (x: its width at the ray's origin, y: its spread angle),
+// which the closest hit's main() takes from the payload (rt_cone_unpack()) before anything else; y is 0 where the raygen
+// sent none.
+vec2 rt_ray_cone = vec2(0.0);
+
+/// The barycentric coordinates' change along p_axis, a vector in the triangle's plane.
+vec3 plane_vector_barycentrics(vec3 p_axis, vec3 e1, vec3 e2) {
+	float d00 = dot(e1, e1);
+	float d01 = dot(e1, e2);
+	float d11 = dot(e2, e2);
+	float d20 = dot(p_axis, e1);
+	float d21 = dot(p_axis, e2);
+	float inv = 1.0 / (d00 * d11 - d01 * d01);
+	float v = (d11 * d20 - d01 * d21) * inv;
+	float w = (d00 * d21 - d01 * d20) * inv;
+	return vec3(-v - w, v, w);
+}
+#endif
+
 /// Screen derivatives of the hit's barycentrics, what raster's dFdx()/dFdy() see on interpolated values. A camera ray
-/// is differentiated against its neighboring pixels' rays; any other ray as a cone of one pixel's angle from its origin.
+/// is differentiated against its neighboring pixels' rays; any other ray as a cone of one pixel's angle from its origin
+/// (RT_RAY_CONES: as the cone the path carried to it).
 void hit_barycentric_derivatives(in GeometryData geom, uint i0, uint i1, uint i2, vec3 bary, out vec3 r_ddx, out vec3 r_ddy) {
 	r_ddx = vec3(0.0);
 	r_ddy = vec3(0.0);
@@ -160,6 +181,41 @@ void hit_barycentric_derivatives(in GeometryData geom, uint i0, uint i1, uint i2
 	vec3 origin = gl_WorldRayOriginEXT;
 	vec3 direction = gl_WorldRayDirectionEXT;
 	vec3 camera_position = vec3(scene_data_block.data.inv_view_matrix[0].w, scene_data_block.data.inv_view_matrix[1].w, scene_data_block.data.inv_view_matrix[2].w);
+#ifdef RT_RAY_CONES
+	if (rt_ray_cone.y > 0.0) {
+		// A camera ray keeps its neighboring pixels' rays below, which the cone only approximates.
+		bool camera_ray;
+		if (scene_data_block.data.projection_matrix[3][3] != 0.0) {
+			camera_ray = distance(origin, camera_ray_near_point(vec2(gl_LaunchIDEXT.xy))) < 1e-3;
+		} else {
+			camera_ray = distance(origin, camera_position) < 1e-3;
+		}
+		if (!camera_ray) {
+			// The cone's footprint on the triangle's plane is an ellipse; its two axes are the steps a neighboring pixel's ray
+			// would make there (JCGT 2021, section 5, Eq. 8 and 9): h1, the ray's direction projected on the plane, stretched by
+			// one over the cosine of the angle of incidence, and h2 across it. As a camera ray's steps, each is one cone
+			// width long before the stretch, so the two branches agree at a path's first hit.
+			const float width = rt_ray_cone.x + rt_ray_cone.y * gl_HitTEXT;
+			const vec3 f = normalize(n);
+			const float cos_incidence = dot(f, direction);
+			vec3 h1 = direction - cos_incidence * f;
+			const float sin_incidence2 = dot(h1, h1);
+			vec3 a1;
+			if (sin_incidence2 < 1e-8) {
+				// Along the normal: a circle, any two perpendicular axes.
+				h1 = normalize(e1);
+				a1 = h1 * width;
+			} else {
+				h1 *= inversesqrt(sin_incidence2);
+				a1 = h1 * (width / max(abs(cos_incidence), 1e-4));
+			}
+			const vec3 a2 = cross(f, h1) * width;
+			r_ddx = plane_vector_barycentrics(a1, e1, e2);
+			r_ddy = plane_vector_barycentrics(a2, e1, e2);
+			return;
+		}
+	}
+#endif
 	vec3 dir_x, dir_y;
 	vec3 origin_x = origin;
 	vec3 origin_y = origin;

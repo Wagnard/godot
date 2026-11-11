@@ -215,6 +215,43 @@ vec2 rt_specular_motion_vector(HitRecord r, float p_roughness, vec3 p_ray_origin
 // SHADE AND BOUNCE
 // ============================================================================
 
+#ifdef RT_RAY_CONES
+/// The cone of a path that starts at the camera along p_ray_dir (raytracing_inc.glsl): no width at the eye and one
+/// pixel's angle. At the image's center that is Ray Tracing Gems, chapter 20, Eq. 30, without the arctangent (the small
+/// angle approximation of its section 20.3.4.1). The chapter keeps that one angle for every pixel (section 20.3.4.3:
+/// "we trade a bit of accuracy for faster computation"); a pixel off the view axis by an angle theta subtends less, a
+/// solid angle smaller by cos^3(theta), and the one angle read a reflection near the corners of a 60 degree view more
+/// than a mip level too coarse. So: the cone of the pixel's own solid angle, the center's angle by cos^1.5(theta).
+/// An orthogonal camera's rays are parallel, one pixel apart.
+void path_cone_init_camera(inout PathState ps, vec3 p_ray_dir) {
+	const float pixel = 2.0 / (float(gl_LaunchSizeEXT.y) * abs(scene_data_block.data.projection_matrix[1][1]));
+	const bool orthogonal = scene_data_block.data.projection_matrix[3][3] != 0.0;
+	const vec3 view_axis = -vec3(scene_data_block.data.inv_view_matrix[0].z, scene_data_block.data.inv_view_matrix[1].z, scene_data_block.data.inv_view_matrix[2].z);
+	const float cos_axis = clamp(dot(p_ray_dir, normalize(view_axis)), 0.0, 1.0);
+	ps.cone_width = orthogonal ? pixel : 0.0;
+	ps.cone_spread = orthogonal ? 0.0 : pixel * cos_axis * sqrt(cos_axis);
+	ps.cone_lobe_scale = RT_CONE_PRIMARY_LOBE_SCALE;
+}
+
+/// The cone reaches a surface p_hit_t along its ray and goes on from it unchanged (a point vertex() removed).
+void path_cone_advance(inout PathState ps, float p_hit_t) {
+	if (ps.cone_spread >= 0.0) {
+		ps.cone_width += ps.cone_spread * p_hit_t; // Ray Tracing Gems, chapter 20, Eq. 35.
+	}
+}
+
+/// The cone reaches a surface p_hit_t along its ray and leaves it along a direction sampled in a lobe of that surface,
+/// which widens it (JCGT 2021, section 4). The surface is taken as flat: its curvature adds nothing (the chapter's own
+/// implementation, section 20.4, beyond the first hit).
+void path_cone_bounce(inout PathState ps, float p_hit_t, bool p_specular, float p_roughness) {
+	if (ps.cone_spread >= 0.0) {
+		ps.cone_width += ps.cone_spread * p_hit_t;
+		ps.cone_spread += ps.cone_lobe_scale * rt_cone_lobe_sigma(p_specular, p_roughness);
+		ps.cone_lobe_scale = 1.0;
+	}
+}
+#endif
+
 /// Production shading: emissive + NEE direct lighting + BRDF importance sampling + next bounce.
 /// Also handles DLSS-RR G-buffer output on primary ray. False when the path ends here; else the next ray leaves the hit
 /// along r_next_dir, from the hit offset along r_offset_normal.
@@ -533,6 +570,9 @@ bool shade_and_bounce(inout PathState ps, HitRecord r, vec3 p_ray_origin, vec3 p
 		ps.nrd_state = NRD_PATH_BOUNCE | (brdfType == SPECULAR_TYPE ? NRD_PATH_SPECULAR : 0u);
 	}
 #endif
+#ifdef RT_RAY_CONES
+	path_cone_bounce(ps, r.hit_t, brdfType == SPECULAR_TYPE, roughness);
+#endif
 
 	r_next_dir = next_dir;
 	return true;
@@ -715,6 +755,47 @@ bool debug_shadow_blocker_view(inout PathState ps, HitRecord r, bool p_missed, i
 	ps.radiance = debug_directional_shadow_blocker(hit_pos, r.geometry_normal);
 	return false;
 }
+
+/// View 30 (Environment.RT_DEBUG_TEXTURE_MIP): the mip level the hit's texture is read at, which its closest hit returns
+/// in the emission's red (below 0: no texture with mipmaps), as NVIDIA's view colors it (964ff0ecba
+/// raytracing_closest_hit_common_inc.glsl, debug_texture_mip_color()): red (mip 0), orange, yellow, green, cyan, blue,
+/// purple, magenta (7 and coarser), blended between levels, gray without mipmaps, over the albedo's luminance. A metal
+/// shows the level of what it reflects, along its mirror direction, up to the path's bounce limit; with ray cones, as
+/// wide as its roughness makes the cone. False when the view's color is final.
+bool debug_texture_mip_view(inout PathState ps, HitRecord r, bool p_missed, inout vec3 ray_origin, inout vec3 ray_dir) {
+	if (p_missed) {
+		// The sky as it is at the camera's rays; a reflection of the sky is black.
+		ps.radiance = get_total_bounces(ps.packed_bounces_flags) == 0u ? r.emissive : vec3(0.0);
+		return false;
+	}
+	const vec3 hit_pos = ray_origin + ray_dir * r.hit_t;
+	if ((r.flags & HIT_FLAG_PASS_THROUGH) != 0u) {
+		ray_origin = offset_ray_origin(hit_pos, ray_dir);
+#ifdef RT_RAY_CONES
+		path_cone_advance(ps, r.hit_t);
+#endif
+		return true;
+	}
+	if (r.metalness >= 0.5 && get_total_bounces(ps.packed_bounces_flags) < RT_GET_MAX_BOUNCES()) {
+		ps.packed_bounces_flags = inc_total_bounce(ps.packed_bounces_flags);
+#ifdef RT_RAY_CONES
+		path_cone_bounce(ps, r.hit_t, true, r.roughness);
+#endif
+		ray_origin = offset_ray_origin(hit_pos, r.geometry_normal);
+		ray_dir = reflect(ray_dir, r.geometry_normal);
+		return true;
+	}
+	const vec3 palette[8] = vec3[](vec3(1.0, 0.0, 0.0), vec3(1.0, 0.5, 0.0), vec3(1.0, 1.0, 0.0), vec3(0.0, 1.0, 0.0), vec3(0.0, 1.0, 1.0), vec3(0.0, 0.25, 1.0), vec3(0.5, 0.0, 1.0), vec3(1.0, 0.0, 1.0));
+	const float shade = mix(0.3, 1.0, clamp(luminance(r.albedo), 0.0, 1.0));
+	const float mip = r.emissive.r;
+	if (mip < 0.0) {
+		ps.radiance = vec3(0.5) * shade;
+	} else {
+		const int level = min(int(mip), 7);
+		ps.radiance = mix(palette[level], palette[min(level + 1, 7)], mip - float(level)) * shade;
+	}
+	return false;
+}
 #endif // RT_DEBUG_ENABLED
 
 // ============================================================================
@@ -725,7 +806,13 @@ bool debug_shadow_blocker_view(inout PathState ps, HitRecord r, bool p_missed, i
 /// ended it); else the ray to trace next. r_hit_t: the hit's distance.
 bool trace_path_ray(inout PathState ps, inout vec3 ray_origin, inout vec3 ray_dir, out float r_hit_t, bool p_camera_ray) {
 	payload.packed_bounces_flags = ps.packed_bounces_flags;
+#ifdef RT_RAY_CONES
+	// The path's cone, for the closest hit (hit_barycentric_derivatives()). The raygen never reads it back: the closest
+	// hit writes the hit's distance over it, and with SER that distance comes from the hit object (below).
+	payload.hit_t = ps.cone_spread < 0.0 ? 0.0 : rt_cone_pack(ps.cone_width, ps.cone_spread);
+#else
 	payload.hit_t = 0.0;
+#endif
 	// The camera ray leaves out what the raster pass draws over the traced image (RT_MASK_SECONDARY); every other ray sees
 	// it, the first ray of a front layer reflection included (it starts at bounce 0 too).
 	const uint mask = p_camera_ray ? RT_MASK_CAMERA : RT_MASK_BOUNCE;
@@ -755,6 +842,12 @@ bool trace_path_ray(inout PathState ps, inout vec3 ray_origin, inout vec3 ray_di
 
 	const bool missed = is_path_terminated(payload.packed_bounces_flags);
 	HitRecord r = hit_unpack(payload);
+#ifdef RT_RAY_CONES
+	// The miss shader leaves hit_t as the raygen wrote it: the cone, where it was 0.
+	if (missed) {
+		r.hit_t = 0.0;
+	}
+#endif
 #endif
 	r_hit_t = r.hit_t;
 #ifdef RT_DEBUG_ENABLED
@@ -762,6 +855,9 @@ bool trace_path_ray(inout PathState ps, inout vec3 ray_origin, inout vec3 ray_di
 		const int vis_mode = int(get_rt_param(RT_PARAM_VIS_MODE));
 		if (vis_mode == 1 || vis_mode == 13) {
 			return debug_reflection_view(vis_mode, ps, r, missed, ray_origin, ray_dir);
+		}
+		if (vis_mode == RT_VIS_TEXTURE_MIP) {
+			return debug_texture_mip_view(ps, r, missed, ray_origin, ray_dir);
 		}
 		if (vis_mode == RT_VIS_DIRECTIONAL_SHADOW_BLOCKER) {
 			return debug_shadow_blocker_view(ps, r, missed, ray_origin, ray_dir);
@@ -788,6 +884,9 @@ bool trace_path_ray(inout PathState ps, inout vec3 ray_origin, inout vec3 ray_di
 	const vec3 hit_pos = ray_origin + ray_dir * r.hit_t;
 	if ((r.flags & HIT_FLAG_PASS_THROUGH) != 0u) {
 		ray_origin = offset_ray_origin(hit_pos, ray_dir);
+#ifdef RT_RAY_CONES
+		path_cone_advance(ps, r.hit_t);
+#endif
 		return true;
 	}
 	// BaseMaterial3D's emission_indirect_energy (EMISSION_INDIRECT) after the path's first diffuse bounce: here rather than in
@@ -895,6 +994,9 @@ bool peel_camera_segment(inout PathState ps, inout vec3 r_origin, inout vec3 r_d
 	float chosen_weight = 0.0;
 	float total_weight = 0.0;
 	bool layer_chosen = false;
+#ifdef RT_RAY_CONES
+	vec3 chosen_cone = vec3(0.0); // A layer's bounce: its cone_width, cone_spread and cone_lobe_scale.
+#endif
 
 	float tmin = 0.001;
 	for (uint l = 0u; l < p_budget && tmin < p_opaque_t && max(transmittance.r, max(transmittance.g, transmittance.b)) > 1.0 / 256.0; l++) {
@@ -924,6 +1026,9 @@ bool peel_camera_segment(inout PathState ps, inout vec3 r_origin, inout vec3 r_d
 #ifdef NRD_ENABLED
 			nrd_path_init(ls, false);
 #endif
+#ifdef RT_RAY_CONES
+			path_cone_init_camera(ls, p_camera_dir); // The layer is on the camera ray.
+#endif
 			vec3 offset_normal;
 			vec3 next_dir;
 			const bool bounced = shade_and_bounce(ls, r, p_camera_origin, p_camera_dir, offset_normal, next_dir);
@@ -940,6 +1045,9 @@ bool peel_camera_segment(inout PathState ps, inout vec3 r_origin, inout vec3 r_d
 					chosen_dir = next_dir;
 					chosen_weight = weight;
 					layer_chosen = true;
+#ifdef RT_RAY_CONES
+					chosen_cone = vec3(ls.cone_width, ls.cone_spread, ls.cone_lobe_scale);
+#endif
 				}
 			}
 		}
@@ -978,6 +1086,11 @@ bool peel_camera_segment(inout PathState ps, inout vec3 r_origin, inout vec3 r_d
 	ps.throughput = chosen_throughput * (total_weight / chosen_weight);
 	if (layer_chosen) {
 		ps.packed_bounces_flags = chosen_flags | (ps.packed_bounces_flags & SAMPLE_ZERO_FLAG);
+#ifdef RT_RAY_CONES
+		ps.cone_width = chosen_cone.x;
+		ps.cone_spread = chosen_cone.y;
+		ps.cone_lobe_scale = chosen_cone.z;
+#endif
 #ifdef NRD_ENABLED
 		// The rest of the path is a layer's light: not denoised.
 		if (nrd_path_stage(ps) != NRD_PATH_PRIMARY) {

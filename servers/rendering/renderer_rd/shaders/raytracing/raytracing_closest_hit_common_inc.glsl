@@ -257,6 +257,43 @@ void write_primary_hit_velocity(vec3 hit_pos) {
 // ============================================================================
 
 #ifdef RT_DEBUG_ENABLED
+// Environment.RT_DEBUG_TEXTURE_MIP (RT_VIS_TEXTURE_MIP, drawn by the raygen: debug_texture_mip_view()): the mip level a
+// texture of p_size texels and p_levels levels is read at with the gradients p_ddx / p_ddy, as the GLSL specification
+// computes it (8.14.1, the isotropic level of detail; rt_query_lod()), without the sampler's mip bias and before an
+// anisotropic sampler's own choice. -1 without mipmaps.
+float rt_debug_mip_level(ivec2 p_size, int p_levels, vec2 p_ddx, vec2 p_ddy) {
+	if (p_levels <= 1) {
+		return -1.0;
+	}
+	const vec2 dx = p_ddx * vec2(p_size);
+	const vec2 dy = p_ddy * vec2(p_size);
+	const float rho2 = max(dot(dx, dx), dot(dy, dy));
+	return clamp(rho2 > 0.0 ? 0.5 * log2(rho2) : 0.0, 0.0, float(p_levels - 1));
+}
+
+#ifdef RT_CUSTOM_HIT_GROUP
+// A custom shader's level: that of the first texture with mipmaps its fragment code reads. Its texture() calls are
+// textureGrad() calls (scene_shader_raytracing.cpp), which a macro in the closest hit stage passes through
+// rt_debug_record_mip() as raytracing_omm_bake.glsl measures its footprint: the x gradient goes through unchanged.
+// Overloads by the size's and the gradients' types: 2D, 2D array (its layers ignored); 3D and cube textures are not shown.
+float rt_debug_texture_mip = -1.0;
+vec2 rt_debug_record_mip(ivec2 p_size, int p_levels, vec2 p_dx, vec2 p_dy) {
+	if (rt_debug_texture_mip < 0.0) {
+		rt_debug_texture_mip = rt_debug_mip_level(p_size, p_levels, p_dx, p_dy);
+	}
+	return p_dx;
+}
+vec2 rt_debug_record_mip(ivec3 p_size, int p_levels, vec2 p_dx, vec2 p_dy) {
+	return rt_debug_record_mip(p_size.xy, p_levels, p_dx, p_dy);
+}
+vec3 rt_debug_record_mip(ivec3 p_size, int p_levels, vec3 p_dx, vec3 p_dy) {
+	return p_dx;
+}
+vec3 rt_debug_record_mip(ivec2 p_size, int p_levels, vec3 p_dx, vec3 p_dy) {
+	return p_dx;
+}
+#endif
+
 // Environment.RT_DEBUG_DYNAMIC_GEOMETRY (NVIDIA's view, 49a825dc52 raytracing_closest_hit_common_inc.glsl:383-411): the
 // instance's recent BLAS work, RTDynamicGeometryDebug::pack() in its geometry record (multimesh_pad0). Must match
 // RTDynamicGeometryDebug.

@@ -44,6 +44,7 @@
 // material for them, as for 1 and 13 (debug_reflection_view()).
 #define RT_VIS_TRANSPARENCY_LAYERS 23
 #define RT_VIS_DIRECTIONAL_SHADOW_BLOCKER 27
+#define RT_VIS_TEXTURE_MIP 30 // The closest hit returns the material, its texture's mip level in the emission's red.
 
 // ============================================================================
 // PATHTRACING PAYLOAD: the hit's material (48 bytes, fp16/unorm-packed; 40 with PT_PAYLOAD_COMPACT)
@@ -257,12 +258,62 @@ float specular_to_f0(float specular) {
 	return 0.16 * specular * specular;
 }
 
+#ifdef RT_RAY_CONES
+// ============================================================================
+// RAY CONES (rendering/pathtracing/ray_cones)
+// ============================================================================
+// The footprint of a pixel carried along its path, for the mip level of the textures read at each hit (Akenine-Moller
+// et al., "Texture Level of Detail Strategies for Real-Time Ray Tracing", Ray Tracing Gems, chapter 20, section 20.3.4;
+// "Improved Shader and Texture Level of Detail Using Ray Cones", JCGT vol. 10 no. 1, 2021). A cone is its width at the
+// ray's origin and its spread angle (the whole angle, in radians); at a hit t away its width is width + spread * t
+// (Ray Tracing Gems Eq. 35). The raygen keeps it (PathState) and sends it to the closest hit in the payload's hit_t,
+// which the raygen writes before every trace anyway and the closest hit overwrites with the hit's distance: two half
+// floats, as the chapter's implementation section finds enough ("16-bit precision gives good quality"). 0.0: no cone,
+// the hit takes a cone of one pixel's angle from the ray's origin, as without the variant.
+
+// The spread is kept a normal half float, so that the packed pair is a normal float whatever the width (never 0, a
+// denormal, an infinity or a NaN), and below the angle where a cone stops meaning anything.
+#define RT_CONE_SPREAD_MIN 6.2e-5
+#define RT_CONE_SPREAD_MAX 4.0
+#define RT_CONE_WIDTH_MAX 60000.0
+
+float rt_cone_pack(float p_width, float p_spread) {
+	return uintBitsToFloat(packHalf2x16(vec2(clamp(p_width, 0.0, RT_CONE_WIDTH_MAX), clamp(p_spread, RT_CONE_SPREAD_MIN, RT_CONE_SPREAD_MAX))));
+}
+
+/// x: the width at the ray's origin, y: the spread angle; y is 0 where no cone was sent.
+vec2 rt_cone_unpack(float p_packed) {
+	return unpackHalf2x16(floatBitsToUint(p_packed));
+}
+
+/// The standard deviation, in radians, of the lobe a bounce sampled, which widens the cone (JCGT 2021, section 4 and
+/// appendix A: sigma^2 = alpha^2 / (2 (1 - alpha^2)), alpha the GGX width, the roughness squared here as in
+/// prepareBRDFData()). The section takes a diffuse lobe as a roughness of 1, where the expression has no value: the
+/// width is bounded by a cosine lobe's, which the appendix's own Eq. 10 (alpha = sqrt(2 / (m + 2)), m the Phong exponent)
+/// gives for m = 1: alpha^2 = 2/3, sigma = 1.
+float rt_cone_lobe_sigma(bool p_specular, float p_roughness) {
+	const float alpha = p_roughness * p_roughness;
+	const float alpha2 = p_specular ? min(alpha * alpha, 2.0 / 3.0) : 2.0 / 3.0;
+	return sqrt(0.5 * alpha2 / (1.0 - alpha2));
+}
+// Section 4: in a path tracer, which samples the lobe itself, "the actual spread needs to be reduced below the bounding
+// angle of the specular lobe in order to avoid overblurring": sigma / 4 at the primary hit, sigma at the later ones.
+#define RT_CONE_PRIMARY_LOBE_SCALE 0.25
+#endif // RT_RAY_CONES
+
 /// The raygen's path state (fp32).
 struct PathState {
 	vec3 radiance;
 	vec3 throughput;
 	uint packed_bounces_flags;
 	uint rng_state;
+#ifdef RT_RAY_CONES
+	// The path's cone at the origin of its next ray; cone_spread < 0: none (the probes' rays). cone_lobe_scale: the share
+	// of the next bounce's lobe that widens it (RT_CONE_PRIMARY_LOBE_SCALE until the path's first bounce, then 1).
+	float cone_width;
+	float cone_spread;
+	float cone_lobe_scale;
+#endif
 #ifdef NRD_ENABLED
 	// A camera path's light split for NRD (shade_and_bounce()): what it gathered up to its primary hit's own emission (not
 	// denoised), the direct light the hit's diffuse and specular lobes reflect, the hit distance of the ray its bounce

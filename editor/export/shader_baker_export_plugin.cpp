@@ -136,8 +136,9 @@ bool ShaderBakerExportPlugin::_begin_customize_resources(const Ref<EditorExportP
 	raytracing_raster_brdf = get_export_preset()->get_project_setting("rendering/pathtracing/raster_brdf");
 	// The NRD variant with the direct light signal, as SceneShaderRaytracing::nrd_direct_light_flag() picks it at run time.
 	raytracing_nrd_direct_light = RendererRD::NRDDenoiser::is_direct_light_available() && bool(get_export_preset()->get_project_setting("rendering/pathtracing/nrd_direct_light_denoising"));
+	raytracing_ray_cones = get_export_preset()->get_project_setting("rendering/pathtracing/ray_cones");
 	to_hash.append("[PathTracing]");
-	to_hash.append(itos(bool(get_option("shader_baker/path_tracing"))) + itos(raytracing_simple_shadows) + itos(raytracing_ser) + itos(raytracing_specular_motion_vectors) + itos(raytracing_transparent_shadows) + itos(raytracing_decal_mode) + itos(raytracing_transparency_peeling) + itos(raytracing_shadow_groups) + itos(raytracing_specular_energy_compensation) + itos(raytracing_raster_brdf) + itos(raytracing_nrd_direct_light));
+	to_hash.append(itos(bool(get_option("shader_baker/path_tracing"))) + itos(raytracing_simple_shadows) + itos(raytracing_ser) + itos(raytracing_specular_motion_vectors) + itos(raytracing_transparent_shadows) + itos(raytracing_decal_mode) + itos(raytracing_transparency_peeling) + itos(raytracing_shadow_groups) + itos(raytracing_specular_energy_compensation) + itos(raytracing_raster_brdf) + itos(raytracing_nrd_direct_light) + itos(raytracing_ray_cones));
 	customization_configuration_hash = to_hash.as_string().hash64();
 
 	BitField<RenderingShaderLibrary::FeatureBits> renderer_features = {};
@@ -560,9 +561,9 @@ void ShaderBakerExportPlugin::_customize_raytracing_programs(RID p_material) {
 
 	LocalVector<SceneShaderRaytracing::BakeProgram> programs;
 	if (p_material.is_valid()) {
-		raytracing->get_material_bake_programs(p_material, raytracing_simple_shadows, raytracing_ser, raytracing_specular_motion_vectors, raytracing_transparent_shadows, raytracing_decal_mode, raytracing_transparency_peeling, raytracing_shadow_groups, raytracing_specular_energy_compensation, raytracing_raster_brdf, raytracing_nrd_direct_light, programs);
+		raytracing->get_material_bake_programs(p_material, raytracing_simple_shadows, raytracing_ser, raytracing_specular_motion_vectors, raytracing_transparent_shadows, raytracing_decal_mode, raytracing_transparency_peeling, raytracing_shadow_groups, raytracing_specular_energy_compensation, raytracing_raster_brdf, raytracing_nrd_direct_light, raytracing_ray_cones, programs);
 	} else {
-		raytracing->get_bake_programs(raytracing_simple_shadows, raytracing_ser, raytracing_specular_motion_vectors, raytracing_transparent_shadows, raytracing_decal_mode, raytracing_transparency_peeling, raytracing_shadow_groups, raytracing_specular_energy_compensation, raytracing_raster_brdf, raytracing_nrd_direct_light, programs);
+		raytracing->get_bake_programs(raytracing_simple_shadows, raytracing_ser, raytracing_specular_motion_vectors, raytracing_transparent_shadows, raytracing_decal_mode, raytracing_transparency_peeling, raytracing_shadow_groups, raytracing_specular_energy_compensation, raytracing_raster_brdf, raytracing_nrd_direct_light, raytracing_ray_cones, programs);
 	}
 
 	for (const SceneShaderRaytracing::BakeProgram &program : programs) {

@@ -169,6 +169,12 @@ void trace_probe_ray() {
 #ifdef NRD_ENABLED
 	nrd_path_init(ps, false);
 #endif
+#ifdef RT_RAY_CONES
+	// A probe has no pixel: no cone, its rays' hits read their textures as without the variant.
+	ps.cone_width = 0.0;
+	ps.cone_spread = -1.0;
+	ps.cone_lobe_scale = 1.0;
+#endif
 
 	// Uniform over the sphere, stratified in height.
 	const float z = 1.0 - 2.0 * ((float(ray) + rand(ps.rng_state)) / float(RT_PROBE_RAYS));
@@ -432,6 +438,9 @@ void main() {
 #ifdef NRD_ENABLED
 		nrd_path_init(ps, true);
 #endif
+#ifdef RT_RAY_CONES
+		path_cone_init_camera(ps, direction.xyz);
+#endif
 
 		vec3 ray_origin = origin.xyz;
 		vec3 ray_dir = direction.xyz;
@@ -620,6 +629,11 @@ void main() {
 			rs.rng_state = front_rng_state;
 #ifdef NRD_ENABLED
 			nrd_path_init(rs, false);
+#endif
+#ifdef RT_RAY_CONES
+			// The camera's cone, reflected in the front layer surface's specular lobe.
+			path_cone_init_camera(rs, direction.xyz);
+			path_cone_bounce(rs, fr.hit_t, true, fr.roughness);
 #endif
 			vec3 ray_origin = offset_ray_origin(origin.xyz + direction.xyz * fr.hit_t, fr.geometry_normal);
 			vec3 ray_dir = front_dir;
@@ -938,6 +952,11 @@ vec3 radiance_octmap_sample(vec2 p_oct_uv, float p_roughness) {
 // vertex()'s outputs interpolated at the hit and at its neighboring pixels in x and y (raytracing_custom_globals_inc.glsl).
 #define RT_INTERPOLATE_AT_POINTS
 #define RT_INTERP_POINTS 3
+#ifdef RT_DEBUG_ENABLED
+// Environment.RT_DEBUG_TEXTURE_MIP: the material's texture reads report their mip level (rt_debug_record_mip()). Not
+// expanded again inside its own expansion: the inner textureGrad() is the built-in.
+#define textureGrad(m_sampler, m_coord, m_dx, m_dy) textureGrad(m_sampler, m_coord, rt_debug_record_mip(textureSize(m_sampler, 0), textureQueryLevels(m_sampler), m_dx, m_dy), m_dy)
+#endif
 #include "raytracing_custom_globals_inc.glsl"
 #endif
 
@@ -945,6 +964,11 @@ vec3 radiance_octmap_sample(vec2 p_oct_uv, float p_roughness) {
 // MAIN
 // ============================================================================
 void main() {
+#ifdef RT_RAY_CONES
+	// The path's cone (trace_path_ray()), before the hit's distance is written over it. A front layer ray carries the
+	// distance of the opaque surface behind there instead; it is a camera ray, which needs none.
+	rt_ray_cone = is_front_layer_ray(payload.packed_bounces_flags) ? vec2(0.0) : rt_cone_unpack(payload.hit_t);
+#endif
 	HitData h = compute_hit_data();
 	// Every variant indexes the texture array table dynamically, so the descriptor stays unbounded in each layout.
 	if (h.geometry_idx == 0xFFFFFFFFu) {
@@ -1030,8 +1054,11 @@ void main() {
 #ifdef RT_DEBUG_ENABLED
 	{
 		int VIS_MODE = int(get_rt_param(RT_PARAM_VIS_MODE));
-		// 1, 13, 23 and 27: the material, for the views the raygen draws.
-		if (VIS_MODE != 0 && VIS_MODE != 1 && VIS_MODE != 13 && VIS_MODE != RT_VIS_TRANSPARENCY_LAYERS && VIS_MODE != RT_VIS_DIRECTIONAL_SHADOW_BLOCKER) {
+		// 1, 13, 23, 27 and 30: the material, for the views the raygen draws.
+		if (VIS_MODE == RT_VIS_TEXTURE_MIP) {
+			// The first texture with mipmaps the fragment code read (rt_debug_record_mip()), in the emission's red.
+			m.emissive = vec3(rt_debug_texture_mip, 0.0, 0.0);
+		} else if (VIS_MODE != 0 && VIS_MODE != 1 && VIS_MODE != 13 && VIS_MODE != RT_VIS_TRANSPARENCY_LAYERS && VIS_MODE != RT_VIS_DIRECTIONAL_SHADOW_BLOCKER) {
 			vec3 V = -gl_WorldRayDirectionEXT;
 			float NdotV = max(dot(m.normal, V), 0.0001);
 			vec3 orm = vec3(1.0, m.roughness, m.metalness);
@@ -1192,8 +1219,27 @@ void main() {
 #ifdef RT_DEBUG_ENABLED
 	{
 		int VIS_MODE = int(get_rt_param(RT_PARAM_VIS_MODE));
-		// 1, 13, 23 and 27: the material, for the views the raygen draws.
-		if (VIS_MODE != 0 && VIS_MODE != 1 && VIS_MODE != 13 && VIS_MODE != RT_VIS_TRANSPARENCY_LAYERS && VIS_MODE != RT_VIS_DIRECTIONAL_SHADOW_BLOCKER) {
+		// 1, 13, 23, 27 and 30: the material, for the views the raygen draws.
+		if (VIS_MODE == RT_VIS_TEXTURE_MIP) {
+			// The albedo texture's mip level, in the emission's red; a triplanar material's along its strongest axis.
+			vec2 mip_ddx = uv_ddx;
+			vec2 mip_ddy = uv_ddy;
+			if (triplanar) {
+				if (triplanar_weights.z >= max(triplanar_weights.x, triplanar_weights.y)) {
+					mip_ddx = triplanar_ddx.xy;
+					mip_ddy = triplanar_ddy.xy;
+				} else if (triplanar_weights.y >= triplanar_weights.x) {
+					mip_ddx = triplanar_ddx.xz;
+					mip_ddy = triplanar_ddy.xz;
+				} else {
+					mip_ddx = triplanar_ddx.zy;
+					mip_ddy = triplanar_ddy.zy;
+				}
+			}
+			m.emissive = vec3(rt_debug_mip_level(textureSize(sampler2D(bindless_textures[nonuniformEXT(mat.albedo_texture_idx)], SAMPLER_LINEAR_WITH_MIPMAPS_REPEAT), 0),
+									  textureQueryLevels(sampler2D(bindless_textures[nonuniformEXT(mat.albedo_texture_idx)], SAMPLER_LINEAR_WITH_MIPMAPS_REPEAT)), mip_ddx, mip_ddy),
+					0.0, 0.0);
+		} else if (VIS_MODE != 0 && VIS_MODE != 1 && VIS_MODE != 13 && VIS_MODE != RT_VIS_TRANSPARENCY_LAYERS && VIS_MODE != RT_VIS_DIRECTIONAL_SHADOW_BLOCKER) {
 			vec3 V = -gl_WorldRayDirectionEXT;
 			float NdotV = max(dot(m.normal, V), 0.0001);
 			debug_visualize(VIS_MODE, h.geometry_normal, m.normal, tangent_space_normal,

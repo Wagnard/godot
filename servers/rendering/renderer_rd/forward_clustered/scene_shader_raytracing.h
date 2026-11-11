@@ -144,6 +144,11 @@ public:
 		// into the raygen stage only (_build_variant_compile_context()): the hit groups and every other variant keep their
 		// code. A project setting too, on by default; the shader baker bakes the variant the export preset picks.
 		RT_FLAG_NRD_DIRECT_LIGHT = (1 << 14),
+		// rendering/pathtracing/ray_cones (RT_RAY_CONES): the raygen carries each path's ray cone (its pixel's footprint,
+		// widened by the lobes it bounced in) and sends it in the payload's hit_t; the closest hits read their textures at
+		// the mip level of its footprint. A project setting too, off by default: the other variants keep their code
+		// unchanged; the shader baker bakes the variant the export preset picks.
+		RT_FLAG_RAY_CONES = (1 << 15),
 	};
 
 	// rendering/pathtracing/decals: which path vertices receive decals.
@@ -707,10 +712,11 @@ public:
 	// use_shader_execution_reordering, specular_motion_vectors, transparent_shadows, decals other than All Hits,
 	// max_transparency_layers above 0, shadow_groups, specular_energy_compensation and raster_brdf.
 	// p_nrd_direct_light: the project's rendering/pathtracing/nrd_direct_light_denoising (the NRD variant baked with it).
-	void get_bake_programs(bool p_simple_shadows, bool p_ser, bool p_specular_motion_vectors, bool p_transparent_shadows, bool p_decal_mode, bool p_transparency_peeling, bool p_shadow_groups, bool p_specular_energy_compensation, bool p_raster_brdf, bool p_nrd_direct_light, LocalVector<BakeProgram> &r_programs);
+	// p_ray_cones: the project's rendering/pathtracing/ray_cones.
+	void get_bake_programs(bool p_simple_shadows, bool p_ser, bool p_specular_motion_vectors, bool p_transparent_shadows, bool p_decal_mode, bool p_transparency_peeling, bool p_shadow_groups, bool p_specular_energy_compensation, bool p_raster_brdf, bool p_nrd_direct_light, bool p_ray_cones, LocalVector<BakeProgram> &r_programs);
 	// p_material's hit group in every such variant, and its displacement and opacity micromap bake programs; nothing for a
 	// material path traced by hit group 0.
-	void get_material_bake_programs(RID p_material, bool p_simple_shadows, bool p_ser, bool p_specular_motion_vectors, bool p_transparent_shadows, bool p_decal_mode, bool p_transparency_peeling, bool p_shadow_groups, bool p_specular_energy_compensation, bool p_raster_brdf, bool p_nrd_direct_light, LocalVector<BakeProgram> &r_programs);
+	void get_material_bake_programs(RID p_material, bool p_simple_shadows, bool p_ser, bool p_specular_motion_vectors, bool p_transparent_shadows, bool p_decal_mode, bool p_transparency_peeling, bool p_shadow_groups, bool p_specular_energy_compensation, bool p_raster_brdf, bool p_nrd_direct_light, bool p_ray_cones, LocalVector<BakeProgram> &r_programs);
 	// RT_FLAG_NRD_DIRECT_LIGHT when the NRD variant takes it (rendering/pathtracing/nrd_direct_light_denoising, and an NRD
 	// install with its programs), else 0. Read every frame.
 	static uint32_t nrd_direct_light_flag();
