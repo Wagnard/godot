@@ -183,7 +183,7 @@ CopyEffects::CopyEffects(BitField<RasterEffects> p_raster_effects) {
 			cube_to_dp.shader.enable_group(CUBE_TO_DP_GROUP_PUSH_CONSTANTS);
 			cube_to_dp.variant = CUBE_TO_DP_PUSH_CONSTANTS;
 			cube_to_dp.watch_variant = CUBE_TO_DP_PUSH_CONSTANTS_WATCH;
-			print_line("Cube shadow copies take their parameters from push constants, the path the workaround of Wagnard/godot#1 avoids, as GODOT_SHADOW_COPY_PUSH_CONSTANTS=1 asks.");
+			print_line(vformat("Cube shadow copies take their parameters from push constants, the path the workaround of Wagnard/godot#1 avoids, as %s asks.", is_cube_to_dp_root_signature_reset_enabled() ? "GODOT_SHADOW_COPY_ROOT_SIGNATURE_RESET=1" : "GODOT_SHADOW_COPY_PUSH_CONSTANTS=1"));
 		}
 
 		cube_to_dp.shader_version = cube_to_dp.shader.version_create();
@@ -195,6 +195,12 @@ CopyEffects::CopyEffects(BitField<RasterEffects> p_raster_effects) {
 		cube_to_dp.pipeline.setup(shader, RD::RENDER_PRIMITIVE_TRIANGLES, RD::PipelineRasterizationState(), RD::PipelineMultisampleState(), dss, RD::PipelineColorBlendState(), 0);
 		if (watch) {
 			cube_to_dp.watch_pipeline.setup(cube_to_dp.shader.version_get_shader(cube_to_dp.shader_version, cube_to_dp.watch_variant), RD::RENDER_PRIMITIVE_TRIANGLES, RD::PipelineRasterizationState(), RD::PipelineMultisampleState(), dss, RD::PipelineColorBlendState(), 0);
+		}
+		cube_to_dp.root_signature_reset = is_cube_to_dp_root_signature_reset_enabled();
+		if (cube_to_dp.root_signature_reset) {
+			// The uniform buffer variant: its layout has no push constants, so it never equals the copy's own.
+			cube_to_dp.root_signature_reset_pipeline.setup(cube_to_dp.shader.version_get_shader(cube_to_dp.shader_version, CUBE_TO_DP_DEFAULT), RD::RENDER_PRIMITIVE_TRIANGLES, RD::PipelineRasterizationState(), RD::PipelineMultisampleState(), dss, RD::PipelineColorBlendState(), 0);
+			print_line("Each cube shadow copy sets its pipeline layout (D3D12 root signature) again before its push constants, a diagnostic of Wagnard/godot#1, as GODOT_SHADOW_COPY_ROOT_SIGNATURE_RESET=1 asks.");
 		}
 	}
 
@@ -1182,7 +1188,13 @@ void CopyEffects::set_color_raster(RID p_dest_texture, const Color &p_color, con
 }
 
 bool CopyEffects::is_cube_to_dp_push_constants_enabled() {
-	static const bool enabled = OS::get_singleton()->get_environment("GODOT_SHADOW_COPY_PUSH_CONSTANTS") == "1";
+	// The root signature diagnostic is about push constants: it turns them on by itself.
+	static const bool enabled = OS::get_singleton()->get_environment("GODOT_SHADOW_COPY_PUSH_CONSTANTS") == "1" || is_cube_to_dp_root_signature_reset_enabled();
+	return enabled;
+}
+
+bool CopyEffects::is_cube_to_dp_root_signature_reset_enabled() {
+	static const bool enabled = OS::get_singleton()->get_environment("GODOT_SHADOW_COPY_ROOT_SIGNATURE_RESET") == "1";
 	return enabled;
 }
 
@@ -1247,6 +1259,15 @@ void CopyEffects::copy_cubemap_to_dp(RID p_source_rd_texture, RID p_dst_framebuf
 	PipelineCacheRD &pipeline = watch ? cube_to_dp.watch_pipeline : cube_to_dp.pipeline;
 
 	RD::DrawListID draw_list = RD::get_singleton()->draw_list_begin(p_dst_framebuffer, RD::DRAW_DEFAULT_ALL,Vector<Color>(), 1.0f, 0, screen_rect);
+	if (cube_to_dp.root_signature_reset) {
+		// DIAGNOSTIC of Wagnard/godot#1 (GODOT_SHADOW_COPY_ROOT_SIGNATURE_RESET=1). The render graph runs the copies of
+		// different lights back to back when cubemaps of several sizes are in use: same pipeline, same root signature,
+		// only the root constants change between the two draws, the case in which copies were seen running with another
+		// light's z_far. Binding a pipeline of another layout first makes the D3D12 driver set the copy's root signature
+		// again, which invalidates every root argument ("Using a Root Signature", Microsoft Learn): the copy then sets all
+		// of them afresh, as it always does when a cube pass runs between two lights' copies. Nothing is drawn with it.
+		RD::get_singleton()->draw_list_bind_render_pipeline(draw_list, cube_to_dp.root_signature_reset_pipeline.get_render_pipeline(RD::INVALID_ID, RD::get_singleton()->framebuffer_get_format(p_dst_framebuffer)));
+	}
 	RD::get_singleton()->draw_list_bind_render_pipeline(draw_list, pipeline.get_render_pipeline(RD::INVALID_ID, RD::get_singleton()->framebuffer_get_format(p_dst_framebuffer)));
 	if (cube_to_dp.push_constants) {
 		if (watch) {

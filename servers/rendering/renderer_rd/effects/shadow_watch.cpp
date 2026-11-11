@@ -110,6 +110,9 @@ float mean_depth(const uint32_t *p_sums, uint32_t p_count, uint32_t p_samples_pe
 
 // Where the cube copies take their parameters from (CopyEffects::copy_cubemap_to_dp()).
 const char *copy_params_source() {
+	if (CopyEffects::is_cube_to_dp_root_signature_reset_enabled()) {
+		return "push constants, each copy after a change of root signature (GODOT_SHADOW_COPY_ROOT_SIGNATURE_RESET=1)";
+	}
 	return CopyEffects::is_cube_to_dp_push_constants_enabled() ? "push constants (GODOT_SHADOW_COPY_PUSH_CONSTANTS=1)" : "a uniform buffer (the workaround of Wagnard/godot#1)";
 }
 

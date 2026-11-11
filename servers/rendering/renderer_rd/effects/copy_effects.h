@@ -257,6 +257,10 @@ private:
 		int watch_variant = CUBE_TO_DP_WATCH;
 		PipelineCacheRD pipeline;
 		PipelineCacheRD watch_pipeline;
+		// GODOT_SHADOW_COPY_ROOT_SIGNATURE_RESET=1 only: the uniform buffer variant's pipeline, bound before each copy's
+		// own so that the copy's layout (D3D12 root signature) is set again (see copy_cubemap_to_dp()).
+		bool root_signature_reset = false;
+		PipelineCacheRD root_signature_reset_pipeline;
 		// One parameter buffer per copy of a frame, so that no copy's buffer is rewritten before it ran.
 		LocalVector<RID> params_buffers;
 		uint32_t params_buffers_used = 0;
@@ -431,6 +435,10 @@ public:
 	// GODOT_SHADOW_COPY_PUSH_CONSTANTS=1, read once: copy_cubemap_to_dp() takes its parameters in push constants, as
 	// before the workaround of Wagnard/godot#1, to retest that path with new engine versions and GPU drivers.
 	static bool is_cube_to_dp_push_constants_enabled();
+	// GODOT_SHADOW_COPY_ROOT_SIGNATURE_RESET=1, read once, a diagnostic of Wagnard/godot#1: push constants as above (it
+	// turns them on by itself), and each copy binds another pipeline layout first, so that its own root signature and
+	// every root argument are set again right before its draw.
+	static bool is_cube_to_dp_root_signature_reset_enabled();
 	// With p_watch_record, the copy also records what it reads and writes there (ShadowWatch, Wagnard/godot#1).
 	void copy_cubemap_to_dp(RID p_source_rd_texture, RID p_dst_framebuffer, const Rect2 &p_rect, const Vector2 &p_dst_size, float p_z_near, float p_z_far, bool p_dp_flip, RID p_watch_record = RID(), uint32_t p_watch_offset = 0, uint32_t p_watch_stamp = 0);
 	void copy_cubemap_to_octmap(RID p_source_rd_texture, RID p_dst_framebuffer, float p_border_size);
