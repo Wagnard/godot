@@ -546,6 +546,12 @@ void SceneShaderForwardClustered::ShaderData::_create_pipeline(PipelineKey p_pip
 		// constant: godot3d's light orb flare) hid the whole quad behind black.
 		blend_attachment.write_a = false;
 	}
+	if (p_pipeline_key.no_reactive_alpha) {
+		// The color's alpha is the reactive mask of FSR2 and FSR 3.1 here, and this surface's reflection is path traced:
+		// noise that only the upscaler's history averages. Its alpha stays out of the mask (what is under it keeps its
+		// own).
+		blend_attachment.write_a = false;
+	}
 	RD::PipelineColorBlendState blend_state_color_blend;
 	blend_state_color_blend.attachments = { blend_attachment, RD::PipelineColorBlendState::Attachment(), RD::PipelineColorBlendState::Attachment() };
 	RD::PipelineColorBlendState blend_state_color_opaque = RD::PipelineColorBlendState::create_disabled(3);

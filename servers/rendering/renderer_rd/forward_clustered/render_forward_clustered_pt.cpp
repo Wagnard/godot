@@ -232,7 +232,13 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 		lit.clear();
 		peeled.clear();
 		layer.clear();
+		// Under an upscaler that reads the color's alpha as its reactive mask (FSR2, FSR 3.1, MetalFX: every temporal
+		// one but DLSS), a transparent surface whose reflection the front layer rays trace stays out of it while its
+		// instance stands still: that reflection is one path per pixel, which only the upscaler's history averages, and
+		// the mask tells the upscaler to drop that history (PT-UPSCALER-REACTIVE-ALPHA-FIXES.md).
+		const bool front_layer_keeps_history = raytracing && using_upscaling && scale_type != SCALE_3D_DLSS;
 		for (GeometryInstanceSurfaceDataCache *surf : elements) {
+			surf->pt_no_reactive_alpha = front_layer_keeps_history && _front_layer_keeps_history(surf);
 			if (surf->rt_pass_flags & GeometryInstanceSurfaceDataCache::FLAG_PT_RASTERIZED) {
 				rasterized.push_back(surf);
 			} else if (use_layer && _rr_transparency_layer_surface(surf)) {
@@ -810,6 +816,7 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 			RenderListParameters render_list_params(render_list[RENDER_LIST_ALPHA].elements.ptr() + rasterized_count, render_list[RENDER_LIST_ALPHA].element_info.ptr() + rasterized_count, raster_lit_count - rasterized_count, reverse_cull, PASS_MODE_COLOR, transparent_color_pass_flags, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, rasterized_count, base_specialization);
 			render_list_params.rt_shadow_texture_uniform_set = rt_shadow_texture_set;
 			render_list_params.buffer_dependencies = rt_shadow_buffer_dependencies;
+			render_list_params.pt_no_reactive_alpha = true;
 			if (rasterized_count > 0) {
 				// DLSS-RR's guides where the cards are: the path tracer wrote those of what is behind them, and RR took a card
 				// for that background's lighting. Their material pass (as SDFGI's: albedo, view normal, roughness, metallic,
@@ -878,6 +885,7 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 				}
 				RenderListParameters unpeeled_params(render_list[RENDER_LIST_ALPHA].elements.ptr() + from, render_list[RENDER_LIST_ALPHA].element_info.ptr() + from, to - from, reverse_cull, PASS_MODE_COLOR, transparent_color_pass_flags, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, from, base_specialization);
 				unpeeled_params.rt_shadow_texture_uniform_set = rt_shadow_texture_set;
+				unpeeled_params.pt_no_reactive_alpha = true;
 				unpeeled_params.buffer_dependencies = render_list_params.buffer_dependencies;
 				_render_list_with_draw_list(&unpeeled_params, alpha_framebuffer, RD::DRAW_DEFAULT_ALL, Vector<Color>(), 0.0f, 0u, p_render_data->render_region);
 				from = to;
@@ -1045,6 +1053,19 @@ void RenderForwardClusteredPT::_warn_non_finite_layer(const RenderDataRD *p_rend
 	WARN_PRINT(vformat("Path tracing: %d texel(s) of the DLSS-RR transparency layer were NaN or Inf over the 8 frames to frame %d, in pixels (%d, %d)-(%d, %d) of %dx%d, cleared to 0. A shader computes an invalid value (pow() of a negative number, sqrt() of a negative number, 0/0, ...). Effects drawn there: %s.",
 			p_report.count, int64_t(p_report.frame), p_report.rect.position.x, p_report.rect.position.y, p_report.rect.get_end().x - 1, p_report.rect.get_end().y - 1, size.x, size.y,
 			candidates.is_empty() ? String("none found this frame") : String(", ").join(candidates)));
+}
+
+bool RenderForwardClusteredPT::_front_layer_keeps_history(const GeometryInstanceSurfaceDataCache *p_surf) {
+	// GODOT_PT_FRONT_LAYER_REACTIVE=1: every transparent surface writes the reactive mask, as before (comparisons).
+	static const bool off = OS::get_singleton()->get_environment("GODOT_PT_FRONT_LAYER_REACTIVE") == "1";
+	if (off || !RenderRaytracing::is_peel_candidate(p_surf)) {
+		return false;
+	}
+	// A surface that moves or deforms has no motion vectors of its own (the velocity buffer holds those of the opaque
+	// surface behind it): the reactive mask is what keeps it from leaving a trail, so it goes on writing it. Particles
+	// and MultiMeshes too.
+	const GeometryInstanceForwardClustered *inst = p_surf->owner;
+	return inst->data && inst->data->base_type == RSE::INSTANCE_MESH && !inst->mesh_instance.is_valid() && inst->transform_status == GeometryInstanceForwardClustered::TransformStatus::NONE;
 }
 
 bool RenderForwardClusteredPT::_rr_transparency_layer_enabled() {

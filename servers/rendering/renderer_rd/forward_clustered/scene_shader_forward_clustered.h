@@ -242,10 +242,14 @@ public:
 			uint32_t ubershader = false;
 			// Drawn into the path tracer's DLSS-RR transparency layer: additive blending writes no alpha there.
 			uint32_t rr_transparency_layer = false;
+			// A transparent surface whose reflection the path tracer traces, under an upscaler that reads the color's alpha
+			// as its reactive mask: it writes no alpha (RenderForwardClusteredPT, PT-UPSCALER-REACTIVE-ALPHA-FIXES.md).
+			uint32_t no_reactive_alpha = false;
 
 			uint32_t hash() const {
 				uint32_t h = hash_murmur3_one_64(vertex_format_id);
 				h = hash_murmur3_one_32(rr_transparency_layer, h);
+				h = hash_murmur3_one_32(no_reactive_alpha, h);
 				h = hash_murmur3_one_32(framebuffer_format_id, h);
 				h = hash_murmur3_one_32(cull_mode, h);
 				h = hash_murmur3_one_32(front_face, h);
