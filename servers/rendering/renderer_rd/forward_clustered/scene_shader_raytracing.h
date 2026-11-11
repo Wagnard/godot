@@ -145,9 +145,10 @@ public:
 		// code. A project setting too, on by default; the shader baker bakes the variant the export preset picks.
 		RT_FLAG_NRD_DIRECT_LIGHT = (1 << 14),
 		// rendering/pathtracing/ray_cones (RT_RAY_CONES): the raygen carries each path's ray cone (its pixel's footprint,
-		// widened by the lobes it bounced in) and sends it in the payload's hit_t; the closest hits read their textures at
-		// the mip level of its footprint. A project setting too, on by default; without it the variants keep the code
-		// they had before it. The shader baker bakes the variant the export preset picks.
+		// changed by the lobes it bounced in and the curvature of the surfaces it bounced on) and sends it in the
+		// payload's hit_t; the closest hits read their textures at the mip level of its footprint and return their
+		// surface's curvature spread in 8 bits of the payload's AO word. A project setting too, on by default; without it
+		// the variants keep the code they had before it. The shader baker bakes the variant the export preset picks.
 		RT_FLAG_RAY_CONES = (1 << 15),
 	};
 

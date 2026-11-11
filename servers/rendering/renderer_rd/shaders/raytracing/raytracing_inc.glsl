@@ -121,11 +121,21 @@ struct PathPayload {
 	uint emissive_b_backlight_r;
 	uint backlight_gb;
 	uint metalness_specular; // unorm16 pairs.
-	uint ao_ao_light_affect;
+	uint ao_ao_light_affect; // RT_RAY_CONES: unorm12 pair, and in bits 24-31 the hit's curvature spread (rt_cone_curvature_pack()).
 	uint geometry_idx_flags; // Bits 0-27: the geometry index; 28-31: HIT_FLAG_*.
 };
 
 #define HIT_GEOMETRY_IDX_MASK 0x0FFFFFFFu
+
+#ifdef RT_RAY_CONES
+uint pack_unorm_bits(float p_value, uint p_bits) {
+	return uint(round(clamp(p_value, 0.0, 1.0) * float((1u << p_bits) - 1u)));
+}
+
+float unpack_unorm_bits(uint p_value, uint p_bits) {
+	return float(p_value & ((1u << p_bits) - 1u)) / float((1u << p_bits) - 1u);
+}
+#endif
 
 #endif
 
@@ -144,12 +154,48 @@ struct HitRecord {
 	float ao_light_affect;
 	uint geometry_idx;
 	uint flags;
+#ifdef RT_RAY_CONES
+	float cone_curvature_spread; // What a reflection at the hit adds to the cone's spread (hit_cone_curvature_spread()).
+#endif
 };
 
 /// fp16 with the range clamped, as the radiance always was.
 uint pack_half2_clamped(vec2 p_value) {
 	return packHalf2x16(clamp(p_value, vec2(-65504.0), vec2(65504.0)));
 }
+
+#ifdef RT_RAY_CONES
+// The spread, in radians, that the curvature of the surface at a hit adds to the cone reflected there
+// (hit_cone_curvature_spread(), raytracing_hit_inc.glsl), in 8 bits of the payload: 0 for a flat surface, else the sign
+// (set: concave, the cone narrows) and the magnitude's logarithm in 7 bits, from 2^-17 (a hundredth of a 4K pixel's
+// angle) to 2^2 radians in steps of 0.15 octave: 5 % of the spread at most, 0.08 mip level. The 8 bits are those the
+// AO and the AO light affect give up, 12 bits each here instead of 16 (PathPayload): their 0 and 1 stay exact, and the
+// rest moves by 1 / 8190 at most, a sixteenth of the step of the 8-bit textures AO comes from.
+#define RT_CONE_CURVATURE_LOG2_MIN -17.0
+#define RT_CONE_CURVATURE_LOG2_STEP (19.0 / 126.0)
+
+uint rt_cone_curvature_pack(float p_spread) {
+	const float magnitude = abs(p_spread);
+	if (!(magnitude >= exp2(RT_CONE_CURVATURE_LOG2_MIN))) {
+		return 0u; // Flat, or not a number.
+	}
+	const float level = clamp((log2(magnitude) - RT_CONE_CURVATURE_LOG2_MIN) / RT_CONE_CURVATURE_LOG2_STEP, 0.0, 126.0);
+	return (uint(level + 0.5) + 1u) | (p_spread < 0.0 ? 0x80u : 0u);
+}
+
+float rt_cone_curvature_unpack(uint p_packed) {
+	const uint level = p_packed & 0x7Fu;
+	if (level == 0u) {
+		return 0.0;
+	}
+	const float magnitude = exp2(RT_CONE_CURVATURE_LOG2_MIN + float(level - 1u) * RT_CONE_CURVATURE_LOG2_STEP);
+	return (p_packed & 0x80u) != 0u ? -magnitude : magnitude;
+}
+
+// The closest hit's (hit_pack()), packed, for payload_write_material(): a global rather than a second write of the
+// payload's word, which would read the payload back in the hit shader (PT-VK-SER-HG0-PAYLOAD-READ-WA.md).
+uint rt_payload_cone_curvature = 0u;
+#endif // RT_RAY_CONES
 
 /// What the closest hit returns (hit_t aside).
 void payload_write_material(inout PathPayload p, vec3 p_geometry_normal, vec3 p_normal, vec3 p_albedo, float p_roughness, float p_metalness, float p_specular, vec3 p_emissive, vec3 p_backlight, float p_ao, float p_ao_light_affect, uint p_geometry_idx, uint p_flags) {
@@ -171,7 +217,11 @@ void payload_write_material(inout PathPayload p, vec3 p_geometry_normal, vec3 p_
 	p.emissive_b_backlight_r = pack_half2_clamped(vec2(p_emissive.b, p_backlight.r));
 	p.backlight_gb = pack_half2_clamped(p_backlight.gb);
 	p.metalness_specular = packUnorm2x16(vec2(p_metalness, p_specular));
+#ifdef RT_RAY_CONES
+	p.ao_ao_light_affect = pack_unorm_bits(p_ao, 12u) | (pack_unorm_bits(p_ao_light_affect, 12u) << 12u) | (rt_payload_cone_curvature << 24u);
+#else
 	p.ao_ao_light_affect = packUnorm2x16(vec2(p_ao, p_ao_light_affect));
+#endif
 	p.geometry_idx_flags = (p_geometry_idx & HIT_GEOMETRY_IDX_MASK) | p_flags;
 #endif
 }
@@ -218,11 +268,23 @@ HitRecord hit_unpack(PathPayload p) {
 	const vec2 ms = unpackUnorm2x16(p.metalness_specular);
 	r.metalness = ms.x;
 	r.specular = ms.y;
+#ifdef RT_RAY_CONES
+	r.ao = unpack_unorm_bits(p.ao_ao_light_affect, 12u);
+	r.ao_light_affect = unpack_unorm_bits(p.ao_ao_light_affect >> 12u, 12u);
+#else
 	const vec2 ao = unpackUnorm2x16(p.ao_ao_light_affect);
 	r.ao = ao.x;
 	r.ao_light_affect = ao.y;
+#endif
 	r.geometry_idx = p.geometry_idx_flags & HIT_GEOMETRY_IDX_MASK;
 	r.flags = p.geometry_idx_flags & HIT_FLAGS_MASK;
+#endif
+#ifdef RT_RAY_CONES
+#ifdef PT_PAYLOAD_COMPACT
+	r.cone_curvature_spread = 0.0; // The 40-byte layout has no room for it.
+#else
+	r.cone_curvature_spread = rt_cone_curvature_unpack(p.ao_ao_light_affect >> 24u);
+#endif
 #endif
 	return r;
 }
@@ -230,7 +292,8 @@ HitRecord hit_unpack(PathPayload p) {
 #ifdef RT_TRANSPARENCY_PEELING
 // rendering/pathtracing/max_transparency_layers: a front layer ray's hit also returns its alpha, with which the raygen peels
 // it (peel_camera_segment()). In the AO word: the AO and the AO light affect in 8 bits each, the alpha in 16 bits
-// (PT_PAYLOAD_COMPACT: the alpha in the AO's 10 bits, the AO taken as 1).
+// (PT_PAYLOAD_COMPACT: the alpha in the AO's 10 bits, the AO taken as 1). The word then has no room for the curvature
+// spread of RT_RAY_CONES: a peeled layer reflects its cone as a flat surface does.
 void payload_write_peel_alpha(inout PathPayload p, float p_ao, float p_ao_light_affect, float p_alpha) {
 #ifdef PT_PAYLOAD_COMPACT
 	p.geometry_idx_ao = (p.geometry_idx_ao & HIT_GEOMETRY_IDX_MASK) | (pack_unorm_bits(p_alpha, 10u) << 22u);
@@ -248,6 +311,9 @@ float hit_unpack_peel_alpha(PathPayload p, inout HitRecord r_layer) {
 	const vec4 ao = unpackUnorm4x8(p.ao_ao_light_affect);
 	r_layer.ao = ao.x;
 	r_layer.ao_light_affect = ao.y;
+#ifdef RT_RAY_CONES
+	r_layer.cone_curvature_spread = 0.0;
+#endif
 	return unpackUnorm2x16(p.ao_ao_light_affect).y;
 #endif
 }
@@ -270,15 +336,21 @@ float specular_to_f0(float specular) {
 // which the raygen writes before every trace anyway and the closest hit overwrites with the hit's distance: two half
 // floats, as the chapter's implementation section finds enough ("16-bit precision gives good quality"). 0.0: no cone,
 // the hit takes a cone of one pixel's angle from the ray's origin, as without the variant.
+//
+// Both are signed. A concave reflector gives the cone a negative spread (section 20.3.4.4, Eq. 33; JCGT 2021 Eq. 5 with
+// a negative curvature): it narrows to a focus, where its width changes sign, and widens again beyond. The footprint is
+// the width's absolute value (Eq. 34: "The absolute value for the distance term is there because [the spread] can be
+// negative, e.g., for concave surface points").
 
-// The spread is kept a normal half float, so that the packed pair is a normal float whatever the width (never 0, a
-// denormal, an infinity or a NaN), and below the angle where a cone stops meaning anything.
+// The spread's magnitude is kept a normal half float, so that the packed pair is a normal float whatever the width
+// (never 0, a denormal, an infinity or a NaN), and below the angle where a cone stops meaning anything.
 #define RT_CONE_SPREAD_MIN 6.2e-5
 #define RT_CONE_SPREAD_MAX 4.0
 #define RT_CONE_WIDTH_MAX 60000.0
 
 float rt_cone_pack(float p_width, float p_spread) {
-	return uintBitsToFloat(packHalf2x16(vec2(clamp(p_width, 0.0, RT_CONE_WIDTH_MAX), clamp(p_spread, RT_CONE_SPREAD_MIN, RT_CONE_SPREAD_MAX))));
+	const float spread = clamp(abs(p_spread), RT_CONE_SPREAD_MIN, RT_CONE_SPREAD_MAX);
+	return uintBitsToFloat(packHalf2x16(vec2(clamp(p_width, -RT_CONE_WIDTH_MAX, RT_CONE_WIDTH_MAX), p_spread < 0.0 ? -spread : spread)));
 }
 
 /// x: the width at the ray's origin, y: the spread angle; y is 0 where no cone was sent.
@@ -308,8 +380,9 @@ struct PathState {
 	uint packed_bounces_flags;
 	uint rng_state;
 #ifdef RT_RAY_CONES
-	// The path's cone at the origin of its next ray; cone_spread < 0: none (the probes' rays). cone_lobe_scale: the share
-	// of the next bounce's lobe that widens it (RT_CONE_PRIMARY_LOBE_SCALE until the path's first bounce, then 1).
+	// The path's cone at the origin of its next ray, both signed (rt_cone_pack()). cone_lobe_scale: the share of the next
+	// bounce's lobe that widens it (RT_CONE_PRIMARY_LOBE_SCALE until the path's first bounce, then 1); 0: no cone (the
+	// probes' rays).
 	float cone_width;
 	float cone_spread;
 	float cone_lobe_scale;

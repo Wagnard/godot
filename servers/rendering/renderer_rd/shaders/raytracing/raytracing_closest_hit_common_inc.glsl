@@ -474,6 +474,15 @@ void debug_visualize(
 /// The material evaluated at the hit, which the raygen shades (raytracing_shade_inc.glsl).
 void hit_pack(HitData h, MaterialResult m) {
 	payload.hit_t = gl_HitTEXT;
+#ifdef RT_RAY_CONES
+	{
+		// What the surface's curvature adds to the cone the raygen reflects here (path_cone_bounce()).
+		const GeometryData geom = geometries[h.geometry_idx];
+		uint i0, i1, i2;
+		get_triangle_indices(geom, i0, i1, i2);
+		rt_payload_cone_curvature = rt_cone_curvature_pack(hit_cone_curvature_spread(geom, i0, i1, i2, vec3(1.0 - attribs.x - attribs.y, attribs.x, attribs.y)));
+	}
+#endif
 	payload_write_material(payload, h.geometry_normal, m.normal, m.albedo, m.roughness, m.metalness, m.specular, m.emissive, m.backlight, m.ao, m.ao_light_affect,
 			h.geometry_idx, (m.unshaded ? HIT_FLAG_UNSHADED : 0u) | (m.specular_disabled ? HIT_FLAG_SPECULAR_DISABLED : 0u));
 #ifdef RT_TRANSPARENCY_PEELING

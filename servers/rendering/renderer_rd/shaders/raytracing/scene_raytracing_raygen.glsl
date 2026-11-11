@@ -172,8 +172,8 @@ void trace_probe_ray() {
 #ifdef RT_RAY_CONES
 	// A probe has no pixel: no cone, its rays' hits read their textures as without the variant.
 	ps.cone_width = 0.0;
-	ps.cone_spread = -1.0;
-	ps.cone_lobe_scale = 1.0;
+	ps.cone_spread = 0.0;
+	ps.cone_lobe_scale = 0.0;
 #endif
 
 	// Uniform over the sphere, stratified in height.
@@ -633,7 +633,12 @@ void main() {
 #ifdef RT_RAY_CONES
 			// The camera's cone, reflected in the front layer surface's specular lobe.
 			path_cone_init_camera(rs, direction.xyz);
-			path_cone_bounce(rs, fr.hit_t, true, fr.roughness);
+#ifdef RT_TRANSPARENCY_PEELING
+			// The hit of a front layer ray returned its alpha where the curvature spread goes (payload_write_peel_alpha()).
+			path_cone_bounce(rs, fr.hit_t, true, fr.roughness, 0.0);
+#else
+			path_cone_bounce(rs, fr.hit_t, true, fr.roughness, fr.cone_curvature_spread);
+#endif
 #endif
 			vec3 ray_origin = offset_ray_origin(origin.xyz + direction.xyz * fr.hit_t, fr.geometry_normal);
 			vec3 ray_dir = front_dir;

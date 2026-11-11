@@ -146,10 +146,31 @@ vec3 camera_ray_near_point(vec2 p_pixel) {
 }
 
 #ifdef RT_RAY_CONES
-// rendering/pathtracing/ray_cones: the cone of the ray that hit (x: its width at the ray's origin, y: its spread angle),
-// which the closest hit's main() takes from the payload (rt_cone_unpack()) before anything else; y is 0 where the raygen
-// sent none.
+// rendering/pathtracing/ray_cones: the cone of the ray that hit (x: its width at the ray's origin, y: its spread angle,
+// both signed), which the closest hit's main() takes from the payload (rt_cone_unpack()) before anything else; y is 0
+// where the raygen sent none.
 vec2 rt_ray_cone = vec2(0.0);
+
+/// Whether the ray that hit left the camera (no other ray starts at the eye, or at the pixel's point of an orthogonal
+/// camera's near plane).
+bool hit_ray_from_camera() {
+	if (scene_data_block.data.projection_matrix[3][3] != 0.0) {
+		return distance(gl_WorldRayOriginEXT, camera_ray_near_point(vec2(gl_LaunchIDEXT.xy))) < 1e-3;
+	}
+	return distance(gl_WorldRayOriginEXT, vec3(scene_data_block.data.inv_view_matrix[0].w, scene_data_block.data.inv_view_matrix[1].w, scene_data_block.data.inv_view_matrix[2].w)) < 1e-3;
+}
+
+/// The cone of the camera ray that hit, as the raygen's path_cone_init_camera() starts a path's: for the camera rays
+/// that carry none (a front layer ray's payload has the opaque surface's distance in the cone's place).
+vec2 hit_camera_cone() {
+	const float pixel = 2.0 / (float(gl_LaunchSizeEXT.y) * abs(scene_data_block.data.projection_matrix[1][1]));
+	if (scene_data_block.data.projection_matrix[3][3] != 0.0) {
+		return vec2(pixel, 0.0);
+	}
+	const vec3 view_axis = -vec3(scene_data_block.data.inv_view_matrix[0].z, scene_data_block.data.inv_view_matrix[1].z, scene_data_block.data.inv_view_matrix[2].z);
+	const float cos_axis = clamp(dot(gl_WorldRayDirectionEXT, normalize(view_axis)), 0.0, 1.0);
+	return vec2(0.0, pixel * cos_axis * sqrt(cos_axis));
+}
 
 /// The barycentric coordinates' change along p_axis, a vector in the triangle's plane.
 vec3 plane_vector_barycentrics(vec3 p_axis, vec3 e1, vec3 e2) {
@@ -182,20 +203,15 @@ void hit_barycentric_derivatives(in GeometryData geom, uint i0, uint i1, uint i2
 	vec3 direction = gl_WorldRayDirectionEXT;
 	vec3 camera_position = vec3(scene_data_block.data.inv_view_matrix[0].w, scene_data_block.data.inv_view_matrix[1].w, scene_data_block.data.inv_view_matrix[2].w);
 #ifdef RT_RAY_CONES
-	if (rt_ray_cone.y > 0.0) {
+	if (rt_ray_cone.y != 0.0) {
 		// A camera ray keeps its neighboring pixels' rays below, which the cone only approximates.
-		bool camera_ray;
-		if (scene_data_block.data.projection_matrix[3][3] != 0.0) {
-			camera_ray = distance(origin, camera_ray_near_point(vec2(gl_LaunchIDEXT.xy))) < 1e-3;
-		} else {
-			camera_ray = distance(origin, camera_position) < 1e-3;
-		}
-		if (!camera_ray) {
+		if (!hit_ray_from_camera()) {
 			// The cone's footprint on the triangle's plane is an ellipse; its two axes are the steps a neighboring pixel's ray
 			// would make there (JCGT 2021, section 5, Eq. 8 and 9): h1, the ray's direction projected on the plane, stretched by
 			// one over the cosine of the angle of incidence, and h2 across it. As a camera ray's steps, each is one cone
-			// width long before the stretch, so the two branches agree at a path's first hit.
-			const float width = rt_ray_cone.x + rt_ray_cone.y * gl_HitTEXT;
+			// width long before the stretch, so the two branches agree at a path's first hit. The width's absolute value: a
+			// cone a concave reflector narrowed has a negative one beyond its focus (rt_cone_pack()).
+			const float width = abs(rt_ray_cone.x + rt_ray_cone.y * gl_HitTEXT);
 			const vec3 f = normalize(n);
 			const float cos_incidence = dot(f, direction);
 			vec3 h1 = direction - cos_incidence * f;
@@ -517,6 +533,129 @@ TBNResult fetch_tbn(in GeometryData geom, uint i0, uint i1, uint i2, vec3 bary) 
 
 	return result;
 }
+
+#if defined(RT_RAY_CONES) && !defined(RT_NO_HIT_BUILTINS)
+// ============================================================================
+// RAY CONES: THE SPREAD A CURVED SURFACE ADDS
+// ============================================================================
+/// The curvature of a mesh along the edge from pa to pb, from its vertex normals there: JCGT 2021, section 3.3, Eq. 6,
+/// one over the radius of the circle the edge is a chord of. Positive where the surface bulges toward its normals.
+float hit_edge_curvature(vec3 pa, vec3 pb, vec3 na, vec3 nb) {
+	const vec3 edge = pb - pa;
+	return dot(nb - na, edge) / max(dot(edge, edge), 1e-20);
+}
+
+/// What a reflection at this hit adds to the spread of the cone that reached it (rt_ray_cone), in radians: positive on a
+/// convex surface, negative on a concave one, 0 on a flat one (JCGT 2021, "Improved Shader and Texture Level of Detail
+/// Using Ray Cones", section 3.2, Eq. 5: 2 k w / cos, k the curvature, w the cone's width at the hit and cos the cosine
+/// of the angle of incidence; a turn of the normal turns the reflected ray twice as much). k comes from the triangle's
+/// vertex normals (section 3.3): at a path's first hit, of the edges with the smallest and the largest curvature, each
+/// weighted by how much of the cone's footprint lies along it, the one that leaves the widest cone (the "ray-cones
+/// unified" method: an isotropic cone that bounds an anisotropic curvature); at the later hits their mean (Eq. 7).
+/// Mesh curvature only: the normals of a normal map, or of fragment(), are not seen (section 3.4: "Our new methods do
+/// not take perturbed normals into account"), nor is a surface vertex() displaced, whose normals are its rest shape's.
+float hit_cone_curvature_spread(in GeometryData geom, uint i0, uint i1, uint i2, vec3 bary) {
+	if (geom.normal_byte_offset == OFFSET_NONE || geom.vertex_address == 0ul || (geom.flags & (FLAG_DISPLACED | FLAG_PROCEDURAL)) != 0u) {
+		return 0.0;
+	}
+	const bool first_hit = hit_ray_from_camera();
+	vec2 cone = rt_ray_cone;
+	if (cone.y == 0.0) {
+		if (!first_hit) {
+			return 0.0; // A ray without a cone (the probes').
+		}
+		cone = hit_camera_cone();
+	}
+
+	vec3 n0, n1, n2;
+	if ((geom.flags & FLAG_COMPRESSED) != 0u) {
+		n0 = fetch_tbn_compressed_vertex(geom, i0).normal;
+		n1 = fetch_tbn_compressed_vertex(geom, i1).normal;
+		n2 = fetch_tbn_compressed_vertex(geom, i2).normal;
+	} else {
+		n0 = fetch_tbn_uncompressed_vertex(geom, i0).normal;
+		n1 = fetch_tbn_uncompressed_vertex(geom, i1).normal;
+		n2 = fetch_tbn_uncompressed_vertex(geom, i2).normal;
+	}
+	if (n0 == n1 && n0 == n2) {
+		return 0.0; // A flat face.
+	}
+	// To world space as compute_hit_data() takes the hit's normal there.
+	const mat3 model_rotation = mat3(gl_ObjectToWorldEXT);
+	const mat3 normal_matrix = mat3(normalize(model_rotation[0]), normalize(model_rotation[1]), normalize(model_rotation[2]));
+	n0 = normalize(normal_matrix * n0);
+	n1 = normalize(normal_matrix * n1);
+	n2 = normalize(normal_matrix * n2);
+	const vec3 p0 = gl_ObjectToWorldEXT * vec4(fetch_blas_position(geom, i0), 1.0);
+	const vec3 p1 = gl_ObjectToWorldEXT * vec4(fetch_blas_position(geom, i1), 1.0);
+	const vec3 p2 = gl_ObjectToWorldEXT * vec4(fetch_blas_position(geom, i2), 1.0);
+	vec3 f = cross(p1 - p0, p2 - p0);
+	if (dot(f, f) < 1e-24) {
+		return 0.0;
+	}
+	f = normalize(f);
+
+	const float k01 = hit_edge_curvature(p0, p1, n0, n1);
+	const float k12 = hit_edge_curvature(p1, p2, n1, n2);
+	const float k20 = hit_edge_curvature(p2, p0, n2, n0);
+
+	const vec3 direction = gl_WorldRayDirectionEXT;
+	// The cosine of the angle of incidence, on the side the vertex normals point to: from the other side a bulge is a hollow.
+	float cos_side = -dot(direction, normalize(n0 * bary.x + n1 * bary.y + n2 * bary.z));
+	cos_side = abs(cos_side) < 1e-4 ? (cos_side < 0.0 ? -1e-4 : 1e-4) : cos_side;
+	// Signed, as the cone is: beyond its focus a narrowed cone is turned inside out, and a bulge narrows it again.
+	const float spread_per_curvature = 2.0 * (cone.x + cone.y * gl_HitTEXT) / cos_side;
+
+	if (!first_hit) {
+		return (k01 + k12 + k20) * (1.0 / 3.0) * spread_per_curvature;
+	}
+
+	// The edges of the smallest and of the largest curvature, in the frame of the footprint's ellipse (section 5: one
+	// axis along the ray's direction projected on the triangle's plane, longer by one over the cosine of incidence).
+	vec3 edge_min = p1 - p0;
+	vec3 edge_max = edge_min;
+	float k_min = k01;
+	float k_max = k01;
+	if (k12 < k_min) {
+		k_min = k12;
+		edge_min = p2 - p1;
+	}
+	if (k20 < k_min) {
+		k_min = k20;
+		edge_min = p0 - p2;
+	}
+	if (k12 > k_max) {
+		k_max = k12;
+		edge_max = p2 - p1;
+	}
+	if (k20 > k_max) {
+		k_max = k20;
+		edge_max = p0 - p2;
+	}
+	const float cos_incidence = dot(f, direction);
+	vec3 h1 = direction - cos_incidence * f;
+	const float sin_incidence2 = dot(h1, h1);
+	float axis1 = 1.0; // Over the other axis.
+	if (sin_incidence2 < 1e-8) {
+		h1 = normalize(p1 - p0); // Along the normal: a circle.
+	} else {
+		h1 *= inversesqrt(sin_incidence2);
+		axis1 = 1.0 / max(abs(cos_incidence), 1e-4);
+	}
+	const vec3 h2 = cross(f, h1);
+	// How far the ellipse reaches along each edge (section 3.3): the longer reach counts whole, the other in proportion.
+	vec2 along_min = vec2(dot(edge_min, h1), dot(edge_min, h2));
+	vec2 along_max = vec2(dot(edge_max, h1), dot(edge_max, h2));
+	along_min *= inversesqrt(max(dot(along_min, along_min), 1e-30));
+	along_max *= inversesqrt(max(dot(along_max, along_max), 1e-30));
+	const float reach_min = axis1 * inversesqrt(axis1 * axis1 * along_min.y * along_min.y + along_min.x * along_min.x);
+	const float reach_max = axis1 * inversesqrt(axis1 * axis1 * along_max.y * along_max.y + along_max.x * along_max.x);
+	const float reach = max(reach_min, reach_max);
+	const float spread_min = k_min * (reach_min / reach) * spread_per_curvature;
+	const float spread_max = k_max * (reach_max / reach) * spread_per_curvature;
+	return abs(cone.y + spread_min) > abs(cone.y + spread_max) ? spread_min : spread_max;
+}
+#endif
 
 // ============================================================================
 // VERTEX ATTRIBUTE FETCHING (requires hitAttributeEXT vec2 attribs to be declared)

@@ -235,18 +235,18 @@ void path_cone_init_camera(inout PathState ps, vec3 p_ray_dir) {
 
 /// The cone reaches a surface p_hit_t along its ray and goes on from it unchanged (a point vertex() removed).
 void path_cone_advance(inout PathState ps, float p_hit_t) {
-	if (ps.cone_spread >= 0.0) {
-		ps.cone_width += ps.cone_spread * p_hit_t; // Ray Tracing Gems, chapter 20, Eq. 35.
-	}
+	ps.cone_width += ps.cone_spread * p_hit_t; // Ray Tracing Gems, chapter 20, Eq. 35.
 }
 
-/// The cone reaches a surface p_hit_t along its ray and leaves it along a direction sampled in a lobe of that surface,
-/// which widens it (JCGT 2021, section 4). The surface is taken as flat: its curvature adds nothing (the chapter's own
-/// implementation, section 20.4, beyond the first hit).
-void path_cone_bounce(inout PathState ps, float p_hit_t, bool p_specular, float p_roughness) {
-	if (ps.cone_spread >= 0.0) {
+/// The cone reaches a surface p_hit_t along its ray and leaves it along a direction sampled in a lobe of that surface.
+/// Its spread changes by the lobe's width and by the surface's curvature, which the closest hit measured for this cone
+/// (p_curvature_spread, hit_cone_curvature_spread()): JCGT 2021, section 4, "the spread change from curvature and the
+/// roughness-induced spread change combine into a global spread change", their sum. The curvature's part is negative on
+/// a concave surface, and the sum may be: the cone then narrows (rt_cone_pack()).
+void path_cone_bounce(inout PathState ps, float p_hit_t, bool p_specular, float p_roughness, float p_curvature_spread) {
+	if (ps.cone_lobe_scale != 0.0) {
 		ps.cone_width += ps.cone_spread * p_hit_t;
-		ps.cone_spread += ps.cone_lobe_scale * rt_cone_lobe_sigma(p_specular, p_roughness);
+		ps.cone_spread += ps.cone_lobe_scale * rt_cone_lobe_sigma(p_specular, p_roughness) + p_curvature_spread;
 		ps.cone_lobe_scale = 1.0;
 	}
 }
@@ -571,7 +571,7 @@ bool shade_and_bounce(inout PathState ps, HitRecord r, vec3 p_ray_origin, vec3 p
 	}
 #endif
 #ifdef RT_RAY_CONES
-	path_cone_bounce(ps, r.hit_t, brdfType == SPECULAR_TYPE, roughness);
+	path_cone_bounce(ps, r.hit_t, brdfType == SPECULAR_TYPE, roughness, r.cone_curvature_spread);
 #endif
 
 	r_next_dir = next_dir;
@@ -779,7 +779,7 @@ bool debug_texture_mip_view(inout PathState ps, HitRecord r, bool p_missed, inou
 	if (r.metalness >= 0.5 && get_total_bounces(ps.packed_bounces_flags) < RT_GET_MAX_BOUNCES()) {
 		ps.packed_bounces_flags = inc_total_bounce(ps.packed_bounces_flags);
 #ifdef RT_RAY_CONES
-		path_cone_bounce(ps, r.hit_t, true, r.roughness);
+		path_cone_bounce(ps, r.hit_t, true, r.roughness, r.cone_curvature_spread);
 #endif
 		ray_origin = offset_ray_origin(hit_pos, r.geometry_normal);
 		ray_dir = reflect(ray_dir, r.geometry_normal);
@@ -809,7 +809,7 @@ bool trace_path_ray(inout PathState ps, inout vec3 ray_origin, inout vec3 ray_di
 #ifdef RT_RAY_CONES
 	// The path's cone, for the closest hit (hit_barycentric_derivatives()). The raygen never reads it back: the closest
 	// hit writes the hit's distance over it, and with SER that distance comes from the hit object (below).
-	payload.hit_t = ps.cone_spread < 0.0 ? 0.0 : rt_cone_pack(ps.cone_width, ps.cone_spread);
+	payload.hit_t = ps.cone_lobe_scale == 0.0 ? 0.0 : rt_cone_pack(ps.cone_width, ps.cone_spread);
 #else
 	payload.hit_t = 0.0;
 #endif
