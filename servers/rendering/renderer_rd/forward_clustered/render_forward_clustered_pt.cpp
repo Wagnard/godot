@@ -639,7 +639,13 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 		}
 
 		raytracing->apply_volumetric_fog(p_render_data, fog_use_legacy_blending_get());
-		raytracing->copy_output_texture(p_render_data, keep_background);
+		// As the raster's opaque pass (RenderForwardClustered::_render_scene()): with a temporal upscaler, opaque surfaces
+		// leave an alpha of 0, because the color's alpha is then the reactive mask of FSR2 and FSR 3.1
+		// (get_internal_texture_reactive()), which only the transparent pass should fill. The raygen writes 1: every
+		// pixel was reactive, so FSR kept no history anywhere and showed each jittered frame as it came. DLSS reads no
+		// reactive mask, and in a transparent viewport it upscales that alpha as the coverage.
+		const bool apply_alpha_multiplier = using_upscaling && !(scale_type == SCALE_3D_DLSS && p_render_data->transparent_bg);
+		raytracing->copy_output_texture(p_render_data, keep_background, apply_alpha_multiplier);
 	}
 
 	// The pathtracing_rasterized cards are drawn next, where raster's opaque pass draws them (RenderForwardClustered::

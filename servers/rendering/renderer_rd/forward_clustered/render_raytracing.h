@@ -1121,7 +1121,7 @@ class RenderRaytracing {
 		struct PushConstant {
 			int32_t size[2];
 			uint32_t keep_background;
-			uint32_t pad;
+			float alpha_multiplier;
 		};
 		RaytracingOutputCopyShaderRD shader;
 		RID version;
@@ -1398,8 +1398,10 @@ public:
 	RID probe_buffer;
 
 	// Where the camera rays missed, `p_keep_background` keeps the color buffer's pixels (BG_CANVAS, BG_KEEP), else the
-	// miss color goes there with an alpha of 0, as the raster's clear color.
-	void copy_output_texture(const RenderDataRD *p_render_data, bool p_keep_background);
+	// miss color goes there with an alpha of 0, as the raster's clear color. Where they hit, `p_apply_alpha_multiplier`
+	// writes an alpha of 0, as the raster's opaque pass does when the color's alpha is the upscaler's reactive mask
+	// (RenderForwardClustered::_render_scene(), apply_alpha_multiplier): the raygen writes 1.
+	void copy_output_texture(const RenderDataRD *p_render_data, bool p_keep_background, bool p_apply_alpha_multiplier);
 	void apply_volumetric_fog(const RenderDataRD *p_render_data, bool p_legacy_blending);
 	void dlss_rr_write_background_albedo(const RenderDataRD *p_render_data);
 	void free_viewport_state(RenderSceneBuffersRD *p_render_buffers);

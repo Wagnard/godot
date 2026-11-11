@@ -7568,7 +7568,7 @@ void RenderRaytracing::dlss_rr_write_background_albedo(const RenderDataRD *p_ren
 	rd->compute_list_end();
 }
 
-void RenderRaytracing::copy_output_texture(const RenderDataRD *p_render_data, bool p_keep_background) {
+void RenderRaytracing::copy_output_texture(const RenderDataRD *p_render_data, bool p_keep_background, bool p_apply_alpha_multiplier) {
 	Ref<RenderSceneBuffersRD> rb = p_render_data->render_buffers;
 	ERR_FAIL_COND(rb.is_null());
 
@@ -7581,6 +7581,7 @@ void RenderRaytracing::copy_output_texture(const RenderDataRD *p_render_data, bo
 	push_constant.size[0] = size.width;
 	push_constant.size[1] = size.height;
 	push_constant.keep_background = p_keep_background ? 1 : 0;
+	push_constant.alpha_multiplier = p_apply_alpha_multiplier ? 0.0f : 1.0f;
 
 	RD::Uniform source(RD::UNIFORM_TYPE_TEXTURE, 0, rt_get_texture(rb.ptr()));
 	RD::Uniform depth(RD::UNIFORM_TYPE_IMAGE, 1, rt_get_depth_texture(rb.ptr()));
