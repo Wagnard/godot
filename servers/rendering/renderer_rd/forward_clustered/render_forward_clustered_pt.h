@@ -63,9 +63,6 @@ class RenderForwardClusteredPT : public RenderForwardClustered {
 	// the TLAS, after its build, made at its first use.
 	RTFogShadows *fog_shadows = nullptr;
 	bool _fog_traces_shadows();
-	// Whether a surface of the transparent list writes no alpha under an upscaler that reads the color's alpha as its
-	// reactive mask: a surface whose reflection the path tracer traces, on a mesh instance that neither moves nor deforms.
-	static bool _front_layer_keeps_history(const GeometryInstanceSurfaceDataCache *p_surf);
 	// DLSS-RR's transparency layer (Integration Guide 3.4.10): the transparent surfaces drawn apart, upscaled by RR without
 	// being denoised. Unshaded ones only (nothing traced in them), blended so that the target holds premultiplied color and
 	// coverage (mix, premultiplied alpha), reading nothing from the screen.

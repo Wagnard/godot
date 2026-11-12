@@ -80,6 +80,7 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 
 	unshaded = false;
 	front_layer_reflection_disabled = false;
+	reactive_mask_disabled = false;
 	pathtracing_rasterized = false;
 	fog_disabled = false;
 	uses_vertex = false;
@@ -144,6 +145,7 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 
 	actions.render_mode_flags["unshaded"] = &unshaded;
 	actions.render_mode_flags["front_layer_reflection_disabled"] = &front_layer_reflection_disabled;
+	actions.render_mode_flags["reactive_mask_disabled"] = &reactive_mask_disabled;
 	actions.render_mode_flags["pathtracing_rasterized"] = &pathtracing_rasterized;
 	actions.render_mode_flags["fog_disabled"] = &fog_disabled;
 	actions.render_mode_flags["wireframe"] = &wireframe;
@@ -547,9 +549,8 @@ void SceneShaderForwardClustered::ShaderData::_create_pipeline(PipelineKey p_pip
 		blend_attachment.write_a = false;
 	}
 	if (p_pipeline_key.no_reactive_alpha) {
-		// The color's alpha is the reactive mask of FSR2 and FSR 3.1 here, and this surface's reflection is path traced:
-		// noise that only the upscaler's history averages. Its alpha stays out of the mask (what is under it keeps its
-		// own).
+		// The color's alpha is the reactive mask of FSR2 and FSR 3.1 here, and this surface's material asks to stay out
+		// of it (render_mode reactive_mask_disabled): it writes no alpha, and what is under it keeps its own.
 		blend_attachment.write_a = false;
 	}
 	RD::PipelineColorBlendState blend_state_color_blend;

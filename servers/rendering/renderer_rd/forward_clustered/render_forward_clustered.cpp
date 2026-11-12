@@ -631,7 +631,7 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 		pipeline_key.framebuffer_format_id = framebuffer_format;
 		pipeline_key.wireframe = p_params->force_wireframe;
 		pipeline_key.rr_transparency_layer = p_params->rr_transparency_layer;
-		pipeline_key.no_reactive_alpha = p_params->pt_no_reactive_alpha && surf->pt_no_reactive_alpha;
+		pipeline_key.no_reactive_alpha = p_params->no_reactive_alpha && shader->reactive_mask_disabled;
 		pipeline_key.ubershader = 0;
 
 		bool emulate_point_size = shader->uses_point_size && scene_shader.emulate_point_size;
@@ -3762,6 +3762,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 
 		RID alpha_framebuffer = rb_data.is_valid() ? rb_data->get_color_pass_fb(transparent_color_pass_flags) : color_only_framebuffer;
 		RenderListParameters render_list_params(render_list[RENDER_LIST_ALPHA].elements.ptr(), render_list[RENDER_LIST_ALPHA].element_info.ptr(), render_list[RENDER_LIST_ALPHA].elements.size(), reverse_cull, PASS_MODE_COLOR, transparent_color_pass_flags, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, 0, base_specialization);
+		// The color's alpha is the reactive mask of every temporal upscaler but DLSS (apply_alpha_multiplier above): the
+		// materials with render_mode reactive_mask_disabled stay out of it.
+		render_list_params.no_reactive_alpha = using_motion_pass && scale_type != SCALE_3D_DLSS;
 		_render_list_with_draw_list(&render_list_params, alpha_framebuffer, RD::DRAW_DEFAULT_ALL, Vector<Color>(), 0.0f, 0u, p_render_data->render_region);
 	}
 

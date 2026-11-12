@@ -571,6 +571,7 @@
 		</constant>
 		<constant name="SCALING_3D_MODE_FSR2" value="2" enum="Scaling3DMode">
 			Use AMD FidelityFX Super Resolution 2.2 upscaling for the viewport's 3D buffer. The amount of scaling can be set using [member Viewport.scaling_3d_scale]. Values less than [code]1.0[/code] will result in the viewport being upscaled using FSR2. Values greater than [code]1.0[/code] are not supported and bilinear downsampling will be used instead. A value of [code]1.0[/code] will use FSR2 at native resolution as a TAA solution.
+			[b]Note:[/b] Transparent materials are drawn without motion vectors, so their opacity is given to FSR2 as its [i]reactive mask[/i]: the more opaque a transparent surface, the less FSR2 reuses previous frames there. This prevents trails behind particles and other transparent effects that move or change quickly, but it leaves a large transparent surface that changes slowly, such as water or a window, aliased and flickering, the more so with path tracing ([member Environment.pathtracing_enabled]), where its reflection is noise that only previous frames smooth out. Add [code]render_mode reactive_mask_disabled;[/code] to the [ShaderMaterial] of such a surface to keep it out of the mask. Do not use it for a surface whose content moves quickly across it (a waterfall, scrolling stripes): it would come out torn.
 		</constant>
 		<constant name="SCALING_3D_MODE_METALFX_SPATIAL" value="3" enum="Scaling3DMode">
 			Use the [url=https://developer.apple.com/documentation/metalfx/mtlfxspatialscaler#overview]MetalFX spatial upscaler[/url] for the viewport's 3D buffer.
@@ -596,6 +597,7 @@
 		<constant name="SCALING_3D_MODE_FSR3" value="7" enum="Scaling3DMode">
 			Use AMD FSR 3.1 upscaling for the viewport's 3D buffer, through AMD's signed FidelityFX DLLs next to the executable ([code]amd_fidelityfx_loader_dx12.dll[/code] and [code]amd_fidelityfx_upscaler_dx12.dll[/code] for D3D12, [code]amd_fidelityfx_loader_vk.dll[/code] and [code]amd_fidelityfx_upscaler_vk.dll[/code] for Vulkan). The DLL picks the newest upscaler the GPU supports: FSR 3.1 on any GPU, FSR 4 on GPUs that support it. The amount of scaling can be set using [member Viewport.scaling_3d_scale]. Values less than [code]1.0[/code] will result in the viewport being upscaled. Values greater than [code]1.0[/code] are not supported and bilinear downsampling will be used instead. A value of [code]1.0[/code] will use FSR at native resolution as a TAA solution (Native AA). Textures are sampled with the mipmap bias AMD documents, [code]log2(scale) - 1.0[/code] (other temporal modes use [code]log2(scale) - 0.5[/code]), plus [member texture_mipmap_bias].
 			[b]Note:[/b] Only supported on Windows with the Forward+ renderer and the D3D12 or Vulkan rendering driver, for a single view. Elsewhere, or without the DLLs, [constant SCALING_3D_MODE_FSR2] is used instead.
+			[b]Note:[/b] Transparent materials write FSR's reactive mask, as with [constant SCALING_3D_MODE_FSR2]; see there for [code]render_mode reactive_mask_disabled;[/code].
 		</constant>
 		<constant name="SCALING_3D_MODE_MAX" value="8" enum="Scaling3DMode">
 			Represents the size of the [enum Scaling3DMode] enum.

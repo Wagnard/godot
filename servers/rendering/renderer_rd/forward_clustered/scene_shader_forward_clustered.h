@@ -242,8 +242,8 @@ public:
 			uint32_t ubershader = false;
 			// Drawn into the path tracer's DLSS-RR transparency layer: additive blending writes no alpha there.
 			uint32_t rr_transparency_layer = false;
-			// A transparent surface whose reflection the path tracer traces, under an upscaler that reads the color's alpha
-			// as its reactive mask: it writes no alpha (RenderForwardClusteredPT, PT-UPSCALER-REACTIVE-ALPHA-FIXES.md).
+			// A surface with render_mode reactive_mask_disabled in the transparent pass, under an upscaler that reads the
+			// color's alpha as its reactive mask: it writes no alpha (RenderListParameters::no_reactive_alpha).
 			uint32_t no_reactive_alpha = false;
 
 			uint32_t hash() const {
@@ -310,6 +310,9 @@ public:
 		bool unshaded = false;
 		// render_mode front_layer_reflection_disabled: the path tracer's front layer leaves this transparent surface out.
 		bool front_layer_reflection_disabled = false;
+		// render_mode reactive_mask_disabled: in the transparent pass, this surface's alpha stays out of the temporal
+		// upscaler's reactive mask (PipelineKey::no_reactive_alpha).
+		bool reactive_mask_disabled = false;
 		// render_mode pathtracing_rasterized: path traced, the raster transparent pass draws this surface over the traced
 		// image (lit there, so with no path tracing noise); the camera rays leave it out, the other rays keep it.
 		bool pathtracing_rasterized = false;

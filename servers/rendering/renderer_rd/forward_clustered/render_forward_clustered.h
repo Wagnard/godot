@@ -294,7 +294,9 @@ protected:
 		RID render_pass_uniform_set;
 		bool force_wireframe = false;
 		bool rr_transparency_layer = false; // Into the path tracer's DLSS-RR transparency layer (PipelineKey::rr_transparency_layer).
-		bool pt_no_reactive_alpha = false; // The path tracer's transparent pass: surfaces marked pt_no_reactive_alpha write no alpha (PipelineKey::no_reactive_alpha).
+		// The transparent pass under an upscaler that reads the color's alpha as its reactive mask: the surfaces whose
+		// material has render_mode reactive_mask_disabled write no alpha (PipelineKey::no_reactive_alpha).
+		bool no_reactive_alpha = false;
 		Vector2 uv_offset;
 		float lod_distance_multiplier = 0.0;
 		float screen_mesh_lod_threshold = 0.0;
@@ -871,9 +873,6 @@ protected:
 		RSE::PrimitiveType primitive = RSE::PRIMITIVE_MAX;
 		uint32_t flags = 0;
 		uint32_t rt_pass_flags = 0;
-		// Written by RenderForwardClusteredPT for every surface of its transparent list, each view; read by that view's
-		// transparent pass only (RenderListParameters::pt_no_reactive_alpha).
-		bool pt_no_reactive_alpha = false;
 		uint32_t surface_index = 0;
 		uint32_t color_pass_inclusion_mask = 0;
 

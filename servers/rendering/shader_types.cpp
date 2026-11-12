@@ -320,6 +320,12 @@ ShaderTypes::ShaderTypes() {
 		// transparent surface only (as Unreal's per-material "Allow Front Layer Translucency"). A thin effect in front of
 		// water would otherwise take the water's traced reflection from it.
 		shader_modes[RSE::SHADER_SPATIAL].modes.push_back({ PNAME("front_layer_reflection_disabled") });
+		// Temporal upscalers with a reactive mask (FSR2, FSR 3.1, MetalFX): a transparent surface that does not write
+		// it, so the upscaler keeps its history there. The mask is what a blended surface without motion vectors needs
+		// when it or its content moves (particles, a waterfall); on a large surface that changes slowly (water, a
+		// window) it only leaves the surface aliased and, path traced, noisy. The material's author chooses, as with the
+		// per material reactive control of AMD's FSR plugin for Unreal.
+		shader_modes[RSE::SHADER_SPATIAL].modes.push_back({ PNAME("reactive_mask_disabled") });
 		// Path tracing: drawn by the raster pass over the traced image instead of by the camera rays, which leave it out
 		// (shadows, reflections and bounces still trace it). For flat cards such as sprites: a thin surface lit by a
 		// one-sample path was noise the denoiser blurred away.
