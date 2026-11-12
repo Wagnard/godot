@@ -694,6 +694,11 @@ protected:
 
 	static RenderForwardClustered *singleton;
 
+	// rendering/global_illumination/sdfgi/transparent_surface_reflections, read at startup: the scene shader declares the
+	// SDFGI cascades (SDFGI_FORWARD_REFLECTIONS) and the smooth surfaces lit in the forward pass trace their reflection
+	// through them, as the deferred GI pass does for opaque ones.
+	bool sdfgi_forward_reflections = false;
+
 	// The path tracer's front layer reflection (rgb, view depth in alpha), read by its transparent pass in place of SSR.
 	RID front_layer_reflection;
 	// The path tracer's TLAS, which the lights of its transparent pass trace their shadows through (USE_RT_SHADOWS), and

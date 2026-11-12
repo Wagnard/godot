@@ -285,6 +285,11 @@ void sdfvoxel_gi_process(uint cascade, vec3 cascade_pos, vec3 cam_pos, vec3 cam_
 	specular_light = specular_accum;
 }
 
+#define SDFGI_TRACE_SDF(m_cascade) sampler3D(sdf_cascades[m_cascade], linear_sampler)
+#define SDFGI_TRACE_LIGHT(m_cascade) sampler3D(light_cascades[m_cascade], linear_sampler)
+
+#include "../sdfgi_reflection_trace_inc.glsl"
+
 void sdfgi_process(vec3 vertex, vec3 normal, vec3 reflection, float roughness, out vec4 ambient_light, out vec4 reflection_light) {
 	//make vertex orientation the world one, but still align to camera
 	vertex.y *= sdfgi.y_mult;
@@ -368,109 +373,9 @@ void sdfgi_process(vec3 vertex, vec3 normal, vec3 reflection, float roughness, o
 		ambient_light.rgb = diffuse;
 
 		if (roughness < 0.2) {
-			vec3 pos_to_uvw = 1.0 / sdfgi.grid_size;
-			vec4 light_accum = vec4(0.0);
-
-			float blend_size = (sdfgi.grid_size.x / float(sdfgi.probe_axis_size - 1)) * 0.5;
-
-			float radius_sizes[SDFGI_MAX_CASCADES];
-			cascade = 0xFFFF;
-
-			float base_distance = length(cam_pos);
-			for (uint i = 0; i < sdfgi.max_cascades; i++) {
-				radius_sizes[i] = (1.0 / sdfgi.cascades[i].to_cell) * (sdfgi.grid_size.x * 0.5 - blend_size);
-				if (cascade == 0xFFFF && base_distance < radius_sizes[i]) {
-					cascade = i;
-				}
-			}
-
-			cascade = min(cascade, sdfgi.max_cascades - 1);
-
-			float max_distance = radius_sizes[sdfgi.max_cascades - 1];
-			vec3 ray_pos = cam_pos;
-			vec3 ray_dir = reflection;
-
-			{
-				float prev_radius = cascade > 0 ? radius_sizes[cascade - 1] : 0.0;
-				float base_blend = (base_distance - prev_radius) / (radius_sizes[cascade] - prev_radius);
-				float bias = (1.0 + base_blend) * 1.1;
-				vec3 abs_ray_dir = abs(ray_dir);
-				//ray_pos += ray_dir * (bias / sdfgi.cascades[cascade].to_cell); //bias to avoid self occlusion
-				ray_pos += (ray_dir * 1.0 / max(abs_ray_dir.x, max(abs_ray_dir.y, abs_ray_dir.z)) + cam_normal * 1.4) * bias / sdfgi.cascades[cascade].to_cell;
-			}
-			float softness = 0.2 + min(1.0, roughness * 5.0) * 4.0; //approximation to roughness so it does not seem like a hard fade
-			uint i = 0;
-			bool found = false;
-			while (true) {
-				if (length(ray_pos) >= max_distance || light_accum.a > 0.99) {
-					break;
-				}
-				if (!found && i >= cascade && length(ray_pos) < radius_sizes[i]) {
-					uint next_i = min(i + 1, sdfgi.max_cascades - 1);
-					cascade = max(i, cascade); //never go down
-
-					vec3 pos = ray_pos - sdfgi.cascades[i].position;
-					pos *= sdfgi.cascades[i].to_cell * pos_to_uvw;
-
-					float fdistance = textureLod(sampler3D(sdf_cascades[i], linear_sampler), pos, 0.0).r * 255.0 - 1.1;
-
-					vec4 hit_light = vec4(0.0);
-					if (fdistance < softness) {
-						hit_light.rgb = textureLod(sampler3D(light_cascades[i], linear_sampler), pos, 0.0).rgb;
-						hit_light.rgb *= 0.5; //approximation given value read is actually meant for anisotropy
-						hit_light.a = clamp(1.0 - (fdistance / softness), 0.0, 1.0);
-						hit_light.rgb *= hit_light.a;
-					}
-
-					fdistance /= sdfgi.cascades[i].to_cell;
-
-					if (i < (sdfgi.max_cascades - 1)) {
-						pos = ray_pos - sdfgi.cascades[next_i].position;
-						pos *= sdfgi.cascades[next_i].to_cell * pos_to_uvw;
-
-						float fdistance2 = textureLod(sampler3D(sdf_cascades[next_i], linear_sampler), pos, 0.0).r * 255.0 - 1.1;
-
-						vec4 hit_light2 = vec4(0.0);
-						if (fdistance2 < softness) {
-							hit_light2.rgb = textureLod(sampler3D(light_cascades[next_i], linear_sampler), pos, 0.0).rgb;
-							hit_light2.rgb *= 0.5; //approximation given value read is actually meant for anisotropy
-							hit_light2.a = clamp(1.0 - (fdistance2 / softness), 0.0, 1.0);
-							hit_light2.rgb *= hit_light2.a;
-						}
-
-						float prev_radius = i == 0 ? 0.0 : radius_sizes[max(0, i - 1)];
-						float blend = clamp((length(ray_pos) - prev_radius) / (radius_sizes[i] - prev_radius), 0.0, 1.0);
-
-						fdistance2 /= sdfgi.cascades[next_i].to_cell;
-
-						hit_light = mix(hit_light, hit_light2, blend);
-						fdistance = mix(fdistance, fdistance2, blend);
-					}
-
-					light_accum += hit_light;
-					ray_pos += ray_dir * fdistance;
-					found = true;
-				}
-				i++;
-				if (i == sdfgi.max_cascades) {
-					i = 0;
-					found = false;
-				}
-			}
-
-			vec3 light = light_accum.rgb / max(light_accum.a, 0.00001);
-			float alpha = min(1.0, light_accum.a);
-
-			float b = min(1.0, roughness * 5.0);
-
-			float sa = 1.0 - b;
-
-			reflection_light.a = alpha * sa + b;
-			if (reflection_light.a == 0) {
-				specular = vec3(0.0);
-			} else {
-				specular = (light * alpha * sa + specular * b) / reflection_light.a;
-			}
+			vec4 traced = sdfgi_resolve_reflection(sdfgi_trace_reflection(cam_pos, cam_normal, reflection, roughness), specular, roughness);
+			specular = traced.rgb;
+			reflection_light.a = traced.a;
 		}
 
 		reflection_light.rgb = specular;

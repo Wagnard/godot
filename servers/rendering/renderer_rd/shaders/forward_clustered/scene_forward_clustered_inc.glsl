@@ -545,6 +545,14 @@ layout(set = 1, binding = 29) uniform texture2D reflection_buffer;
 layout(set = 1, binding = 30) uniform texture2DArray sdfgi_lightprobe_texture;
 layout(set = 1, binding = 31) uniform texture3D sdfgi_occlusion_cascades;
 
+#ifdef SDFGI_FORWARD_REFLECTIONS
+// The SDFGI cascades' distance fields and light, through which the smooth surfaces lit in the forward pass (the
+// transparent ones) trace their reflection, as environment/gi.glsl does for the opaque ones
+// (rendering/global_illumination/sdfgi/transparent_surface_reflections).
+layout(set = 1, binding = 43) uniform texture3D sdfgi_sdf_cascades[SDFGI_MAX_CASCADES];
+layout(set = 1, binding = 44) uniform texture3D sdfgi_light_cascades[SDFGI_MAX_CASCADES];
+#endif
+
 struct VoxelGIData {
 	mat4 xform; // 64 - 64
 

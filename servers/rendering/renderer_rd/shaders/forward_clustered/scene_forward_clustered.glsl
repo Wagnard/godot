@@ -1226,6 +1226,16 @@ float rt_shadow_visibility(vec3 p_vertex, vec3 p_geo_normal, vec3 p_light_dir, f
 
 #include "../scene_forward_gi_inc.glsl"
 
+#ifdef SDFGI_FORWARD_REFLECTIONS
+#define SDFGI_TRACE_SDF(m_cascade) sampler3D(sdfgi_sdf_cascades[m_cascade], SAMPLER_LINEAR_CLAMP)
+#define SDFGI_TRACE_LIGHT(m_cascade) sampler3D(sdfgi_light_cascades[m_cascade], SAMPLER_LINEAR_CLAMP)
+// The march is bounded here: a material may hand it any value. The rays of godot3d's lake and village and of the
+// feature's test scene took fewer than about 64 passes.
+#define SDFGI_TRACE_MAX_PASSES 256u
+
+#include "../sdfgi_reflection_trace_inc.glsl"
+#endif
+
 #include "../material_inputs_inc.glsl"
 
 #endif //!defined(MODE_RENDER_DEPTH) && !defined(MODE_UNSHADED)
@@ -2054,7 +2064,13 @@ void fragment_shader(in SceneData scene_data) {
 				//blend
 				if (cascade == sdfgi.max_cascades - 1) {
 					diffuse = mix(diffuse, ambient_light, blend);
+#ifdef SDFGI_FORWARD_REFLECTIONS
+					// A smooth surface's reflection is traced below: the trace's coverage is its fade, as in the
+					// deferred GI pass, and the probes' reflection goes into it as it is.
+					if (use_specular && !(roughness < 0.2)) {
+#else
 					if (use_specular) {
+#endif
 						// The probes' reflection fades into the surface's own (the sky) at the edge of the last
 						// cascade, as the diffuse light above. It was assigned to indirect_specular_light here, which
 						// the end of this block then overwrote with the probes' alone: a hard edge.
@@ -2074,7 +2090,20 @@ void fragment_shader(in SceneData scene_data) {
 
 			ambient_light = diffuse;
 			if (use_specular) {
-				indirect_specular_light = specular;
+#ifdef SDFGI_FORWARD_REFLECTIONS
+				if (roughness < 0.2) {
+					// As the deferred GI pass does for opaque surfaces (environment/gi.glsl): what the reflected ray
+					// meets in the cascades, over what the surface reflects otherwise (the sky) where it meets
+					// nothing. The probes' reflection already has sdfgi.energy.
+					vec4 light_accum = sdfgi_trace_reflection(cam_pos, cam_normal, cam_reflection, roughness);
+					light_accum.rgb *= sdfgi.energy;
+					vec4 traced = sdfgi_resolve_reflection(light_accum, specular, roughness);
+					indirect_specular_light = mix(indirect_specular_light, traced.rgb, traced.a);
+				} else
+#endif
+				{
+					indirect_specular_light = specular;
+				}
 			}
 		}
 	}

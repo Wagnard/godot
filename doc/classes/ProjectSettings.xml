@@ -3101,6 +3101,12 @@
 			The number of rays to throw per frame when computing signed distance field global illumination. Higher values lead to a less noisy result, at the cost of performance. See also [member rendering/global_illumination/sdfgi/frames_to_converge] and [member rendering/global_illumination/sdfgi/frames_to_update_lights].
 			[b]Note:[/b] This property is only read when the project starts. To control SDFGI quality at runtime, call [method RenderingServer.environment_set_sdfgi_ray_count] instead.
 		</member>
+		<member name="rendering/global_illumination/sdfgi/transparent_surface_reflections" type="bool" setter="" getter="" default="true">
+			If [code]true[/code], transparent surfaces lit by SDFGI ([member Environment.sdfgi_enabled]) whose roughness is lower than 0.2 trace their reflection through the signed distance field, as opaque surfaces do: they reflect the surrounding geometry, and the sky where nothing is in the way. If [code]false[/code], such a surface only gets the low-detail reflection of the SDFGI probes, whatever its roughness (Godot's behavior).
+			[b]Performance:[/b] The reflection is traced once per pixel of each smooth transparent surface, at the viewport's resolution: [member rendering/global_illumination/gi/use_half_resolution] does not apply to it, and overlapping surfaces each trace their own. A lake covering a fifth of a 2560×1440 image costs about 0.1 ms on a high-end GPU, a mirror-like surface covering most of it about 1 ms. Rougher transparent surfaces (such as particles with a default material) and scenes without SDFGI are not affected.
+			[b]Note:[/b] Transparent surfaces are not part of the signed distance field: they are not reflected in other surfaces.
+			[b]Note:[/b] This property is only read when the project starts. Only supported by the Forward+ renderer.
+		</member>
 		<member name="rendering/global_illumination/voxel_gi/quality" type="int" setter="" getter="" default="0">
 			The VoxelGI quality to use. High quality leads to more precise lighting and better reflections, but is slower to render. This setting does not affect the baked data and doesn't require baking the [VoxelGI] again to apply.
 			[b]Note:[/b] This property is only read when the project starts. To control VoxelGI quality at runtime, call [method RenderingServer.voxel_gi_set_quality] instead.

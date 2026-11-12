@@ -5970,6 +5970,29 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 		uniforms.push_back(u);
 	}
 
+	if (sdfgi_forward_reflections) {
+		// SDFGI_FORWARD_REFLECTIONS: the cascades through which the forward pass traces its reflections, as
+		// GI::process_gi() binds them for gi.glsl (the default texture where this render has no SDFGI).
+		Ref<RendererRD::GI::SDFGI> sdfgi;
+		if (rb.is_valid() && rb->has_custom_data(RB_SCOPE_SDFGI)) {
+			sdfgi = rb->get_custom_data(RB_SCOPE_SDFGI);
+		}
+		const RID default_tex = texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_3D_WHITE);
+		RD::Uniform sdf_cascades;
+		sdf_cascades.binding = 43;
+		sdf_cascades.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+		RD::Uniform light_cascades;
+		light_cascades.binding = 44;
+		light_cascades.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+		for (uint32_t i = 0; i < RendererRD::GI::SDFGI::MAX_CASCADES; i++) {
+			const bool has_cascade = sdfgi.is_valid() && i < sdfgi->cascades.size();
+			sdf_cascades.append_id(has_cascade ? sdfgi->cascades[i].sdf_tex : default_tex);
+			light_cascades.append_id(has_cascade ? sdfgi->cascades[i].light_tex : default_tex);
+		}
+		uniforms.push_back(sdf_cascades);
+		uniforms.push_back(light_cascades);
+	}
+
 	if (p_render_list == RENDER_LIST_ALPHA && rt_shadow_tlas.is_valid()) {
 		// The USE_RT_SHADOWS variants' TLAS, which the other variants do not declare.
 		RD::Uniform u;
@@ -7585,6 +7608,10 @@ RenderForwardClustered::RenderForwardClustered() {
 			defines += "\n#define USE_RADIANCE_OCTMAP_ARRAY \n";
 		}
 		defines += "\n#define SDFGI_OCT_SIZE " + itos(gi.sdfgi_get_lightprobe_octahedron_size()) + "\n";
+		sdfgi_forward_reflections = GLOBAL_GET("rendering/global_illumination/sdfgi/transparent_surface_reflections");
+		if (sdfgi_forward_reflections) {
+			defines += "\n#define SDFGI_FORWARD_REFLECTIONS\n";
+		}
 		defines += "\n#define MAX_DIRECTIONAL_LIGHT_DATA_STRUCTS " + itos(MAX_DIRECTIONAL_LIGHTS) + "\n";
 
 		bool force_vertex_shading = GLOBAL_GET("rendering/shading/overrides/force_vertex_shading");
