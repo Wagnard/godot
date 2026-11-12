@@ -1086,15 +1086,11 @@ RTSurfaceData *RenderRaytracing::process_surface(
 	const RenderForwardClustered::GeometryInstanceSurfaceDataCache *surf =
 			static_cast<const RenderForwardClustered::GeometryInstanceSurfaceDataCache *>(p_surf);
 
-	RendererRD::MeshStorage *mesh_storage = RendererRD::MeshStorage::get_singleton();
-
-	RID mesh_rid = surf->owner->data->base;
-	if (surf->owner->data->base_type == RSE::INSTANCE_MULTIMESH) {
-		RID underlying = mesh_storage->multimesh_get_mesh(mesh_rid);
-		if (underlying.is_valid()) {
-			mesh_rid = underlying;
-		}
-	}
+	// The mesh the surface belongs to, not the instance's base: a particles RID comes from another allocator, so its index
+	// is some mesh's too, and a node's draw passes share their surface indices. Keyed by the base, a particles surface and
+	// that mesh's took the same entry in turn, every frame; each saw the other's RID version, took the mesh for deleted
+	// (below) and built a new BLAS without freeing the old one.
+	const RID mesh_rid = surf->mesh;
 
 	uint32_t cache_key = (mesh_rid.get_local_index() << 8) | (surf->surface_index & 0xFF);
 	uint32_t mesh_version = get_rid_version(mesh_rid);
@@ -5744,8 +5740,7 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 			tlas_expand_geometry_templates.push_back(mm_geometry);
 			tlas_expand_material_templates.push_back(mm_material);
 			job.blas = surf_data->blas;
-			// Not for particles yet: their cut-out runs the any-hit shader (an opacity micromap is keyed by the mesh, which a
-			// particle surface cache does not name).
+			// Not for particles yet: their cut-out runs the any-hit shader.
 			if (!pending.particles && pending.material_ready && !(pending.inst_flags & RD::ACCELERATION_STRUCTURE_INSTANCE_FORCE_OPAQUE_BIT)) {
 				RTOmmEntry *omm = _omm_entry(pending.mesh_surface, mesh_storage->multimesh_get_mesh(pending.mm_rid), pending.surface_index, pending.surface_counter, pending.material_rid, pending.material_counter, pending.mat_data, true);
 				const RID omm_blas = omm ? _omm_static_blas(omm, pending.mesh_surface, dirty_blas_list) : RID();

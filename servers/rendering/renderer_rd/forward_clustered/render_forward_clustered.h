@@ -882,6 +882,9 @@ protected:
 		uint32_t color_pass_inclusion_mask = 0;
 
 		void *surface = nullptr;
+		// The mesh `surface` belongs to: the instance's own, a MultiMesh's, or one of a particles node's draw passes. What
+		// identifies the surface with `surface_index` (the path tracer's BLAS cache): the instance's base does not for particles.
+		RID mesh;
 		RID material_uniform_set;
 		SceneShaderForwardClustered::ShaderData *shader = nullptr;
 		SceneShaderForwardClustered::MaterialData *material = nullptr;
