@@ -211,14 +211,15 @@ void sdfgi_process(uint cascade, vec3 cascade_pos, vec3 cam_pos, vec3 cam_normal
 		diffuse_accum.rgb /= diffuse_accum.a;
 	}
 
-	diffuse_light = diffuse_accum.rgb;
+	// Environment.sdfgi_energy, as the deferred GI pass applies it to opaque surfaces (environment/gi.glsl).
+	diffuse_light = diffuse_accum.rgb * sdfgi.energy;
 
 	if (use_specular) {
 		if (diffuse_accum.a > 0.0) {
 			specular_accum /= diffuse_accum.a;
 		}
 
-		specular_light = specular_accum;
+		specular_light = specular_accum * sdfgi.energy;
 	}
 
 	{
