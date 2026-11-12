@@ -174,4 +174,81 @@ TEST_CASE("[WorkerThreadPool] Run a yielding daemon as the only hope for other t
 	CHECK_MESSAGE(all_needed_yield, "All legit tasks should have needed the daemon yielding to run.");
 }
 
+static const int NESTED_GROUP_ELEMENTS = 16;
+static SafeNumeric<int> busy_threads;
+static Mutex blocking_mutex;
+
+static void static_nested_group_element(void *p_arg, uint32_t p_index) {
+	counter[p_index].increment();
+}
+
+static void static_task_waiting_for_group(void *p_arg) {
+	const int num_threads = WorkerThreadPool::get_singleton()->get_thread_count();
+	busy_threads.increment();
+	// Until every pool thread runs one of these tasks: no thread is left for the groups they wait for.
+	while (busy_threads.get() < num_threads) {
+		OS::get_singleton()->delay_usec(1);
+	}
+	WorkerThreadPool::GroupID group = WorkerThreadPool::get_singleton()->add_native_group_task(static_nested_group_element, nullptr, NESTED_GROUP_ELEMENTS, -1, true);
+	WorkerThreadPool::get_singleton()->wait_for_group_task_completion(group);
+}
+
+TEST_CASE("[WorkerThreadPool] Every pool thread waits for a group task of its own") {
+	const int num_threads = WorkerThreadPool::get_singleton()->get_thread_count();
+	counter.clear();
+	counter.resize(NESTED_GROUP_ELEMENTS);
+	busy_threads.set(0);
+
+	LocalVector<WorkerThreadPool::TaskID> task_ids;
+	for (int i = 0; i < num_threads; i++) {
+		task_ids.push_back(WorkerThreadPool::get_singleton()->add_native_task(static_task_waiting_for_group, nullptr, true));
+	}
+	for (uint32_t i = 0; i < task_ids.size(); i++) {
+		WorkerThreadPool::get_singleton()->wait_for_task_completion(task_ids[i]);
+	}
+
+	bool all_run_once_per_group = true;
+	for (int i = 0; i < NESTED_GROUP_ELEMENTS; i++) {
+		all_run_once_per_group &= counter[i].get() == num_threads;
+	}
+	CHECK_MESSAGE(all_run_once_per_group, "Each thread should have run the elements of the group it waited for.");
+}
+
+static void static_task_waiting_for_mutex(void *p_arg) {
+	busy_threads.increment();
+	MutexLock lock(blocking_mutex);
+}
+
+TEST_CASE("[WorkerThreadPool] A thread outside the pool waits for a group task while it blocks every pool thread") {
+	const int num_threads = WorkerThreadPool::get_singleton()->get_thread_count();
+	counter.clear();
+	counter.resize(NESTED_GROUP_ELEMENTS);
+	busy_threads.set(0);
+
+	blocking_mutex.lock();
+
+	LocalVector<WorkerThreadPool::TaskID> task_ids;
+	for (int i = 0; i < num_threads; i++) {
+		task_ids.push_back(WorkerThreadPool::get_singleton()->add_native_task(static_task_waiting_for_mutex, nullptr, true));
+	}
+	while (busy_threads.get() < num_threads) {
+		OS::get_singleton()->delay_usec(1);
+	}
+
+	// Every pool thread now waits for the mutex this thread holds: only this thread can run the group.
+	WorkerThreadPool::GroupID group = WorkerThreadPool::get_singleton()->add_native_group_task(static_nested_group_element, nullptr, NESTED_GROUP_ELEMENTS, -1, true);
+	WorkerThreadPool::get_singleton()->wait_for_group_task_completion(group);
+
+	bool all_run_once = true;
+	for (int i = 0; i < NESTED_GROUP_ELEMENTS; i++) {
+		all_run_once &= counter[i].get() == 1;
+	}
+	CHECK_MESSAGE(all_run_once, "The waiting thread should have run every element of the group.");
+
+	blocking_mutex.unlock();
+	for (uint32_t i = 0; i < task_ids.size(); i++) {
+		WorkerThreadPool::get_singleton()->wait_for_task_completion(task_ids[i]);
+	}
+}
+
 } // namespace TestWorkerThreadPool

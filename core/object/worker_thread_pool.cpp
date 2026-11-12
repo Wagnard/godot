@@ -90,47 +90,7 @@ void WorkerThreadPool::_process_task(Task *p_task) {
 #endif
 
 	if (p_task->group) {
-		// Handling a group
-		bool do_post = false;
-
-		while (true) {
-			uint32_t work_index = p_task->group->index.postincrement();
-
-			if (work_index >= p_task->group->max) {
-				break;
-			}
-			if (p_task->native_group_func) {
-				p_task->native_group_func(p_task->native_func_userdata, work_index);
-			} else if (p_task->template_userdata) {
-				p_task->template_userdata->callback_indexed(work_index);
-			} else {
-				p_task->callable.call(work_index);
-			}
-
-			// This is the only way to ensure posting is done when all tasks are really complete.
-			uint32_t completed_amount = p_task->group->completed_index.increment();
-
-			if (completed_amount == p_task->group->max) {
-				do_post = true;
-			}
-		}
-
-		if (do_post && p_task->template_userdata) {
-			memdelete(p_task->template_userdata); // This is no longer needed at this point, so get rid of it.
-		}
-
-		if (do_post) {
-			p_task->group->done_semaphore.post();
-			p_task->group->completed.set_to(true);
-		}
-		uint32_t max_users = p_task->group->tasks_used + 1; // Add 1 because the thread waiting for it is also user. Read before to avoid another thread freeing task after increment.
-		uint32_t finished_users = p_task->group->finished.increment();
-
-		if (finished_users == max_users) {
-			// Get rid of the group, because nobody else is using it.
-			MutexLock task_lock(task_mutex);
-			group_allocator.free(p_task->group);
-		}
+		_run_group_task_elements(p_task);
 
 		// For groups, tasks get rid of themselves.
 
@@ -192,6 +152,75 @@ void WorkerThreadPool::_process_task(Task *p_task) {
 	set_current_thread_safe_for_nodes(safe_for_nodes_backup);
 	MessageQueue::set_thread_singleton_override(call_queue_backup);
 #endif
+}
+
+// Runs the elements of the task's group that no thread has taken yet, then gives up the task's share of the group.
+// For a task taken out of the queue, by a pool thread (_process_task()) or by the thread waiting for the group
+// (wait_for_group_task_completion()). The caller frees the task.
+void WorkerThreadPool::_run_group_task_elements(Task *p_task) {
+	bool do_post = false;
+
+	while (true) {
+		uint32_t work_index = p_task->group->index.postincrement();
+
+		if (work_index >= p_task->group->max) {
+			break;
+		}
+		if (p_task->native_group_func) {
+			p_task->native_group_func(p_task->native_func_userdata, work_index);
+		} else if (p_task->template_userdata) {
+			p_task->template_userdata->callback_indexed(work_index);
+		} else {
+			p_task->callable.call(work_index);
+		}
+
+		// This is the only way to ensure posting is done when all tasks are really complete.
+		uint32_t completed_amount = p_task->group->completed_index.increment();
+
+		if (completed_amount == p_task->group->max) {
+			do_post = true;
+		}
+	}
+
+	if (do_post && p_task->template_userdata) {
+		memdelete(p_task->template_userdata); // This is no longer needed at this point, so get rid of it.
+	}
+
+	if (do_post) {
+		p_task->group->done_semaphore.post();
+		p_task->group->completed.set_to(true);
+	}
+	uint32_t max_users = p_task->group->tasks_used + 1; // Add 1 because the thread waiting for it is also user. Read before to avoid another thread freeing task after increment.
+	uint32_t finished_users = p_task->group->finished.increment();
+
+	if (finished_users == max_users) {
+		// Get rid of the group, because nobody else is using it.
+		MutexLock task_lock(task_mutex);
+		group_allocator.free(p_task->group);
+	}
+}
+
+// Takes one of the group's tasks out of the queues, if elements are left for it to run. Called with task_mutex locked.
+WorkerThreadPool::Task *WorkerThreadPool::_take_queued_group_task(Group *p_group) {
+	if (p_group->index.get() >= p_group->max) {
+		// Every element is taken: the tasks still queued have nothing to run.
+		return nullptr;
+	}
+	for (SelfList<Task> *E = task_queue.first(); E; E = E->next()) {
+		if (E->self()->group == p_group) {
+			task_queue.remove(E);
+			return E->self();
+		}
+	}
+	for (SelfList<Task> *E = low_priority_task_queue.first(); E; E = E->next()) {
+		if (E->self()->group == p_group) {
+			// Promoted to the calling thread, as _try_promote_low_priority_task() does for a pool thread.
+			low_priority_task_queue.remove(E);
+			low_priority_threads_used++;
+			return E->self();
+		}
+	}
+	return nullptr;
 }
 
 void WorkerThreadPool::_thread_function(void *p_user) {
@@ -766,19 +795,60 @@ bool WorkerThreadPool::is_group_task_completed(GroupID p_group) const {
 
 void WorkerThreadPool::wait_for_group_task_completion(GroupID p_group) {
 #ifdef THREADS_ENABLED
-	task_mutex.lock();
-	Group **groupp = groups.getptr(p_group);
-	task_mutex.unlock();
-	if (!groupp) {
-		ERR_FAIL_MSG("Invalid Group ID.");
+	Group *group = nullptr;
+	Task *queued_task = nullptr;
+	bool caller_is_pool_thread = false;
+	{
+		MutexLock task_lock(task_mutex);
+		Group **groupp = groups.getptr(p_group);
+		if (!groupp) {
+			ERR_FAIL_MSG("Invalid Group ID.");
+		}
+		group = *groupp;
+
+		// The waiting thread runs the elements no thread has taken yet, instead of sleeping until a pool thread is free
+		// for them: none may ever be. Pool threads that wait for a group, or for a mutex the waiting thread holds, run
+		// nothing else, and a thread with a pump task takes no queued task (ShaderRD::version_is_valid() called by every
+		// resource loading task at once left the groups they waited for in the queue: the loading screen froze).
+		// It only takes work it is blocked on, so no foreign task ever runs nested here.
+		queued_task = _take_queued_group_task(group);
+		caller_is_pool_thread = queued_task && thread_ids.has(Thread::get_caller_id());
 	}
 
 	{
-		Group *group = *groupp;
-
 		if (this == singleton) {
 			_unlock_unlockable_mutexes();
 		}
+
+		if (queued_task) {
+			if (caller_is_pool_thread) {
+				_process_task(queued_task);
+			} else {
+				// A thread outside this pool: the elements run in the state _process_task() gives them.
+				bool safe_for_nodes_backup = is_current_thread_safe_for_nodes();
+				CallQueue *call_queue_backup = MessageQueue::get_singleton() != MessageQueue::get_main_singleton() ? MessageQueue::get_singleton() : nullptr;
+				set_current_thread_safe_for_nodes(false);
+				MessageQueue::set_thread_singleton_override(nullptr);
+
+				bool low_priority = queued_task->low_priority;
+				_run_group_task_elements(queued_task);
+
+				{
+					MutexLock task_lock(task_mutex);
+					task_allocator.free(queued_task);
+					if (low_priority) {
+						low_priority_threads_used--;
+						if (_try_promote_low_priority_task()) {
+							_notify_threads(nullptr, 1, 0);
+						}
+					}
+				}
+
+				set_current_thread_safe_for_nodes(safe_for_nodes_backup);
+				MessageQueue::set_thread_singleton_override(call_queue_backup);
+			}
+		}
+
 		group->done_semaphore.wait();
 		if (this == singleton) {
 			_lock_unlockable_mutexes();
