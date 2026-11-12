@@ -2055,7 +2055,10 @@ void fragment_shader(in SceneData scene_data) {
 				if (cascade == sdfgi.max_cascades - 1) {
 					diffuse = mix(diffuse, ambient_light, blend);
 					if (use_specular) {
-						indirect_specular_light = mix(specular, indirect_specular_light, blend);
+						// The probes' reflection fades into the surface's own (the sky) at the edge of the last
+						// cascade, as the diffuse light above. It was assigned to indirect_specular_light here, which
+						// the end of this block then overwrote with the probes' alone: a hard edge.
+						specular = mix(specular, indirect_specular_light, blend);
 					}
 				} else {
 					vec3 diffuse2, specular2;
