@@ -2147,7 +2147,10 @@ void RenderForwardClustered::_fill_render_list_chunk(FillRenderListChunk &p_chun
 						surf->color_pass_inclusion_mask = COLOR_PASS_FLAG_TRANSPARENT;
 						p_chunk.alpha_elements.push_back(surf);
 					}
-					if (uses_gi) {
+					// The ambient and reflection buffers hold the GI of the opaque pass, per pixel: what a surface of
+					// the transparent pass would read there is the light of the opaque surface behind it. Such a
+					// surface gets its GI in its own shader (uses_gi) or none, never from those buffers.
+					if (uses_gi || p_using_opaque_gi) {
 						surf->sort.uses_forward_gi = 1;
 					}
 				} else if (p_using_motion_pass && (uses_motion || (surf->flags & GeometryInstanceSurfaceDataCache::FLAG_USES_MOTION_VECTOR))) {
@@ -6751,7 +6754,10 @@ void RenderForwardClustered::_geometry_instance_update(RenderGeometryInstance *p
 	ginstance->can_sdfgi = false;
 
 	if (!RendererRD::LightStorage::get_singleton()->lightmap_instance_is_valid(ginstance->lightmap_instance)) {
-		if (ginstance->voxel_gi_instances[0].is_null() && (ginstance->data->use_baked_light || ginstance->data->use_dynamic_gi)) {
+		// Whatever the instance's GI mode: a mode only says whether the geometry contributes to SDFGI, every mode
+		// receives its light, as opaque surfaces do through the GI buffers. A transparent surface with GI disabled
+		// got none here, and read the buffers instead.
+		if (ginstance->voxel_gi_instances[0].is_null()) {
 			ginstance->can_sdfgi = true;
 		}
 	}
