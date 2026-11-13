@@ -53,6 +53,7 @@ Vector<uint8_t> RendererRD::NRDDenoiser::make_cache_file(const Vector<uint8_t> &
 
 #ifdef NRD_DENOISER_ENABLED
 
+#include "core/config/project_settings.h"
 #include "core/crypto/crypto_core.h"
 #include "core/io/dir_access.h"
 #include "core/io/file_access.h"
@@ -629,6 +630,14 @@ bool NRDDenoiser::denoise(RenderSceneBuffersRD *p_render_buffers, const Paramete
 	// AREA_3X3 asks (raytracing_inc.glsl, nrd_lobe_threshold()); the rest is NRD's defaults.
 	nrd::ReblurSettings settings;
 	settings.hitDistanceReconstructionMode = nrd::HitDistanceReconstructionMode::AREA_3X3;
+	// rendering/pathtracing/nrd_plane_distance_sensitivity (read every frame), for both ReBLURs: how far from a pixel's
+	// tangent plane a neighbor may lie and still be blended with it ("maximum allowed deviation from the local tangent
+	// plane", NRDSettings.h). NRD's own 0.02 leaves thin, dense geometry without a neighbor to blend with (no blade of grass
+	// lies in its neighbor's plane): the indirect light's noise stays, and boils in the shade. The larger it is, the more
+	// two parallel surfaces at different depths (a table top over a floor) bleed into each other at their silhouette:
+	// PT-NRD-PLANE-DISTANCE-FIXES.md has both measures.
+	const float plane_distance_sensitivity = CLAMP(GLOBAL_GET_CACHED(float, "rendering/pathtracing/nrd_plane_distance_sensitivity"), 0.001f, 1.0f);
+	settings.planeDistanceSensitivity = plane_distance_sensitivity;
 	ERR_FAIL_COND_V(nrd::SetDenoiserSettings(*context->instance, NRD_IDENTIFIER, &settings) != nrd::Result::SUCCESS, false);
 
 	// SIGMA's settings: its defaults, and the direction to the sun ("needed only for directional light sources"). The world's
@@ -641,8 +650,10 @@ bool NRDDenoiser::denoise(RenderSceneBuffersRD *p_render_buffers, const Paramete
 		sigma_settings.lightDirection[2] = to_sun.z;
 		ERR_FAIL_COND_V(nrd::SetDenoiserSettings(*context->instance, NRD_SIGMA_IDENTIFIER, &sigma_settings) != nrd::Result::SUCCESS, false);
 	}
-	// The direct light signal's ReBLUR: NRD's defaults (no lobe is skipped there: no hit distance reconstruction).
+	// The direct light signal's ReBLUR: NRD's defaults (no lobe is skipped there: no hit distance reconstruction), with the
+	// same plane distance sensitivity.
 	nrd::ReblurSettings direct_settings;
+	direct_settings.planeDistanceSensitivity = plane_distance_sensitivity;
 	if (direct) {
 		ERR_FAIL_COND_V(nrd::SetDenoiserSettings(*context->instance, NRD_DIRECT_IDENTIFIER, &direct_settings) != nrd::Result::SUCCESS, false);
 	}

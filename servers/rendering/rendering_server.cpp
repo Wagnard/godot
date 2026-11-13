@@ -3898,6 +3898,7 @@ void RenderingServer::init() {
 	GLOBAL_DEF("rendering/pathtracing/light_sampling_ris", true);
 	GLOBAL_DEF("rendering/pathtracing/russian_roulette", true);
 	GLOBAL_DEF("rendering/pathtracing/nrd_direct_light_denoising", true);
+	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/pathtracing/nrd_plane_distance_sensitivity", PROPERTY_HINT_RANGE, "0.005,0.5,0.005"), 0.1);
 	GLOBAL_DEF("rendering/pathtracing/specular_motion_vectors", false);
 	GLOBAL_DEF("rendering/pathtracing/transparent_shadows", true);
 	GLOBAL_DEF("rendering/pathtracing/trace_gpu_particles", true);
