@@ -72,7 +72,10 @@ struct GeometryData {
 	// did not move, and for one instance, whose motion is the TLAS instance's.
 	uint multimesh_previous_offset;
 	uint multimesh_pad0; // RT_GeometryData::debug_state: Environment.RT_DEBUG_DYNAMIC_GEOMETRY's state, 0 otherwise.
-	uint multimesh_pad1;
+	// rendering/visibility_range/dithered_fade: 0, or VISIBILITY_FADE_DITHERED | the fade (8 bits, as the rasterizer's
+	// instance flags hold it) of an instance fading through its visibility range, which the camera rays keep or drop
+	// against a noise threshold (visibility_fade_drops(), raytracing_shade_inc.glsl).
+	uint visibility_fade;
 	uint multimesh_pad2;
 };
 

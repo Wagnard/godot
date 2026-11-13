@@ -4824,6 +4824,20 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 		}
 		return mask;
 	};
+	// rendering/visibility_range/dithered_fade: in a view whose raster passes dither the visibility range fades, the camera
+	// rays keep or drop an instance fading through its range against the same noise threshold (visibility_fade_drops(),
+	// raytracing_shade_inc.glsl); they all kept it until it left its range, where it then disappeared at once. The other
+	// rays see it whole, as raster's shadow passes draw it. For RT_GeometryData::visibility_fade of each of its records.
+	const bool dither_fades = owner->_view_dithers_visibility_range_fades(p_render_data);
+	const Vector3 fade_camera_origin = p_render_data->scene_data->cam_transform.origin;
+	auto visibility_fade = [dither_fades, fade_camera_origin](const RenderForwardClustered::GeometryInstanceForwardClustered *p_instance) -> uint32_t {
+		if (!dither_fades || !(p_instance->fade_near || p_instance->fade_far || p_instance->parent_fade_alpha < 1.0f)) {
+			return 0;
+		}
+		bool dither_fade = false;
+		const float fade_alpha = RenderForwardClustered::_instance_fade_alpha(p_instance, fade_camera_origin, true, dither_fade);
+		return dither_fade ? (RT_VISIBILITY_FADE_DITHERED | uint32_t(fade_alpha * 255.0)) : 0;
+	};
 	// rendering/pathtracing/shadow_groups (RT_SHADOW_GROUPS): the instances that cast shadows on SELF_SHADOWING ones only.
 	const bool shadow_groups = p_rt_flags & SceneShaderRaytracing::RT_FLAG_SHADOW_GROUPS;
 	auto shadow_group_flags = [shadow_groups](const RenderGeometryInstanceBase *p_instance) -> uint32_t {
@@ -4942,6 +4956,7 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 				geom.aabb_size_y = (float)ps->culling_aabb.size.y;
 				geom.aabb_size_z = (float)ps->culling_aabb.size.z;
 				geom.layer_mask = inst->layer_mask;
+				geom.visibility_fade = visibility_fade(inst);
 				geom.flags |= shadow_group_flags(inst);
 				geometry_data.push_back(geom);
 
@@ -5498,6 +5513,7 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 			blass.push_back(surf_data->blas);
 			geometry_data.push_back(surf_data->geometry);
 			geometry_data[geometry_data.size() - 1].layer_mask = inst->layer_mask;
+			geometry_data[geometry_data.size() - 1].visibility_fade = visibility_fade(inst);
 			geometry_data[geometry_data.size() - 1].flags |= shadow_group_flags(inst);
 
 			if (billboard) {
@@ -5646,6 +5662,7 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 			blas_transforms.push_back(pending.instance_transform);
 			geometry_data.push_back(merged_sd.geometry);
 			geometry_data[geometry_data.size() - 1].layer_mask = pending.mm_surf->owner->layer_mask;
+			geometry_data[geometry_data.size() - 1].visibility_fade = visibility_fade(pending.mm_surf->owner);
 			geometry_data[geometry_data.size() - 1].flags |= shadow_group_flags(pending.mm_surf->owner);
 			sbt_offsets.push_back(pending.mat_data->rt_sbt_offset);
 			material_data.push_back(pending.mat_data->data);
@@ -5705,6 +5722,8 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 				multimesh_buffers_read_this_frame.push_back(pending.mm_gpu_buffer);
 			}
 			mm_geometry.layer_mask = pending.mm_surf->owner->layer_mask;
+			// The node's fade, for every instance the GPU writes from this record.
+			mm_geometry.visibility_fade = visibility_fade(pending.mm_surf->owner);
 			mm_geometry.flags |= shadow_group_flags(pending.mm_surf->owner);
 			RT_MaterialData mm_material = pending.mat_data->data;
 			mm_material.instance_uniforms_ofs = uint32_t(pending.mm_surf->owner->shader_uniforms_offset);
@@ -5785,6 +5804,7 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 			}
 
 			RT_GeometryData mm_geometry = surf_data->geometry;
+			mm_geometry.visibility_fade = visibility_fade(pending.mm_surf->owner);
 			const bool reads_multimesh = _set_multimesh_instance_data(mm_geometry, pending.mm_rid, pending.mm_gpu_buffer, UINT32_MAX);
 			if (reads_multimesh) {
 				multimesh_buffers_read_this_frame.push_back(pending.mm_gpu_buffer);

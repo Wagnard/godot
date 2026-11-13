@@ -141,11 +141,17 @@ struct alignas(16) RT_GeometryData {
 	// Environment.RT_DEBUG_DYNAMIC_GEOMETRY only: RTDynamicGeometryDebug::pack() of the BLAS's recent work (multimesh_pad0
 	// in GLSL), 0 otherwise.
 	uint32_t debug_state;
-	uint32_t multimesh_pad[2];
+	// rendering/visibility_range/dithered_fade: 0, or RT_VISIBILITY_FADE_DITHERED | the fade (8 bits, as the rasterizer's
+	// instance flags hold it) of an instance fading through its visibility range in a view that dithers such fades
+	// (RenderForwardClustered::_instance_fade_alpha()): the camera rays keep or drop it against a noise threshold.
+	uint32_t visibility_fade;
+	uint32_t multimesh_pad;
 };
 static_assert(sizeof(RT_GeometryData) == 176, "RT_GeometryData must be 176 bytes for std430");
 
 static constexpr uint32_t RT_CUSTOM_FORMAT_PRESENT = 8u;
+// RT_GeometryData::visibility_fade: the instance's fade is dithered (VISIBILITY_FADE_DITHERED in raytracing_shade_inc.glsl).
+static constexpr uint32_t RT_VISIBILITY_FADE_DITHERED = 0x100u;
 
 /// Per-instance motion data for velocity computation (matches GLSL InstanceMotionData, 48 bytes).
 struct RT_InstanceMotionData {

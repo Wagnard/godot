@@ -1776,15 +1776,8 @@ void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, con
 	params.z_max = z_max;
 	params.max_lightmap_captures = scene_state.max_lightmap_captures;
 	params.frame = RSG::rasterizer->get_frame_number();
-	// rendering/visibility_range/dithered_fade: in the color lists of a view, not of a reflection probe's capture
-	// (which no temporal resolve averages), and with "temporal" only where TAA or a temporal upscaler resolves the view.
-	params.dither_fades = false;
-	if (visibility_range_dithered_fade != VISIBILITY_RANGE_DITHERED_FADE_DISABLED && p_pass_mode == PASS_MODE_COLOR && !p_render_data->reflection_probe.is_valid()) {
-		params.dither_fades = visibility_range_dithered_fade == VISIBILITY_RANGE_DITHERED_FADE_ALWAYS;
-		if (!params.dither_fades && p_render_data->render_buffers.is_valid()) {
-			params.dither_fades = p_render_data->render_buffers->get_use_taa() || _resolve_scale_3d_mode(p_render_data->render_buffers) != SCALE_3D_NONE;
-		}
-	}
+	// rendering/visibility_range/dithered_fade: in the color lists of a view.
+	params.dither_fades = p_pass_mode == PASS_MODE_COLOR && _view_dithers_visibility_range_fades(p_render_data);
 	// rendering/anti_aliasing/quality/material_alpha_antialiasing: alpha to coverage turns a fragment's alpha into a
 	// sample mask, so it antialiases only in a view with MSAA. Such a view keeps it. In the others it is kept or dropped
 	// per the setting; "not temporal" drops it where TAA or a temporal upscaler antialiases the scissor's edge itself
@@ -1934,6 +1927,39 @@ void RenderForwardClustered::_fill_render_list_part(uint32_t p_part) {
 	_fill_render_list_chunk(fill_render_list_chunks[p_part]);
 }
 
+bool RenderForwardClustered::_view_dithers_visibility_range_fades(const RenderDataRD *p_render_data) const {
+	// Not a reflection probe's capture, which no temporal resolve averages; with "temporal", only where TAA or a temporal
+	// upscaler resolves the view.
+	if (visibility_range_dithered_fade == VISIBILITY_RANGE_DITHERED_FADE_DISABLED || p_render_data->reflection_probe.is_valid()) {
+		return false;
+	}
+	if (visibility_range_dithered_fade == VISIBILITY_RANGE_DITHERED_FADE_ALWAYS) {
+		return true;
+	}
+	return p_render_data->render_buffers.is_valid() && (p_render_data->render_buffers->get_use_taa() || _resolve_scale_3d_mode(p_render_data->render_buffers) != SCALE_3D_NONE);
+}
+
+float RenderForwardClustered::_instance_fade_alpha(const GeometryInstanceForwardClustered *p_instance, const Vector3 &p_camera_origin, bool p_dither_fades, bool &r_dither_fade) {
+	float fade_alpha = 1.0;
+
+	if (p_instance->fade_near || p_instance->fade_far) {
+		float fade_dist = p_instance->transformed_aabb.get_center().distance_to(p_camera_origin);
+		// Use `smoothstep()` to make opacity changes more gradual and less noticeable to the player.
+		if (p_instance->fade_far && fade_dist > p_instance->fade_far_begin) {
+			fade_alpha = Math::smoothstep(0.0f, 1.0f, 1.0f - (fade_dist - p_instance->fade_far_begin) / (p_instance->fade_far_end - p_instance->fade_far_begin));
+		} else if (p_instance->fade_near && fade_dist < p_instance->fade_near_end) {
+			fade_alpha = Math::smoothstep(0.0f, 1.0f, (fade_dist - p_instance->fade_near_begin) / (p_instance->fade_near_end - p_instance->fade_near_begin));
+		}
+	}
+
+	// rendering/visibility_range/dithered_fade: a visibility range fade (Self: fade_alpha so far; Dependencies:
+	// parent_fade_alpha) is dithered. GeometryInstance3D.transparency (force_alpha) is no such fade: an instance that
+	// has one is blended by the transparent pass as before.
+	r_dither_fade = p_dither_fades && p_instance->force_alpha >= FADE_ALPHA_PASS_THRESHOLD && fade_alpha * p_instance->parent_fade_alpha < FADE_ALPHA_PASS_THRESHOLD;
+
+	return fade_alpha * (p_instance->force_alpha * p_instance->parent_fade_alpha);
+}
+
 void RenderForwardClustered::_fill_render_list_chunk(FillRenderListChunk &p_chunk) {
 	RendererRD::MeshStorage *mesh_storage = RendererRD::MeshStorage::get_singleton();
 	const FillRenderListParameters &params = fill_render_list_params;
@@ -1977,25 +2003,10 @@ void RenderForwardClustered::_fill_render_list_chunk(FillRenderListChunk &p_chun
 		bool uses_lightmap = false;
 		bool uses_gi = false;
 		bool uses_motion = false;
-		float fade_alpha = 1.0;
-
-		if (inst->fade_near || inst->fade_far) {
-			float fade_dist = inst->transformed_aabb.get_center().distance_to(p_render_data->scene_data->cam_transform.origin);
-			// Use `smoothstep()` to make opacity changes more gradual and less noticeable to the player.
-			if (inst->fade_far && fade_dist > inst->fade_far_begin) {
-				fade_alpha = Math::smoothstep(0.0f, 1.0f, 1.0f - (fade_dist - inst->fade_far_begin) / (inst->fade_far_end - inst->fade_far_begin));
-			} else if (inst->fade_near && fade_dist < inst->fade_near_end) {
-				fade_alpha = Math::smoothstep(0.0f, 1.0f, (fade_dist - inst->fade_near_begin) / (inst->fade_near_end - inst->fade_near_begin));
-			}
-		}
-
-		// rendering/visibility_range/dithered_fade: a visibility range fade (Self: fade_alpha so far; Dependencies:
-		// parent_fade_alpha) keeps the instance's opaque surfaces in the opaque passes, where the shader discards their
-		// pixels against a noise threshold. GeometryInstance3D.transparency (force_alpha) is no such fade: an instance
-		// that has one is blended by the transparent pass as before.
-		const bool dither_fade = params.dither_fades && inst->force_alpha >= FADE_ALPHA_PASS_THRESHOLD && fade_alpha * inst->parent_fade_alpha < FADE_ALPHA_PASS_THRESHOLD;
-
-		fade_alpha *= inst->force_alpha * inst->parent_fade_alpha;
+		// rendering/visibility_range/dithered_fade: a visibility range fade keeps the instance's opaque surfaces in the
+		// opaque passes, where the shader discards their pixels against a noise threshold.
+		bool dither_fade = false;
+		const float fade_alpha = _instance_fade_alpha(inst, p_render_data->scene_data->cam_transform.origin, params.dither_fades, dither_fade);
 
 		flags = (flags & ~INSTANCE_DATA_FLAGS_FADE_MASK) | (uint32_t(fade_alpha * 255.0) << INSTANCE_DATA_FLAGS_FADE_SHIFT);
 		if (dither_fade) {

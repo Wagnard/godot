@@ -1547,6 +1547,15 @@ bool SceneShaderRaytracing::_build_variant_compile_context(uint32_t p_rt_flags, 
 	if (p_rt_flags & RT_FLAG_RAY_CONES) {
 		inject_define(sources, "#define RT_RAY_CONES\n");
 	}
+	// rendering/visibility_range/dithered_fade, as the rasterizer's scene shader takes it (read at startup): the raygen
+	// stage only, whose camera rays drop the instances fading through their visibility range on the pixels the raster
+	// passes discard them (visibility_fade_drops()). Not a flag: every variant of a run has it or not. Disabled, the
+	// sources of every variant are those without the feature.
+	if (RenderForwardClustered::get_singleton()->visibility_range_dithered_fade != RenderForwardClustered::VISIBILITY_RANGE_DITHERED_FADE_DISABLED && sources.size() > RD::SHADER_STAGE_RAYGEN) {
+		Vector<String> raygen_source = { sources[RD::SHADER_STAGE_RAYGEN] };
+		inject_define(raygen_source, "#define VISIBILITY_RANGE_DITHERED_FADE\n");
+		sources.write[RD::SHADER_STAGE_RAYGEN] = raygen_source[0];
+	}
 
 	// Procedural templates come from intersection stage; strip from base HG0 path.
 	String intersection_source_template;

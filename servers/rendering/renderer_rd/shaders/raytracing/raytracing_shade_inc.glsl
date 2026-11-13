@@ -798,6 +798,68 @@ bool debug_texture_mip_view(inout PathState ps, HitRecord r, bool p_missed, inou
 }
 #endif // RT_DEBUG_ENABLED
 
+#ifdef VISIBILITY_RANGE_DITHERED_FADE
+// ============================================================================
+// VISIBILITY RANGE FADES (rendering/visibility_range/dithered_fade)
+// ============================================================================
+// An instance fading through its visibility range (GeometryInstance3D's fade modes) in a view whose raster passes dither
+// such fades: the camera ray keeps or drops its hit on the instance against the noise threshold those passes discard its
+// pixels with (visibility_range_fade_inc.glsl), and a ray that drops it goes on to what is behind. Every sample of a
+// pixel takes the same decision, and so do all the triangles of the instance along the ray: the pixel's depth, motion
+// vector and denoiser guides are those of the surface that is shaded. Only the camera rays do: shadows and reflections
+// see the instance whole until it leaves its range, as raster's shadow passes draw it.
+//
+// The same number for the rasterizer and the rays is what Ray Tracing Gems II recommends for such transitions (ch. 26,
+// "Ray Traced Level of Detail Cross-Fades Made Easy", 26.3).
+//
+// trace_path_ray() drops the hit and returns; its caller traces the camera ray again (visibility_fade_dropped), from
+// past that hit, by the same trace call. Not a loop around that call: with hit objects, NVIDIA's Vulkan driver hung the
+// GPU on every form of one in the raygen (a second trace into the hit object, a loop of probe hit objects, of ray
+// queries), and on D3D12 a hit object read after a conditional second trace would be two values, which Mesa's
+// nir_to_dxil refuses (godot-nir-static's 03_ser.patch: a hit object is one value there, without phis).
+#include "../visibility_range_fade_inc.glsl"
+
+#define VISIBILITY_FADE_DITHERED 0x100u // RT_VISIBILITY_FADE_DITHERED: GeometryData.visibility_fade holds a fade.
+// The hits a camera ray may drop: the triangles of the fading instances it crosses (the leaves of a bush). Past them
+// the next hit is kept, fading or not.
+#define VISIBILITY_FADE_MAX_DROPS 32u
+
+// The pixel's camera ray, between two calls of trace_path_ray(): where it starts (past the last hit it dropped), the
+// hits it dropped, and whether the last call dropped one (the caller traces the ray again, and clears it).
+float visibility_fade_tmin = 0.001;
+uint visibility_fade_count = 0u;
+bool visibility_fade_dropped = false;
+
+/// Whether this pixel's camera ray drops its hit on the instance of the geometry record p_geometry_idx.
+bool visibility_fade_drops(uint p_geometry_idx) {
+	const uint fade = geometries[p_geometry_idx].visibility_fade;
+	if ((fade & VISIBILITY_FADE_DITHERED) == 0u || visibility_fade_count >= VISIBILITY_FADE_MAX_DROPS) {
+		return false;
+	}
+	// As the rasterizer's fragment shader: the fade in the 8 bits of its instance flags, at the pixel's center.
+	return float(fade & 0xFFu) / 255.0 <= visibility_range_fade_threshold(vec2(gl_LaunchIDEXT.xy) + vec2(0.5), scene_data_block.data.taa_jitter, scene_data_block.data.frame_number);
+}
+
+/// The camera ray dropped its hit at p_t: it starts again one representable float further, the same ray otherwise, so
+/// that the next hit's distance, position and depth are those of a ray that never met the instance.
+void visibility_fade_drop(float p_t) {
+	visibility_fade_tmin = uintBitsToFloat(floatBitsToUint(p_t) + 1u);
+	visibility_fade_count++;
+	visibility_fade_dropped = true;
+}
+
+/// The camera ray kept its hit, or left the scene: the next sample's starts over.
+void visibility_fade_keep() {
+	visibility_fade_tmin = 0.001;
+	visibility_fade_count = 0u;
+}
+
+// Where trace_path_ray()'s ray starts: fade_ray is its camera ray.
+#define PATH_RAY_TMIN (fade_ray ? visibility_fade_tmin : 0.001)
+#else
+#define PATH_RAY_TMIN 0.001
+#endif // VISIBILITY_RANGE_DITHERED_FADE
+
 // ============================================================================
 // ONE RAY OF A PATH
 // ============================================================================
@@ -816,9 +878,24 @@ bool trace_path_ray(inout PathState ps, inout vec3 ray_origin, inout vec3 ray_di
 	// The camera ray leaves out what the raster pass draws over the traced image (RT_MASK_SECONDARY); every other ray sees
 	// it, the first ray of a front layer reflection included (it starts at bounce 0 too).
 	const uint mask = p_camera_ray ? RT_MASK_CAMERA : RT_MASK_BOUNCE;
+#ifdef VISIBILITY_RANGE_DITHERED_FADE
+	// The camera's own ray: not the first ray of a probe (trace_probe_ray()), which has no pixel.
+	const bool fade_ray = p_camera_ray && get_total_bounces(ps.packed_bounces_flags) == 0u;
+#endif
 #ifdef USE_SER
 	hitObjectEXT hitObject;
-	hitObjectTraceRayEXT(hitObject, tlas, RT_RAY_FLAGS, mask, 0, 0, 0, ray_origin, 0.001, ray_dir, 10000.0, 0);
+	hitObjectTraceRayEXT(hitObject, tlas, RT_RAY_FLAGS, mask, 0, 0, 0, ray_origin, PATH_RAY_TMIN, ray_dir, 10000.0, 0);
+#ifdef VISIBILITY_RANGE_DITHERED_FADE
+	if (fade_ray) {
+		// Read from the hit object, before any hit shader runs: a dropped hit costs its traversal only.
+		if (hitObjectIsHitEXT(hitObject) && visibility_fade_drops(uint(hitObjectGetInstanceCustomIndexEXT(hitObject)))) {
+			visibility_fade_drop(hitObjectGetRayTMaxEXT(hitObject));
+			r_hit_t = 0.0;
+			return true;
+		}
+		visibility_fade_keep();
+	}
+#endif
 
 	// Reorder with a coherence hint that has 8 bits
 	uint hint = 0;
@@ -838,7 +915,7 @@ bool trace_path_ray(inout PathState ps, inout vec3 ray_origin, inout vec3 ray_di
 	HitRecord r = hit_unpack(payload);
 	r.hit_t = missed ? 0.0 : hitObjectGetRayTMaxEXT(hitObject);
 #else
-	traceRayEXT(tlas, RT_RAY_FLAGS, mask, 0, 0, 0, ray_origin, 0.001, ray_dir, 10000.0, 0);
+	traceRayEXT(tlas, RT_RAY_FLAGS, mask, 0, 0, 0, ray_origin, PATH_RAY_TMIN, ray_dir, 10000.0, 0);
 
 	const bool missed = is_path_terminated(payload.packed_bounces_flags);
 	HitRecord r = hit_unpack(payload);
@@ -846,6 +923,19 @@ bool trace_path_ray(inout PathState ps, inout vec3 ray_origin, inout vec3 ray_di
 	// The miss shader leaves hit_t as the raygen wrote it: the cone, where it was 0.
 	if (missed) {
 		r.hit_t = 0.0;
+	}
+#endif
+#ifdef VISIBILITY_RANGE_DITHERED_FADE
+	if (fade_ray) {
+		// Without hit objects the instance is known once its closest hit has run: a dropped hit costs its material too,
+		// and what it wrote for the pixel (depth, motion) is written again by the hit or the miss that is kept. A hit
+		// that returns no geometry index (a debug view's color, a point vertex() removed) is kept.
+		if (!missed && (r.flags & (HIT_FLAG_PASS_THROUGH | HIT_FLAG_DEBUG)) == 0u && visibility_fade_drops(r.geometry_idx)) {
+			visibility_fade_drop(r.hit_t);
+			r_hit_t = 0.0;
+			return true;
+		}
+		visibility_fade_keep();
 	}
 #endif
 #endif

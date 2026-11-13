@@ -821,6 +821,16 @@ protected:
 	void _fill_render_list_chunk(FillRenderListChunk &p_chunk);
 	void _fill_render_list_part(uint32_t p_part);
 
+	// rendering/visibility_range/dithered_fade: whether the color lists of p_render_data's view dither the visibility
+	// range fades (not a reflection probe's capture; with "temporal", only a view that TAA or a temporal upscaler
+	// resolves). The path tracer follows it for the instances it traces (RenderRaytracing::build_tlas()).
+	bool _view_dithers_visibility_range_fades(const RenderDataRD *p_render_data) const;
+	// An instance's fade for a view from p_camera_origin, as the instance flags hold it: its visibility range's (fade mode
+	// Self), its visibility parent's (Dependencies) and GeometryInstance3D.transparency. r_dither_fade: in a view that
+	// dithers them (p_dither_fades), it is a visibility range fade under way, which the opaque passes dither and the
+	// path tracer's camera rays drop on the same pixels; a transparency never is.
+	static float _instance_fade_alpha(const GeometryInstanceForwardClustered *p_instance, const Vector3 &p_camera_origin, bool p_dither_fades, bool &r_dither_fade);
+
 	// _fill_instance_data() over ranges of elements; whether each element can be drawn with the one before it goes in
 	// fill_instance_data_repeats, the runs are counted afterwards in order.
 	struct FillInstanceDataParameters {

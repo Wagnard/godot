@@ -1176,6 +1176,10 @@ layout(location = 2) out vec2 motion_vector;
 
 #include "../scene_forward_aa_inc.glsl"
 
+#ifdef VISIBILITY_RANGE_DITHERED_FADE
+#include "../visibility_range_fade_inc.glsl"
+#endif
+
 #if !defined(MODE_RENDER_DEPTH) && !defined(MODE_UNSHADED)
 
 // Default to SPECULAR_SCHLICK_GGX.
@@ -1378,15 +1382,9 @@ void fragment_shader(in SceneData scene_data) {
 		// The instance fades through its visibility range and is drawn by the opaque passes: its pixels are kept or
 		// discarded against a noise threshold, the same in the depth prepass, the color pass and the motion vectors, so
 		// that it keeps its depth and its motion vectors while it fades (a fade drawn by the transparent pass has
-		// neither, which temporal upscalers handle badly). Interleaved gradient noise (Jimenez, "Next Generation Post
-		// Processing in Call of Duty: Advanced Warfare", SIGGRAPH 2014), moved every frame while a temporal resolve
-		// runs (the view is jittered), which then averages the pattern into a smooth fade. The frame number, not
-		// taa_frame_count: that one wraps with the jitter cycle, so each jitter phase would always meet the same
-		// pattern and the resolve would settle on a fixed grain.
-		float dither_frame = any(notEqual(scene_data.taa_jitter, vec2(0.0))) ? float(scene_data.frame_number % 64u) : 0.0;
-		vec2 dither_position = gl_FragCoord.xy + 5.588238 * dither_frame;
-		float dither_threshold = fract(52.9829189 * fract(dot(dither_position, vec2(0.06711056, 0.00583715))));
-		if (alpha_highp <= dither_threshold) {
+		// neither, which temporal upscalers handle badly). The threshold is the path tracer's too
+		// (visibility_range_fade_inc.glsl): its camera rays drop the instance on the same pixels.
+		if (alpha_highp <= visibility_range_fade_threshold(gl_FragCoord.xy, scene_data.taa_jitter, scene_data.frame_number)) {
 			discard;
 		}
 		// The material's code starts from an opaque surface: the fade is done.

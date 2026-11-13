@@ -448,6 +448,15 @@ void main() {
 		[[dont_unroll]] for (uint bounce = 0u; bounce <= max_bounces; bounce++) {
 			float hit_t;
 			const bool goes_on = trace_path_ray(ps, ray_origin, ray_dir, hit_t, bounce == 0u);
+#ifdef VISIBILITY_RANGE_DITHERED_FADE
+			if (visibility_fade_dropped) {
+				// The camera ray dropped its hit on an instance fading through its visibility range: the same ray again,
+				// from past that hit (trace_path_ray()). Still bounce 0: the unsigned counter wraps and comes back.
+				visibility_fade_dropped = false;
+				bounce--;
+				continue;
+			}
+#endif
 			if (sample_idx == 0u && bounce == 0u && goes_on) {
 				opaque_t = hit_t;
 			}
