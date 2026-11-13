@@ -2007,6 +2007,13 @@ void RenderForwardClustered::_fill_render_list_chunk(FillRenderListChunk &p_chun
 		// opaque passes, where the shader discards their pixels against a noise threshold.
 		bool dither_fade = false;
 		const float fade_alpha = _instance_fade_alpha(inst, p_render_data->scene_data->cam_transform.origin, params.dither_fades, dither_fade);
+		if (p_alpha_only && dither_fade && inst->parent_fade_alpha < FADE_ALPHA_PASS_THRESHOLD) {
+			// The path tracer's raster overlay, and an instance fading in with its parent (fade mode Dependencies): it is
+			// not in the TLAS while the parent fades (RendererSceneCull traces one LOD at a time), so no camera ray can
+			// dither it. The overlay blends it over the traced parent, as it does with the setting off; skipped as a
+			// dithered instance, it appeared at once when the parent was gone.
+			dither_fade = false;
+		}
 
 		flags = (flags & ~INSTANCE_DATA_FLAGS_FADE_MASK) | (uint32_t(fade_alpha * 255.0) << INSTANCE_DATA_FLAGS_FADE_SHIFT);
 		if (dither_fade) {
