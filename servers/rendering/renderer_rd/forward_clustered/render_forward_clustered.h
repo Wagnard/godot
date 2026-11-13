@@ -708,6 +708,15 @@ protected:
 		VISIBILITY_RANGE_DITHERED_FADE_ALWAYS,
 	};
 	VisibilityRangeDitheredFade visibility_range_dithered_fade = VISIBILITY_RANGE_DITHERED_FADE_DISABLED;
+	// rendering/anti_aliasing/quality/material_alpha_antialiasing, read on startup: where an alpha scissor or alpha hash
+	// material's alpha antialiasing (alpha to coverage, a multisampling technique) is applied. Where it is not, the
+	// material is drawn as one without it: by the opaque passes, with motion vectors, out of the transparent pass.
+	enum MaterialAlphaAntialiasing {
+		MATERIAL_ALPHA_ANTIALIASING_ALWAYS, // Upstream Godot.
+		MATERIAL_ALPHA_ANTIALIASING_NOT_TEMPORAL, // Not in a view without MSAA that TAA or a temporal upscaler resolves.
+		MATERIAL_ALPHA_ANTIALIASING_MSAA_ONLY, // Only in the views with MSAA.
+	};
+	MaterialAlphaAntialiasing material_alpha_antialiasing = MATERIAL_ALPHA_ANTIALIASING_ALWAYS;
 
 	// The path tracer's front layer reflection (rgb, view depth in alpha), read by its transparent pass in place of SSR.
 	RID front_layer_reflection;
@@ -800,6 +809,9 @@ protected:
 		uint32_t max_lightmap_captures = 0; // Per chunk: the merge checks the total.
 		uint64_t frame = 0;
 		bool dither_fades = false; // This fill dithers visibility range fades (rendering/visibility_range/dithered_fade).
+		// This fill sends the surfaces with FLAG_ALPHA_ANTIALIASING_ONLY to the opaque lists
+		// (rendering/anti_aliasing/quality/material_alpha_antialiasing).
+		bool opaque_alpha_antialiasing = false;
 	} fill_render_list_params;
 
 	LocalVector<FillRenderListChunk> fill_render_list_chunks;
@@ -858,6 +870,9 @@ protected:
 			FLAG_USES_MOTION_VECTOR = 131072,
 			FLAG_USES_STENCIL = 262144,
 			FLAG_USES_OIT = 524288,
+			// With FLAG_PASS_ALPHA: ShaderData::uses_alpha_pass_for_alpha_antialiasing_only(). Set only when
+			// rendering/anti_aliasing/quality/material_alpha_antialiasing is not "Always".
+			FLAG_ALPHA_ANTIALIASING_ONLY = 1048576,
 		};
 
 		union {
@@ -892,6 +907,10 @@ protected:
 		uint32_t rt_pass_flags = 0;
 		uint32_t surface_index = 0;
 		uint32_t color_pass_inclusion_mask = 0;
+		// Written by the last color fill, as color_pass_inclusion_mask: this view draws the surface (one with
+		// FLAG_ALPHA_ANTIALIASING_ONLY) from its opaque lists, without its alpha antialiasing. Read by the passes drawn
+		// from that fill (depth prepass, opaque color pass, motion vectors), which must agree on the pixels they keep.
+		bool alpha_antialiasing_disabled = false;
 
 		void *surface = nullptr;
 		// The mesh `surface` belongs to: the instance's own, a MultiMesh's, or one of a particles node's draw passes. What

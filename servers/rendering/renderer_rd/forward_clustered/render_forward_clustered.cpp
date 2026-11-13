@@ -563,6 +563,9 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 		// pass (a transparent material of that instance) fades by its alpha, as before.
 		if constexpr ((p_pass_mode == PASS_MODE_COLOR && (p_color_pass_flags & (COLOR_PASS_FLAG_TRANSPARENT | COLOR_PASS_FLAG_OIT)) == 0) || p_pass_mode == PASS_MODE_DEPTH || p_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS || p_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS_VOXEL_GI) {
 			pipeline_specialization.use_dither_fade = element_info.uses_dither_fade;
+			// The same passes for a material drawn without its alpha antialiasing: what its scissor or hash keeps is
+			// opaque in each of them, or the color pass (depth test EQUAL) would not find the prepass's pixels.
+			pipeline_specialization.disable_alpha_antialiasing = surf->alpha_antialiasing_disabled;
 		}
 
 		if constexpr (p_pass_mode == PASS_MODE_COLOR) {
@@ -1782,6 +1785,22 @@ void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, con
 			params.dither_fades = p_render_data->render_buffers->get_use_taa() || _resolve_scale_3d_mode(p_render_data->render_buffers) != SCALE_3D_NONE;
 		}
 	}
+	// rendering/anti_aliasing/quality/material_alpha_antialiasing: alpha to coverage turns a fragment's alpha into a
+	// sample mask, so it antialiases only in a view with MSAA. Such a view keeps it. In the others it is kept or dropped
+	// per the setting; "not temporal" drops it where TAA or a temporal upscaler antialiases the scissor's edge itself
+	// (and where FSR's reactive mask would cover every surface the transparent pass draws). Not for the path tracer's
+	// raster overlay (p_alpha_only), which has no opaque pass.
+	params.opaque_alpha_antialiasing = false;
+	if (material_alpha_antialiasing != MATERIAL_ALPHA_ANTIALIASING_ALWAYS && p_pass_mode == PASS_MODE_COLOR && !p_alpha_only) {
+		const bool has_render_buffers = p_render_data->render_buffers.is_valid();
+		const bool msaa = has_render_buffers && p_render_data->render_buffers->get_msaa_3d() != RSE::VIEWPORT_MSAA_DISABLED;
+		if (!msaa) {
+			params.opaque_alpha_antialiasing = material_alpha_antialiasing == MATERIAL_ALPHA_ANTIALIASING_MSAA_ONLY;
+			if (!params.opaque_alpha_antialiasing && has_render_buffers && !p_render_data->reflection_probe.is_valid()) {
+				params.opaque_alpha_antialiasing = p_render_data->render_buffers->get_use_taa() || _resolve_scale_3d_mode(p_render_data->render_buffers) != SCALE_3D_NONE;
+			}
+		}
+	}
 
 	// Large lists are filled by several threads, in contiguous ranges of instances merged in order: the same lists
 	// in the same order as filled serially.
@@ -2161,7 +2180,16 @@ void RenderForwardClustered::_fill_render_list_chunk(FillRenderListChunk &p_chun
 
 				// Alpha-only (RT) routes via rt_pass_flags so RT-overridden
 				// surfaces stay out of the raster overlay; raster path uses flags.
-				const uint32_t pass_flags = p_alpha_only ? surf->rt_pass_flags : surf->flags;
+				uint32_t pass_flags = p_alpha_only ? surf->rt_pass_flags : surf->flags;
+
+				// An alpha scissor / alpha hash material that only its alpha antialiasing sends to the transparent pass,
+				// in a view where that antialiasing is not applied: an opaque surface, as the same material without it.
+				// The passes drawn from this fill read the decision back from the surface (disable_alpha_antialiasing).
+				const bool opaque_alpha_antialiasing = params.opaque_alpha_antialiasing && !force_alpha && (surf->flags & GeometryInstanceSurfaceDataCache::FLAG_ALPHA_ANTIALIASING_ONLY);
+				if (opaque_alpha_antialiasing) {
+					pass_flags = (pass_flags & ~uint32_t(GeometryInstanceSurfaceDataCache::FLAG_PASS_ALPHA)) | GeometryInstanceSurfaceDataCache::FLAG_PASS_OPAQUE;
+				}
+				surf->alpha_antialiasing_disabled = opaque_alpha_antialiasing;
 
 				if (!p_alpha_only && !force_alpha && (pass_flags & (GeometryInstanceSurfaceDataCache::FLAG_PASS_DEPTH | GeometryInstanceSurfaceDataCache::FLAG_PASS_OPAQUE))) {
 					p_chunk.elements.push_back(surf);
@@ -6434,6 +6462,10 @@ void RenderForwardClustered::_geometry_instance_add_surface_with_material(Geomet
 			flags |= GeometryInstanceSurfaceDataCache::FLAG_PASS_DEPTH;
 			flags |= GeometryInstanceSurfaceDataCache::FLAG_PASS_SHADOW;
 		}
+		if (material_alpha_antialiasing != MATERIAL_ALPHA_ANTIALIASING_ALWAYS && p_material->shader_data->uses_alpha_pass_for_alpha_antialiasing_only()) {
+			// _fill_render_list_chunk() chooses its lists per view.
+			flags |= GeometryInstanceSurfaceDataCache::FLAG_ALPHA_ANTIALIASING_ONLY;
+		}
 	} else {
 		flags |= GeometryInstanceSurfaceDataCache::FLAG_PASS_OPAQUE;
 		flags |= GeometryInstanceSurfaceDataCache::FLAG_PASS_DEPTH;
@@ -7130,7 +7162,8 @@ void RenderForwardClustered::_mesh_generate_all_pipelines_for_surface_cache(Geom
 	surface.shader = p_surface_cache->shader;
 	surface.shader_shadow = p_surface_cache->shader_shadow;
 	surface.instanced = p_surface_cache->owner->mesh_instance.is_valid();
-	surface.uses_opaque = !uses_alpha_pass;
+	// A surface the opaque passes draw in the views that do not apply its alpha antialiasing has both sets of pipelines.
+	surface.uses_opaque = !uses_alpha_pass || (p_surface_cache->flags & GeometryInstanceSurfaceDataCache::FLAG_ALPHA_ANTIALIASING_ONLY);
 	surface.uses_transparent = uses_alpha_pass || uses_fade;
 	surface.uses_depth = (p_surface_cache->flags & (GeometryInstanceSurfaceDataCache::FLAG_PASS_DEPTH | GeometryInstanceSurfaceDataCache::FLAG_PASS_OPAQUE | GeometryInstanceSurfaceDataCache::FLAG_PASS_SHADOW)) != 0;
 	surface.can_use_lightmap = p_surface_cache->owner->lightmap_instance.is_valid() || p_surface_cache->owner->lightmap_sh;
@@ -7513,7 +7546,7 @@ void RenderForwardClustered::mesh_generate_pipelines(RID p_mesh, bool p_backgrou
 		surface.shader = shader;
 		surface.shader_shadow = shader_shadow;
 		surface.instanced = mesh_storage->mesh_needs_instance(p_mesh, true);
-		surface.uses_opaque = !material->shader_data->uses_alpha_pass();
+		surface.uses_opaque = !material->shader_data->uses_alpha_pass() || (material_alpha_antialiasing != MATERIAL_ALPHA_ANTIALIASING_ALWAYS && material->shader_data->uses_alpha_pass_for_alpha_antialiasing_only());
 		surface.uses_transparent = material->shader_data->uses_alpha_pass();
 		surface.uses_depth = surface.uses_opaque || (surface.uses_transparent && material->shader_data->uses_depth_in_alpha_pass());
 		surface.can_use_lightmap = mesh_storage->mesh_surface_get_format(mesh_surface) & RSE::ARRAY_FORMAT_TEX_UV2;
@@ -7658,6 +7691,16 @@ RenderForwardClustered::RenderForwardClustered() {
 		visibility_range_dithered_fade = VisibilityRangeDitheredFade(CLAMP(dithered_fade, int(VISIBILITY_RANGE_DITHERED_FADE_DISABLED), int(VISIBILITY_RANGE_DITHERED_FADE_ALWAYS)));
 		if (visibility_range_dithered_fade != VISIBILITY_RANGE_DITHERED_FADE_DISABLED) {
 			defines += "\n#define VISIBILITY_RANGE_DITHERED_FADE\n";
+		}
+		int alpha_antialiasing = GLOBAL_GET("rendering/anti_aliasing/quality/material_alpha_antialiasing");
+		// GODOT_MATERIAL_ALPHA_ANTIALIASING=0|1|2 overrides the setting, as above.
+		const String alpha_antialiasing_override = OS::get_singleton()->get_environment("GODOT_MATERIAL_ALPHA_ANTIALIASING");
+		if (!alpha_antialiasing_override.is_empty()) {
+			alpha_antialiasing = alpha_antialiasing_override.to_int();
+		}
+		material_alpha_antialiasing = MaterialAlphaAntialiasing(CLAMP(alpha_antialiasing, int(MATERIAL_ALPHA_ANTIALIASING_ALWAYS), int(MATERIAL_ALPHA_ANTIALIASING_MSAA_ONLY)));
+		if (material_alpha_antialiasing != MATERIAL_ALPHA_ANTIALIASING_ALWAYS) {
+			defines += "\n#define MATERIAL_ALPHA_ANTIALIASING_PER_VIEW\n";
 		}
 		defines += "\n#define MAX_DIRECTIONAL_LIGHT_DATA_STRUCTS " + itos(MAX_DIRECTIONAL_LIGHTS) + "\n";
 

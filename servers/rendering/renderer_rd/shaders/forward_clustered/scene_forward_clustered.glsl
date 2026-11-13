@@ -1567,11 +1567,22 @@ void fragment_shader(in SceneData scene_data) {
 #endif
 
 #ifdef ALPHA_ANTIALIASING_EDGE_USED
+#if defined(MATERIAL_ALPHA_ANTIALIASING_PER_VIEW) && (defined(ALPHA_SCISSOR_USED) || defined(ALPHA_HASH_USED)) && !defined(MODE_RENDER_MATERIAL)
+	// A view that does not apply alpha antialiasing draws this material from its opaque lists
+	// (rendering/anti_aliasing/quality/material_alpha_antialiasing): what the scissor or the hash kept is opaque,
+	// as in a material without alpha antialiasing just above.
+	if (sc_disable_alpha_antialiasing()) {
+		alpha = 1.0;
+	} else {
+#endif
 // If alpha scissor is used, we must further the edge threshold, otherwise we won't get any edge feather
 #ifdef ALPHA_SCISSOR_USED
-	alpha_antialiasing_edge = clamp(alpha_scissor_threshold + alpha_antialiasing_edge, 0.0, 1.0);
+		alpha_antialiasing_edge = clamp(alpha_scissor_threshold + alpha_antialiasing_edge, 0.0, 1.0);
 #endif
-	alpha = compute_alpha_antialiasing_edge(alpha, alpha_texture_coordinate, alpha_antialiasing_edge);
+		alpha = compute_alpha_antialiasing_edge(alpha, alpha_texture_coordinate, alpha_antialiasing_edge);
+#if defined(MATERIAL_ALPHA_ANTIALIASING_PER_VIEW) && (defined(ALPHA_SCISSOR_USED) || defined(ALPHA_HASH_USED)) && !defined(MODE_RENDER_MATERIAL)
+	}
+#endif
 #endif // ALPHA_ANTIALIASING_EDGE_USED
 
 #ifdef MODE_RENDER_DEPTH

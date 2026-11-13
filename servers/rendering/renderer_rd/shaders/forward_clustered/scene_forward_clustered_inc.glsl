@@ -164,6 +164,14 @@ bool sc_use_dither_fade() {
 }
 #endif
 
+#ifdef MATERIAL_ALPHA_ANTIALIASING_PER_VIEW
+// The draw's alpha scissor or alpha hash material is drawn by the opaque passes of this view, without its alpha
+// antialiasing.
+bool sc_disable_alpha_antialiasing() {
+	return ((sc_packed_1() >> 14) & 1U) != 0;
+}
+#endif
+
 float sc_luminance_multiplier() {
 	// Not used in clustered renderer but we share some code with the mobile renderer that requires this.
 	return 1.0;

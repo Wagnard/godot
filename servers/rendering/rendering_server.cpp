@@ -3869,6 +3869,7 @@ void RenderingServer::init() {
 	GLOBAL_DEF_RST("rendering/global_illumination/sdfgi/transparent_surface_reflections", true);
 
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/visibility_range/dithered_fade", PROPERTY_HINT_ENUM, "Disabled,With Temporal Antialiasing,Always"), 1);
+	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/anti_aliasing/quality/material_alpha_antialiasing", PROPERTY_HINT_ENUM, "Always,Not With Temporal Antialiasing,With MSAA Only"), 1);
 
 	GLOBAL_DEF_RST("rendering/environment/fog/use_legacy_blending", false);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/environment/volumetric_fog/volume_size", PROPERTY_HINT_RANGE, "16,512,1"), 64);

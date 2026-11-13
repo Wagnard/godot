@@ -2876,6 +2876,14 @@
 			[b]Note:[/b] [Control] nodes are snapped to the nearest pixel by default. This is controlled by [member gui/common/snap_controls_to_pixels].
 			[b]Note:[/b] It is not recommended to use this setting together with [member rendering/2d/snap/snap_2d_transforms_to_pixel], as movement may appear even less smooth. Prefer only enabling that setting instead.
 		</member>
+		<member name="rendering/anti_aliasing/quality/material_alpha_antialiasing" type="int" setter="" getter="" default="1">
+			In which viewports the alpha antialiasing of materials ([member BaseMaterial3D.alpha_antialiasing_mode], the [code]alpha_to_coverage[/code] render modes) is applied to materials that use alpha scissor or alpha hash. Alpha antialiasing is a multisampling technique: it only antialiases in a viewport that uses MSAA ([member Viewport.msaa_3d]). A viewport that uses MSAA always applies it.
+			[b]Always:[/b] It is applied in every viewport (upstream Godot's behavior). Without MSAA, the material is drawn by the transparent pass with blended edges.
+			[b]Not With Temporal Antialiasing:[/b] In a viewport without MSAA that uses temporal antialiasing ([member Viewport.use_taa]) or a temporal upscaler (FSR 2, FSR 3, DLSS, MetalFX Temporal), the material is drawn as the same material without alpha antialiasing: by the opaque passes, with plain alpha scissor or alpha hash, whose edges the temporal resolve antialiases. In other viewports it is applied as with [b]Always[/b].
+			[b]With MSAA Only:[/b] It is applied only in the viewports that use MSAA. In every other one the material is drawn as the same material without alpha antialiasing.
+			A material drawn by the opaque passes writes its motion vectors, which temporal antialiasing and temporal upscalers need to keep a stable image there, and is not covered by FSR's reactive mask as a surface drawn by the transparent pass is. Materials do not need any change. Materials that are transparent for another reason (alpha blending, [code]depth_prepass_alpha[/code], reading the screen or depth textures, no depth write, reading the stencil buffer) are not affected, and neither are shadows.
+			[b]Note:[/b] This property is only read when the project starts. Only supported by the Forward+ renderer.
+		</member>
 		<member name="rendering/anti_aliasing/quality/msaa_2d" type="int" setter="" getter="" default="0">
 			Sets the number of multisample antialiasing (MSAA) samples to use for 2D/Canvas rendering (as a power of two). MSAA is used to reduce aliasing around the edges of polygons. A higher MSAA value results in smoother edges but can be significantly slower on some hardware, especially integrated graphics due to their limited memory bandwidth. This has no effect on shader-induced aliasing or texture aliasing.
 			[b]Note:[/b] MSAA is only supported in the Forward+ and Mobile rendering methods, not Compatibility.

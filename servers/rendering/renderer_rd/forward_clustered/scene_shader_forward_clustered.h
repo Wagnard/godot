@@ -155,6 +155,7 @@ public:
 				uint32_t material_debug_mode : 5; // See material_debug_mode_from_environment().
 				uint32_t volumetric_fog_sampling : 2; // RSE::EnvironmentVolumetricFogSampling.
 				uint32_t use_dither_fade : 1; // The draw's instance fade is a dithered discard (rendering/visibility_range/dithered_fade).
+				uint32_t disable_alpha_antialiasing : 1; // The draw's alpha scissor / alpha hash material is drawn without its alpha antialiasing (rendering/anti_aliasing/quality/material_alpha_antialiasing).
 			};
 		};
 
@@ -390,6 +391,21 @@ public:
 			bool no_depth_draw = depth_draw == DEPTH_DRAW_DISABLED;
 			bool no_depth_test = depth_test != DEPTH_TEST_ENABLED;
 			return has_alpha || has_read_screen_alpha || no_depth_draw || no_depth_test;
+		}
+
+		// An alpha scissor or alpha hash material that the transparent pass draws for its alpha antialiasing only: without
+		// it, the opaque passes would draw it. What rendering/anti_aliasing/quality/material_alpha_antialiasing may send
+		// back to them, in the views where alpha to coverage has no samples to work with.
+		_FORCE_INLINE_ bool uses_alpha_pass_for_alpha_antialiasing_only() const {
+			if (!uses_alpha || !uses_alpha_clip || !uses_alpha_antialiasing) {
+				return false;
+			}
+			bool has_read_screen_alpha = uses_screen_texture || uses_depth_texture || uses_normal_texture;
+			bool no_depth_draw = depth_draw == DEPTH_DRAW_DISABLED;
+			bool no_depth_test = depth_test != DEPTH_TEST_ENABLED;
+			// A material that reads the stencil buffer must stay in the alpha pass; depth_prepass_alpha asks for the blend.
+			bool reads_stencil = stencil_enabled && (stencil_flags & STENCIL_FLAG_READ);
+			return !uses_blend_alpha && !uses_depth_prepass_alpha && !has_read_screen_alpha && !no_depth_draw && !no_depth_test && !reads_stencil;
 		}
 
 		_FORCE_INLINE_ bool uses_depth_in_alpha_pass() const {
