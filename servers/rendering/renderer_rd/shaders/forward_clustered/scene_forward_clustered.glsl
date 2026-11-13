@@ -1373,6 +1373,27 @@ void fragment_shader(in SceneData scene_data) {
 
 	float alpha_highp = float(instance_flags >> INSTANCE_FLAGS_FADE_SHIFT) / float(255.0);
 
+#ifdef VISIBILITY_RANGE_DITHERED_FADE
+	if (sc_use_dither_fade()) {
+		// The instance fades through its visibility range and is drawn by the opaque passes: its pixels are kept or
+		// discarded against a noise threshold, the same in the depth prepass, the color pass and the motion vectors, so
+		// that it keeps its depth and its motion vectors while it fades (a fade drawn by the transparent pass has
+		// neither, which temporal upscalers handle badly). Interleaved gradient noise (Jimenez, "Next Generation Post
+		// Processing in Call of Duty: Advanced Warfare", SIGGRAPH 2014), moved every frame while a temporal resolve
+		// runs (the view is jittered), which then averages the pattern into a smooth fade. The frame number, not
+		// taa_frame_count: that one wraps with the jitter cycle, so each jitter phase would always meet the same
+		// pattern and the resolve would settle on a fixed grain.
+		float dither_frame = any(notEqual(scene_data.taa_jitter, vec2(0.0))) ? float(scene_data.frame_number % 64u) : 0.0;
+		vec2 dither_position = gl_FragCoord.xy + 5.588238 * dither_frame;
+		float dither_threshold = fract(52.9829189 * fract(dot(dither_position, vec2(0.06711056, 0.00583715))));
+		if (alpha_highp <= dither_threshold) {
+			discard;
+		}
+		// The material's code starts from an opaque surface: the fade is done.
+		alpha_highp = 1.0;
+	}
+#endif
+
 #ifdef TANGENT_USED
 	vec3 binormal = binormal_interp;
 	vec3 tangent = tangent_interp;

@@ -558,6 +558,13 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 		pipeline_specialization.multimesh_has_color = bool(surf->owner->base_flags & INSTANCE_DATA_FLAG_MULTIMESH_HAS_COLOR);
 		pipeline_specialization.multimesh_has_custom_data = bool(surf->owner->base_flags & INSTANCE_DATA_FLAG_MULTIMESH_HAS_CUSTOM_DATA);
 
+		// The dithered visibility range fade of the element's instance, in the passes drawn from the opaque and motion
+		// vector lists: the depth prepass and the color pass discard the same pixels. A surface drawn by the transparent
+		// pass (a transparent material of that instance) fades by its alpha, as before.
+		if constexpr ((p_pass_mode == PASS_MODE_COLOR && (p_color_pass_flags & (COLOR_PASS_FLAG_TRANSPARENT | COLOR_PASS_FLAG_OIT)) == 0) || p_pass_mode == PASS_MODE_DEPTH || p_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS || p_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS_VOXEL_GI) {
+			pipeline_specialization.use_dither_fade = element_info.uses_dither_fade;
+		}
+
 		if constexpr (p_pass_mode == PASS_MODE_COLOR) {
 			pipeline_specialization.use_light_soft_shadows = element_info.uses_softshadow;
 			pipeline_specialization.use_light_projector = element_info.uses_projector;
@@ -1703,13 +1710,16 @@ void RenderForwardClustered::_fill_instance_data_range(RenderListType p_render_l
 			const GeometryInstanceSurfaceDataCache *prev_surface = rl->elements[i - 1 + p_offset];
 			const GeometryInstanceForwardClustered *prev_inst = prev_surface->owner;
 			const bool prev_cant_repeat = prev_inst->flags_cache & INSTANCE_DATA_FLAG_MULTIMESH || prev_inst->mesh_instance.is_valid();
-			repeat = !prev_cant_repeat && prev_surface->sort.sort_key1 == surface->sort.sort_key1 && prev_surface->sort.sort_key2 == surface->sort.sort_key2 && inst->mirror == prev_inst->mirror && inst->cube_face_mask == prev_inst->cube_face_mask;
+			// A dithered fade is a specialization constant of the draw's pipeline: an instance that has one is not drawn
+			// with one that has none.
+			repeat = !prev_cant_repeat && prev_surface->sort.sort_key1 == surface->sort.sort_key1 && prev_surface->sort.sort_key2 == surface->sort.sort_key2 && inst->mirror == prev_inst->mirror && inst->cube_face_mask == prev_inst->cube_face_mask && ((inst->flags_cache ^ prev_inst->flags_cache) & INSTANCE_DATA_FLAG_FADE_DITHER) == 0;
 		}
 		fill_instance_data_repeats[i] = repeat;
 
 		RenderElementInfo &element_info = rl->element_info[p_offset + i];
 		element_info.value = uint32_t(surface->sort.sort_key1 & 0xFFF);
 		element_info.cube_face_mask = inst->cube_face_mask;
+		element_info.uses_dither_fade = (inst->flags_cache & INSTANCE_DATA_FLAG_FADE_DITHER) != 0;
 	}
 }
 
@@ -1763,6 +1773,15 @@ void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, con
 	params.z_max = z_max;
 	params.max_lightmap_captures = scene_state.max_lightmap_captures;
 	params.frame = RSG::rasterizer->get_frame_number();
+	// rendering/visibility_range/dithered_fade: in the color lists of a view, not of a reflection probe's capture
+	// (which no temporal resolve averages), and with "temporal" only where TAA or a temporal upscaler resolves the view.
+	params.dither_fades = false;
+	if (visibility_range_dithered_fade != VISIBILITY_RANGE_DITHERED_FADE_DISABLED && p_pass_mode == PASS_MODE_COLOR && !p_render_data->reflection_probe.is_valid()) {
+		params.dither_fades = visibility_range_dithered_fade == VISIBILITY_RANGE_DITHERED_FADE_ALWAYS;
+		if (!params.dither_fades && p_render_data->render_buffers.is_valid()) {
+			params.dither_fades = p_render_data->render_buffers->get_use_taa() || _resolve_scale_3d_mode(p_render_data->render_buffers) != SCALE_3D_NONE;
+		}
+	}
 
 	// Large lists are filled by several threads, in contiguous ranges of instances merged in order: the same lists
 	// in the same order as filled serially.
@@ -1951,9 +1970,18 @@ void RenderForwardClustered::_fill_render_list_chunk(FillRenderListChunk &p_chun
 			}
 		}
 
+		// rendering/visibility_range/dithered_fade: a visibility range fade (Self: fade_alpha so far; Dependencies:
+		// parent_fade_alpha) keeps the instance's opaque surfaces in the opaque passes, where the shader discards their
+		// pixels against a noise threshold. GeometryInstance3D.transparency (force_alpha) is no such fade: an instance
+		// that has one is blended by the transparent pass as before.
+		const bool dither_fade = params.dither_fades && inst->force_alpha >= FADE_ALPHA_PASS_THRESHOLD && fade_alpha * inst->parent_fade_alpha < FADE_ALPHA_PASS_THRESHOLD;
+
 		fade_alpha *= inst->force_alpha * inst->parent_fade_alpha;
 
 		flags = (flags & ~INSTANCE_DATA_FLAGS_FADE_MASK) | (uint32_t(fade_alpha * 255.0) << INSTANCE_DATA_FLAGS_FADE_SHIFT);
+		if (dither_fade) {
+			flags |= INSTANCE_DATA_FLAG_FADE_DITHER;
+		}
 
 		if (p_render_list == RENDER_LIST_OPAQUE) {
 			// Detect if object moved since last frame.
@@ -1976,7 +2004,8 @@ void RenderForwardClustered::_fill_render_list_chunk(FillRenderListChunk &p_chun
 			// Alpha-only (RT path): skip instances with no transparent/fading
 			// surfaces; opaque geometry is in the TLAS. Uses rt_pass_flags so
 			// `#if defined(RT)` overrides are honored.
-			if (p_alpha_only && fade_alpha >= FADE_ALPHA_PASS_THRESHOLD) {
+			// A dithered fade does not send the instance's opaque surfaces to this pass either: they stay traced.
+			if (p_alpha_only && (fade_alpha >= FADE_ALPHA_PASS_THRESHOLD || dither_fade)) {
 				bool has_alpha_surface = false;
 				const GeometryInstanceSurfaceDataCache *s = inst->surface_caches;
 				while (s) {
@@ -2126,7 +2155,7 @@ void RenderForwardClustered::_fill_render_list_chunk(FillRenderListChunk &p_chun
 				bool force_alpha = false;
 #endif
 
-				if (fade_alpha < FADE_ALPHA_PASS_THRESHOLD) {
+				if (fade_alpha < FADE_ALPHA_PASS_THRESHOLD && !dither_fade) {
 					force_alpha = true;
 				}
 
@@ -7618,6 +7647,17 @@ RenderForwardClustered::RenderForwardClustered() {
 		sdfgi_forward_reflections = GLOBAL_GET("rendering/global_illumination/sdfgi/transparent_surface_reflections");
 		if (sdfgi_forward_reflections) {
 			defines += "\n#define SDFGI_FORWARD_REFLECTIONS\n";
+		}
+		int dithered_fade = GLOBAL_GET("rendering/visibility_range/dithered_fade");
+		// GODOT_VISIBILITY_RANGE_DITHERED_FADE=0|1|2 overrides the setting, to compare its values in a project that
+		// must not be written (a bench run of a game).
+		const String dithered_fade_override = OS::get_singleton()->get_environment("GODOT_VISIBILITY_RANGE_DITHERED_FADE");
+		if (!dithered_fade_override.is_empty()) {
+			dithered_fade = dithered_fade_override.to_int();
+		}
+		visibility_range_dithered_fade = VisibilityRangeDitheredFade(CLAMP(dithered_fade, int(VISIBILITY_RANGE_DITHERED_FADE_DISABLED), int(VISIBILITY_RANGE_DITHERED_FADE_ALWAYS)));
+		if (visibility_range_dithered_fade != VISIBILITY_RANGE_DITHERED_FADE_DISABLED) {
+			defines += "\n#define VISIBILITY_RANGE_DITHERED_FADE\n";
 		}
 		defines += "\n#define MAX_DIRECTIONAL_LIGHT_DATA_STRUCTS " + itos(MAX_DIRECTIONAL_LIGHTS) + "\n";
 

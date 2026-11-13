@@ -154,6 +154,7 @@ public:
 				uint32_t cluster_has_area_light : 1;
 				uint32_t material_debug_mode : 5; // See material_debug_mode_from_environment().
 				uint32_t volumetric_fog_sampling : 2; // RSE::EnvironmentVolumetricFogSampling.
+				uint32_t use_dither_fade : 1; // The draw's instance fade is a dithered discard (rendering/visibility_range/dithered_fade).
 			};
 		};
 

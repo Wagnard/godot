@@ -498,6 +498,9 @@ protected:
 
 	// When changing any of these enums, remember to change the corresponding enums in the shader files as well.
 	enum {
+		// The instance's visibility range fade is dithered in the opaque passes (rendering/visibility_range/dithered_fade).
+		// Only read on the CPU, by _fill_instance_data_range(): the shader gets it as a specialization constant.
+		INSTANCE_DATA_FLAG_FADE_DITHER = 1 << 0,
 		INSTANCE_DATA_FLAG_MULTIMESH_INDIRECT = 1 << 2,
 		INSTANCE_DATA_FLAGS_DYNAMIC = 1 << 3,
 		INSTANCE_DATA_FLAGS_NON_UNIFORM_SCALE = 1 << 4,
@@ -698,6 +701,13 @@ protected:
 	// SDFGI cascades (SDFGI_FORWARD_REFLECTIONS) and the smooth surfaces lit in the forward pass trace their reflection
 	// through them, as the deferred GI pass does for opaque ones.
 	bool sdfgi_forward_reflections = false;
+	// rendering/visibility_range/dithered_fade, read on startup.
+	enum VisibilityRangeDitheredFade {
+		VISIBILITY_RANGE_DITHERED_FADE_DISABLED,
+		VISIBILITY_RANGE_DITHERED_FADE_TEMPORAL, // In the views resolved by TAA or a temporal upscaler.
+		VISIBILITY_RANGE_DITHERED_FADE_ALWAYS,
+	};
+	VisibilityRangeDitheredFade visibility_range_dithered_fade = VISIBILITY_RANGE_DITHERED_FADE_DISABLED;
 
 	// The path tracer's front layer reflection (rgb, view depth in alpha), read by its transparent pass in place of SSR.
 	RID front_layer_reflection;
@@ -724,6 +734,7 @@ protected:
 				uint32_t uses_forward_gi : 1;
 				uint32_t uses_lightmap : 1;
 				uint32_t cube_face_mask : 6; // PASS_MODE_SHADOW_CUBE: the faces that see the element.
+				uint32_t uses_dither_fade : 1; // INSTANCE_DATA_FLAG_FADE_DITHER of the element's instance.
 			};
 			uint32_t value;
 		};
@@ -788,6 +799,7 @@ protected:
 		float z_max = 0.0;
 		uint32_t max_lightmap_captures = 0; // Per chunk: the merge checks the total.
 		uint64_t frame = 0;
+		bool dither_fades = false; // This fill dithers visibility range fades (rendering/visibility_range/dithered_fade).
 	} fill_render_list_params;
 
 	LocalVector<FillRenderListChunk> fill_render_list_chunks;

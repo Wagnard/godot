@@ -3734,6 +3734,15 @@
 		<member name="rendering/viewport/transparent_background" type="bool" setter="" getter="" default="false">
 			If [code]true[/code], enables [member Viewport.transparent_bg] on the root viewport. This allows per-pixel transparency to be effective after also enabling [member display/window/size/transparent] and [member display/window/per_pixel_transparency/allowed].
 		</member>
+		<member name="rendering/visibility_range/dithered_fade" type="int" setter="" getter="" default="0">
+			How the fade of [constant GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF] and [constant GeometryInstance3D.VISIBILITY_RANGE_FADE_DEPENDENCIES] is drawn for opaque materials.
+			[b]Disabled:[/b] The fading object is blended by the transparent pass (Godot's behavior).
+			[b]With Temporal Antialiasing:[/b] In a viewport that uses temporal antialiasing ([member Viewport.use_taa]) or a temporal upscaler (FSR 2, FSR 3, DLSS, MetalFX Temporal), the fade is dithered: the fading object stays in the opaque passes and its pixels are kept or discarded against a noise threshold that changes every frame, which the temporal resolve averages into a smooth fade. In other viewports the object is blended as with [b]Disabled[/b].
+			[b]Always:[/b] The fade is dithered in every viewport. Without a temporal resolve the pattern is fixed and visible during the transition.
+			A dithered object keeps its depth and its motion vectors while it fades, which temporal antialiasing and temporal upscalers need to keep a stable image there: an object drawn by the transparent pass has neither, and FSR treats it as reactive. Dithering also avoids the cost and the sorting issues of transparent rendering during the transition, and a material with alpha scissor fades instead of disappearing at once. Materials do not need any change, custom shaders included.
+			Surfaces whose material is transparent keep fading by their alpha, and so does everything in the capture of a [ReflectionProbe]. [member GeometryInstance3D.transparency] is not affected. Shadows are not affected either: as before, a fading object casts its full shadow until it leaves its visibility range.
+			[b]Note:[/b] This property is only read when the project starts. Only supported by the Forward+ renderer.
+		</member>
 		<member name="rendering/vrs/mode" type="int" setter="" getter="" default="0">
 			Set the default Variable Rate Shading (VRS) mode for the main viewport. See [member Viewport.vrs_mode] to change this at runtime, and [enum Viewport.VRSMode] for possible values.
 		</member>

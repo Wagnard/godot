@@ -156,6 +156,14 @@ uint sc_volumetric_fog_sampling() {
 	return (sc_packed_1() >> 11) & 3U;
 }
 
+#ifdef VISIBILITY_RANGE_DITHERED_FADE
+// The draw's instance is fading through its visibility range and stays in the opaque passes: the fade is a dithered
+// discard, not an alpha.
+bool sc_use_dither_fade() {
+	return ((sc_packed_1() >> 13) & 1U) != 0;
+}
+#endif
+
 float sc_luminance_multiplier() {
 	// Not used in clustered renderer but we share some code with the mobile renderer that requires this.
 	return 1.0;
