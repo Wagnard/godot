@@ -57,6 +57,7 @@ Vector<uint8_t> RendererRD::NRDDenoiser::make_cache_file(const Vector<uint8_t> &
 #include "core/crypto/crypto_core.h"
 #include "core/io/dir_access.h"
 #include "core/io/file_access.h"
+#include "core/os/os.h"
 #include "core/os/thread.h"
 #include "core/string/string_builder.h"
 #include "core/templates/hash_map.h"
@@ -94,6 +95,8 @@ static constexpr bool NRD_SIGMA_BUILT = false;
 // then denoises the indirect light (and the sky's next event estimation) only.
 static constexpr nrd::Identifier NRD_DIRECT_IDENTIFIER = 3;
 static constexpr nrd::Denoiser NRD_DIRECT_DENOISER = nrd::Denoiser::REBLUR_DIFFUSE;
+// Its accumulation time, half of REBLUR_DEFAULT_ACCUMULATION_TIME: see denoise().
+static constexpr float NRD_DIRECT_ACCUMULATION_TIME = 0.25f;
 
 // An install made before the direct light signal's front and back end (install_nrd.py revision 2) has no such signal.
 #ifdef NRD_GODOT_SHADERS_DIRECT
@@ -127,6 +130,10 @@ public:
 	nrd::Instance *instance = nullptr;
 	Size2i size;
 	uint32_t frame_index = 0;
+	// The time between this view's denoisings, low-pass filtered (NRDSettings.h's filter): the frame rate the accumulation
+	// lengths follow. It starts at NRD's assumed 60 FPS.
+	float smoothed_frame_time_ms = 1000.0f / 60.0f;
+	uint64_t last_denoise_usec = 0;
 	LocalVector<RID> permanent_pool;
 	LocalVector<RID> transient_pool;
 	// One per constant data a frame's dispatches upload, in their order: none is rewritten while the frame uses it.
@@ -174,6 +181,8 @@ public:
 		}
 		size = Size2i();
 		frame_index = 0;
+		smoothed_frame_time_ms = 1000.0f / 60.0f;
+		last_denoise_usec = 0;
 		sigma = false;
 		direct = false;
 	}
@@ -626,6 +635,32 @@ bool NRDDenoiser::denoise(RenderSceneBuffersRD *p_render_buffers, const Paramete
 	common.accumulationMode = context->frame_index == 0 ? nrd::AccumulationMode::CLEAR_AND_RESTART : nrd::AccumulationMode::CONTINUE;
 	ERR_FAIL_COND_V(nrd::SetCommonSettings(*context->instance, common) != nrd::Result::SUCCESS, false);
 
+	// Accumulation lengths in seconds, not frames. NRDSettings.h: "it is recommended to make the accumulated frame count
+	// FPS-dependent. This minimizes lag at low FPS ... All default values assume 60 FPS", the FPS "low pass filtered to
+	// reduce reactions to transient drops (stutters)" with the 0.2 s filter it gives; the README: "the
+	// GetMaxAccumulatedFrameNum helper must receive the FPS, not the generated one" (frame generation never calls this:
+	// the time between denoisings is the rendered rate). The lengths are those of NVIDIA's NRD sample with its adaptive
+	// accumulation (NRDSample.cpp): ReBLUR REBLUR_DEFAULT_ACCUMULATION_TIME (0.5 s) up to 60 frames, the FPS capped at
+	// 121, its fast history a fifth of it, its stabilization as long as its history; SIGMA SIGMA_DEFAULT_ACCUMULATION_TIME.
+	// NRD's fixed defaults (30 frames) made a moved shadow trail 0.67 s at 45 FPS, 1.25 s at 24 (PT-NRD-ADAPTIVE-ACCUMULATION-FIXES.md).
+	const uint64_t now_usec = OS::get_singleton()->get_ticks_usec();
+	if (context->frame_index > 0 && context->last_denoise_usec != 0) {
+		// Clamped: a view not drawn for a while (a hidden viewport) is not a stutter of seconds.
+		const float frame_time_ms = CLAMP(float(now_usec - context->last_denoise_usec) / 1000.0f, 1.0f, 250.0f);
+		const float n = (1000.0f / context->smoothed_frame_time_ms) * 0.2f;
+		context->smoothed_frame_time_ms += (frame_time_ms - context->smoothed_frame_time_ms) / (1.0f + n);
+	}
+	context->last_denoise_usec = now_usec;
+	const float smoothed_fps = MIN(1000.0f / context->smoothed_frame_time_ms, 121.0f);
+	// A ReBLUR's lengths for an accumulation time: the history up to 60 frames, its fast history a fifth of it, and
+	// historyFixFrameNum (default 3) kept in "[0; maxFastAccumulatedFrameNum)" (NRDSettings.h).
+	auto set_accumulation = [smoothed_fps](nrd::ReblurSettings &r_settings, float p_seconds) {
+		r_settings.maxAccumulatedFrameNum = CLAMP(nrd::GetMaxAccumulatedFrameNum(p_seconds, smoothed_fps), 1u, MIN(60u, nrd::REBLUR_MAX_HISTORY_FRAME_NUM));
+		r_settings.maxFastAccumulatedFrameNum = MAX(r_settings.maxAccumulatedFrameNum / 5, 1u);
+		r_settings.maxStabilizedFrameNum = r_settings.maxAccumulatedFrameNum;
+		r_settings.historyFixFrameNum = MIN(r_settings.historyFixFrameNum, r_settings.maxFastAccumulatedFrameNum - 1);
+	};
+
 	// The raygen picks the primary hit's lobe with a probability clamped to [1/4, 3/4] against Bayer dithering, as
 	// AREA_3X3 asks (raytracing_inc.glsl, nrd_lobe_threshold()); the rest is NRD's defaults.
 	nrd::ReblurSettings settings;
@@ -638,6 +673,7 @@ bool NRDDenoiser::denoise(RenderSceneBuffersRD *p_render_buffers, const Paramete
 	// PT-NRD-PLANE-DISTANCE-FIXES.md has both measures.
 	const float plane_distance_sensitivity = CLAMP(GLOBAL_GET_CACHED(float, "rendering/pathtracing/nrd_plane_distance_sensitivity"), 0.001f, 1.0f);
 	settings.planeDistanceSensitivity = plane_distance_sensitivity;
+	set_accumulation(settings, nrd::REBLUR_DEFAULT_ACCUMULATION_TIME);
 	ERR_FAIL_COND_V(nrd::SetDenoiserSettings(*context->instance, NRD_IDENTIFIER, &settings) != nrd::Result::SUCCESS, false);
 
 	// SIGMA's settings: its defaults, and the direction to the sun ("needed only for directional light sources"). The world's
@@ -648,12 +684,22 @@ bool NRDDenoiser::denoise(RenderSceneBuffersRD *p_render_buffers, const Paramete
 		sigma_settings.lightDirection[0] = to_sun.x;
 		sigma_settings.lightDirection[1] = to_sun.y;
 		sigma_settings.lightDirection[2] = to_sun.z;
+		sigma_settings.maxStabilizedFrameNum = MIN(nrd::GetMaxAccumulatedFrameNum(nrd::SIGMA_DEFAULT_ACCUMULATION_TIME, smoothed_fps), nrd::SIGMA_MAX_HISTORY_FRAME_NUM);
 		ERR_FAIL_COND_V(nrd::SetDenoiserSettings(*context->instance, NRD_SIGMA_IDENTIFIER, &sigma_settings) != nrd::Result::SUCCESS, false);
 	}
-	// The direct light signal's ReBLUR: NRD's defaults (no lobe is skipped there: no hit distance reconstruction), with the
-	// same plane distance sensitivity.
+	// The direct light signal's ReBLUR (no lobe is skipped there: no hit distance reconstruction), with the same plane
+	// distance sensitivity, made more responsive than the indirect light's: a moving occluder (the player's character
+	// casting a lamp's shadow) changes it at once on a still surface, whose history NRD keeps. Half the accumulation time
+	// (NRD_DIRECT_ACCUMULATION_TIME), no stabilization pass (NRDSettings.h: "0 disables the stabilization pass"), and its slow
+	// history clamped closer to the fast one (fastHistoryClampingSigmaScale "[1; 3]", 2 by default; "1.1 is a safe value
+	// for occlusion denoising"). godot3d, a moved shadow on a shop wall at 45 FPS: 70 % of the change after 12 frames ->
+	// 92 %; frame-to-frame change in a shaded bush, wind on and frozen, within the run-to-run spread
+	// (PT-NRD-ADAPTIVE-ACCUMULATION-FIXES.md).
 	nrd::ReblurSettings direct_settings;
 	direct_settings.planeDistanceSensitivity = plane_distance_sensitivity;
+	set_accumulation(direct_settings, NRD_DIRECT_ACCUMULATION_TIME);
+	direct_settings.maxStabilizedFrameNum = 0;
+	direct_settings.fastHistoryClampingSigmaScale = 1.1f;
 	if (direct) {
 		ERR_FAIL_COND_V(nrd::SetDenoiserSettings(*context->instance, NRD_DIRECT_IDENTIFIER, &direct_settings) != nrd::Result::SUCCESS, false);
 	}
