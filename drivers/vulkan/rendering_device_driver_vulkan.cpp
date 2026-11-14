@@ -8249,7 +8249,11 @@ void RenderingDeviceDriverVulkan::on_device_lost() const {
 			: nullptr;
 	fault_counts.vendorBinarySize = 0;
 	vkres = device_functions.GetDeviceFaultInfoEXT(vk_device, &fault_counts, &fault_info);
-	if (vkres != VK_SUCCESS) {
+	// VK_INCOMPLETE: the vendor binary crash dump, not asked for (vendorBinarySize 0), was left out; the address and vendor
+	// infos asked for are written (Vulkan specification, vkGetDeviceFaultInfoEXT: "at most structure count elements will be
+	// written to the associated pFaultInfo output array", VK_INCOMPLETE "to indicate that not all the available properties
+	// were returned"). NVIDIA's driver answers so whenever it has a crash dump.
+	if (vkres != VK_SUCCESS && vkres != VK_INCOMPLETE) {
 		_err_print_error(FUNCTION_STR, __FILE__, __LINE__, "vkGetDeviceFaultInfoEXT returned " + itos(vkres) + " when getting fault info, skipping VK_EXT_device_fault report...");
 	} else {
 		err_msg += "** Report from VK_EXT_device_fault **";
