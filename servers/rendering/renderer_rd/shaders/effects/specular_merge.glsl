@@ -74,7 +74,10 @@ void main() {
 #endif
 
 #ifdef MODE_MERGE
-	frag_color += texture(diffuse, uv_interp);
+	// The diffuse buffer's alpha is the subsurface scattering strength (the scene shader's separate specular output, read
+	// by the SSS pass), not a coverage: the merge leaves an alpha of 0, as the additive modes do (their blend writes
+	// alpha ZERO, ZERO). Kept, it was the reactive mask of FSR2 and FSR 3.1 on every SSS surface with MSAA.
+	frag_color.rgb += texture(diffuse, uv_interp).rgb;
 #endif
 	//added using additive blend
 }
