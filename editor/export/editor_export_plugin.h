@@ -162,6 +162,12 @@ protected:
 	virtual void _end_customize_scenes();
 	virtual void _end_customize_resources();
 
+	// Called instead of _end_customize_*() when the export stops before its customization ends (cancelled by the user
+	// while packing, or failed): work the plugin started in the background must stop, its results are not used. Not
+	// exposed to scripts; scripted plugins are not told, as before.
+	virtual void _abort_customize_scenes() {}
+	virtual void _abort_customize_resources() {}
+
 	virtual PackedStringArray _get_export_features(const Ref<EditorExportPlatform> &p_export_platform, bool p_debug) const;
 	virtual void _get_export_options(const Ref<EditorExportPlatform> &p_export_platform, List<EditorExportPlatform::ExportOption> *r_options) const;
 	virtual Dictionary _get_export_options_overrides(const Ref<EditorExportPlatform> &p_export_platform) const;

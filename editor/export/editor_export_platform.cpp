@@ -1477,6 +1477,31 @@ Error EditorExportPlatform::export_project_files(const Ref<EditorExportPreset> &
 		}
 	}
 
+	// Every return before the end of the customization below (the user canceling while packing makes save_file()
+	// return ERR_SKIP; any error) skips _end_customize_*(): the plugins that began customizing are told the export
+	// stopped, or work they started in the background runs on (the shader baker's compilations kept every core busy
+	// after a cancelled export, and the editor could not quit until they ended).
+	struct CustomizationAbortNotifier {
+		LocalVector<Ref<EditorExportPlugin>> &resources_plugins;
+		LocalVector<Ref<EditorExportPlugin>> &scenes_plugins;
+		bool ended = false;
+
+		CustomizationAbortNotifier(LocalVector<Ref<EditorExportPlugin>> &p_resources_plugins, LocalVector<Ref<EditorExportPlugin>> &p_scenes_plugins) :
+				resources_plugins(p_resources_plugins), scenes_plugins(p_scenes_plugins) {}
+
+		~CustomizationAbortNotifier() {
+			if (ended) {
+				return;
+			}
+			for (Ref<EditorExportPlugin> &plugin : resources_plugins) {
+				plugin->_abort_customize_resources();
+			}
+			for (Ref<EditorExportPlugin> &plugin : scenes_plugins) {
+				plugin->_abort_customize_scenes();
+			}
+		}
+	} customization_abort_notifier(customize_resources_plugins, customize_scenes_plugins);
+
 	// Add any files that might've been defined during the initial steps of the export plugins.
 	err = add_shared_objects_and_extra_files_from_export_plugins();
 	if (err != OK) {
@@ -1735,6 +1760,7 @@ Error EditorExportPlatform::export_project_files(const Ref<EditorExportPreset> &
 		}
 	}
 
+	customization_abort_notifier.ended = true;
 	if (convert_text_to_binary || !customize_resources_plugins.is_empty() || !customize_scenes_plugins.is_empty()) {
 		// End scene customization
 

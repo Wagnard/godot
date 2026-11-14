@@ -128,6 +128,8 @@ protected:
 	virtual bool _begin_customize_resources(const Ref<EditorExportPlatform> &p_platform, const Vector<String> &p_features) override;
 	virtual bool _begin_customize_scenes(const Ref<EditorExportPlatform> &p_platform, const Vector<String> &p_features) override;
 	virtual void _end_customize_resources() override;
+	virtual void _abort_customize_resources() override;
+	void _clear_customization();
 	virtual Ref<Resource> _customize_resource(const Ref<Resource> &p_resource, const String &p_path) override;
 	virtual Node *_customize_scene(Node *p_root, const String &p_path) override;
 	virtual void _get_export_options(const Ref<EditorExportPlatform> &p_export_platform, List<EditorExportPlatform::ExportOption> *r_options) const override;

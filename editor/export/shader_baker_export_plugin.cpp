@@ -216,8 +216,38 @@ bool ShaderBakerExportPlugin::_begin_customize_scenes(const Ref<EditorExportPlat
 	return true;
 }
 
+void ShaderBakerExportPlugin::_clear_customization() {
+	shader_paths_processed.clear();
+	shaders_customized.clear();
+	shader_work_results.clear();
+	shader_group_items.clear();
+	raytracing_items.clear();
+	raytracing_work_results.clear();
+
+	_cleanup_container_format();
+}
+
+void ShaderBakerExportPlugin::_abort_customize_resources() {
+	// The tasks not started yet skip their work (_process_work_item() and _process_raytracing_work_item() test
+	// tasks_cancelled); the ones running write into this plugin's state, so they are waited for (one compilation each at
+	// most) before it is cleared.
+	tasks_cancelled = true;
+	for (const ShaderGroupItem &group_item : shader_group_items) {
+		for (WorkerThreadPool::TaskID task_id : group_item.variant_tasks) {
+			WorkerThreadPool::get_singleton()->wait_for_task_completion(task_id);
+		}
+	}
+	for (const RaytracingItem &item : raytracing_items) {
+		WorkerThreadPool::get_singleton()->wait_for_task_completion(item.task);
+	}
+
+	_clear_customization();
+}
+
 void ShaderBakerExportPlugin::_end_customize_resources() {
 	if (!_initialize_cache_directory()) {
+		// Nowhere to bake to: the queued compilations are stopped as for an export that did not finish.
+		_abort_customize_resources();
 		return;
 	}
 
@@ -333,14 +363,7 @@ void ShaderBakerExportPlugin::_end_customize_resources() {
 		}
 	}
 
-	shader_paths_processed.clear();
-	shaders_customized.clear();
-	shader_work_results.clear();
-	shader_group_items.clear();
-	raytracing_items.clear();
-	raytracing_work_results.clear();
-
-	_cleanup_container_format();
+	_clear_customization();
 }
 
 Ref<Resource> ShaderBakerExportPlugin::_customize_resource(const Ref<Resource> &p_resource, const String &p_path) {
