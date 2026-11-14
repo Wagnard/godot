@@ -729,6 +729,14 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 		RenderListParameters rasterized_params(render_list[RENDER_LIST_ALPHA].elements.ptr(), render_list[RENDER_LIST_ALPHA].element_info.ptr(), rasterized_count, reverse_cull, PASS_MODE_COLOR, rasterized_color_pass_flags, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, 0, base_specialization);
 		rasterized_params.rt_shadow_texture_uniform_set = rt_shadow_texture_set;
 		rasterized_params.buffer_dependencies = rt_shadow_buffer_dependencies;
+		// Under an upscaler that reads the color's alpha as its reactive mask (FSR2, FSR 3.1: every temporal one but DLSS),
+		// opaque surfaces stay out of it: raster's opaque pass writes them an alpha of 0 (pass_alpha_multiplier), the traced
+		// image too (copy_output_texture()). The cards are opaque and cut-out surfaces, but drawn with the transparent pass'
+		// pipelines and scene data (alpha multiplier 1, mix blending, where an alpha of 0 would also hide their color): they
+		// write no alpha, and keep the 0 the traced image left under them. Their alpha of 1 made every enemy sprite reactive
+		// under FSR (no history: it buzzed, not under DLSS). The same condition as the transparent pass' no_reactive_alpha.
+		rasterized_params.no_reactive_alpha = using_upscaling && scale_type != SCALE_3D_DLSS;
+		rasterized_params.no_reactive_alpha_all = true;
 		_render_list_with_draw_list(&rasterized_params, rb_data->get_color_pass_fb(rasterized_color_pass_flags), RD::DRAW_DEFAULT_ALL, Vector<Color>(), 0.0f, 0u, p_render_data->render_region);
 
 		RD::get_singleton()->draw_command_end_label();

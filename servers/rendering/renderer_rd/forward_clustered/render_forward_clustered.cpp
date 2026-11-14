@@ -641,7 +641,7 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 		pipeline_key.framebuffer_format_id = framebuffer_format;
 		pipeline_key.wireframe = p_params->force_wireframe;
 		pipeline_key.rr_transparency_layer = p_params->rr_transparency_layer;
-		pipeline_key.no_reactive_alpha = p_params->no_reactive_alpha && shader->reactive_mask_disabled;
+		pipeline_key.no_reactive_alpha = p_params->no_reactive_alpha && (p_params->no_reactive_alpha_all || shader->reactive_mask_disabled);
 		pipeline_key.ubershader = 0;
 
 		bool emulate_point_size = shader->uses_point_size && scene_shader.emulate_point_size;

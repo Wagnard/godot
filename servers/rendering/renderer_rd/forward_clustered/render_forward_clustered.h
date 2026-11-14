@@ -297,6 +297,10 @@ protected:
 		// The transparent pass under an upscaler that reads the color's alpha as its reactive mask: the surfaces whose
 		// material has render_mode reactive_mask_disabled write no alpha (PipelineKey::no_reactive_alpha).
 		bool no_reactive_alpha = false;
+		// With no_reactive_alpha: every surface writes no alpha, whatever its material says. The path tracer's rasterized
+		// cards (opaque and cut-out surfaces drawn with the transparent pass' pipelines) stay out of the reactive mask, as
+		// raster's opaque pass keeps them.
+		bool no_reactive_alpha_all = false;
 		Vector2 uv_offset;
 		float lod_distance_multiplier = 0.0;
 		float screen_mesh_lod_threshold = 0.0;
