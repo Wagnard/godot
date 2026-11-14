@@ -422,6 +422,10 @@ enum {
 	RT_GEOM_FLAG_SELF_SHADOWING = 1u << 11,
 	// Per TLAS instance, on RT_INSTANCE_MASK_SHADOW_GROUP casters only: not forced opaque, alpha tested in the ray query.
 	RT_GEOM_FLAG_SHADOW_GROUP_CUTOUT = 1u << 12,
+	// Per TLAS instance, on a peeled front layer surface only (RT_TRANSPARENCY_PEELING): render_mode reactive_mask_disabled.
+	// The raygen leaves it out of the reactive alpha it returns, as raster's transparent pass writes it no alpha
+	// (PipelineKey::no_reactive_alpha).
+	RT_GEOM_FLAG_REACTIVE_MASK_DISABLED = 1u << 13,
 };
 
 // The facing of the traced triangles of one TLAS instance.
@@ -1405,8 +1409,9 @@ public:
 
 	// Where the camera rays missed, `p_keep_background` keeps the color buffer's pixels (BG_CANVAS, BG_KEEP), else the
 	// miss color goes there with an alpha of 0, as the raster's clear color. Where they hit, `p_apply_alpha_multiplier`
-	// writes an alpha of 0, as the raster's opaque pass does when the color's alpha is the upscaler's reactive mask
-	// (RenderForwardClustered::_render_scene(), apply_alpha_multiplier): the raygen writes 1.
+	// writes the reactive alpha, as the raster's opaque pass (0) and transparent pass do when the color's alpha is the
+	// upscaler's reactive mask (RenderForwardClustered::_render_scene(), apply_alpha_multiplier): the raygen writes 1 minus
+	// the reactive alpha of the layers it peeled (1 without), and the hit is opaque (alpha 1) otherwise.
 	void copy_output_texture(const RenderDataRD *p_render_data, bool p_keep_background, bool p_apply_alpha_multiplier);
 	void apply_volumetric_fog(const RenderDataRD *p_render_data, bool p_legacy_blending);
 	void dlss_rr_write_background_albedo(const RenderDataRD *p_render_data);

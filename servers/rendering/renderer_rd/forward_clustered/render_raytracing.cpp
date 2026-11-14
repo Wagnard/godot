@@ -5619,6 +5619,9 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 					// transparent pass leaves it out (RenderForwardClusteredPT::_render_scene()). Out of the TLAS (its hit
 					// group compiling, its shader failed), raster draws it.
 					geometry_data[geometry_data.size() - 1].flags |= _peel_blend(surf->shader) << RT_GEOM_PEEL_BLEND_SHIFT;
+					if (surf->shader->reactive_mask_disabled) {
+						geometry_data[geometry_data.size() - 1].flags |= RT_GEOM_FLAG_REACTIVE_MASK_DISABLED;
+					}
 					surf->rt_peeled_build = tlas_build_serial;
 				}
 			} else if (surf->rt_pass_flags & RenderForwardClustered::GeometryInstanceSurfaceDataCache::FLAG_PT_RASTERIZED) {

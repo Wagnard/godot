@@ -424,6 +424,8 @@ void main() {
 	HitRecord peel_first;
 	float peel_first_t = -1.0;
 	float peel_first_alpha = -1.0;
+	// Sample 0's reactive alpha of the peeled layers (peel_camera_segment()), returned to copy_output_texture() as 1 minus it.
+	float peel_reactive_alpha = 0.0;
 #endif
 
 	// TODO: when we have a spp > 0 the first raycast is always identical,
@@ -466,11 +468,13 @@ void main() {
 				uint layers;
 				HitRecord first;
 				float first_alpha;
-				const bool peeled_goes_on = peel_camera_segment(ps, ray_origin, ray_dir, goes_on, origin.xyz, direction.xyz, hit_t > 0.0 ? hit_t : 10000.0, peel_budget, layers, first, first_alpha);
+				float reactive_alpha;
+				const bool peeled_goes_on = peel_camera_segment(ps, ray_origin, ray_dir, goes_on, origin.xyz, direction.xyz, hit_t > 0.0 ? hit_t : 10000.0, peel_budget, layers, first, first_alpha, reactive_alpha);
 				if (sample_idx == 0u && layers > 0u) {
 					peel_first = first;
 					peel_first_t = first.hit_t;
 					peel_first_alpha = first_alpha;
+					peel_reactive_alpha = reactive_alpha;
 				}
 				if (!peeled_goes_on) {
 					break;
@@ -537,6 +541,15 @@ void main() {
 	}
 #endif
 
+	// The image's alpha: 1 minus the reactive alpha of what the camera ray crossed before its hit. copy_output_texture()
+	// keeps 1 for opaque pixels, and under an upscaler that reads a reactive mask writes the reactive alpha (0 without
+	// peeled layers), as raster's transparent pass leaves it over the opaque pass' 0.
+#ifdef RT_TRANSPARENCY_PEELING
+	const float image_alpha = 1.0 - peel_reactive_alpha;
+#else
+	const float image_alpha = 1.0;
+#endif
+
 #ifdef NRD_ENABLED
 	{
 		// The image keeps what is not denoised; each lobe's light goes divided by its albedo guide (the primary hit's, or
@@ -552,7 +565,7 @@ void main() {
 		const vec4 view_position = scene_data_block.data.inv_projection_matrix * vec4(0.0, 0.0, ndc_depth, 1.0);
 		const float view_z = ndc_depth == 0.0 ? NRD_SKY_VIEW_Z : -view_position.z / view_position.w;
 		imageStore(nrd_view_z_image, nrd_pixel, vec4(view_z));
-		imageStore(image, nrd_pixel, vec4(nrd_emission * inv_samples, 1.0));
+		imageStore(image, nrd_pixel, vec4(nrd_emission * inv_samples, image_alpha));
 		imageStore(nrd_diffuse_image, nrd_pixel, vec4(nrd_diffuse * inv_samples / diffuse_albedo, hit_t.x));
 		imageStore(nrd_specular_image, nrd_pixel, vec4(nrd_specular * inv_samples / specular_albedo, hit_t.y));
 		imageStore(nrd_sun_image, nrd_pixel, vec4(nrd_sun * inv_samples, nrd_sun_occluder_t));
@@ -561,7 +574,7 @@ void main() {
 #endif
 	}
 #else
-	imageStore(image, ivec2(pixel), vec4(final_radiance, 1.0));
+	imageStore(image, ivec2(pixel), vec4(final_radiance, image_alpha));
 #endif
 
 	// Front layer: the first transparent surface before the opaque hit, and one path along its reflection, for the raster

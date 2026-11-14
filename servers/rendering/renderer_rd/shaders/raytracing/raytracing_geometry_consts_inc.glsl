@@ -27,6 +27,8 @@ const uint PEEL_BLEND_ADD = 1u;
 const uint PEEL_BLEND_SUB = 2u;
 const uint PEEL_BLEND_MUL = 3u;
 const uint PEEL_BLEND_PREMUL_ALPHA = 4u;
+// A peeled surface with render_mode reactive_mask_disabled: it adds nothing to the reactive alpha (peel_camera_segment()).
+const uint FLAG_REACTIVE_MASK_DISABLED = 8192u;
 #endif
 #ifdef RT_SHADOW_GROUPS
 // rendering/pathtracing/shadow_groups: SHADOW_CASTING_SETTING_SELF_SHADOWING, its shadows fall on such instances only.

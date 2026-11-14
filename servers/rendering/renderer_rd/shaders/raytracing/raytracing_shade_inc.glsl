@@ -1070,9 +1070,16 @@ vec3 peel_layer_transmittance(HitRecord r, uint p_blend, float p_alpha) {
 /// camera path with that hit shaded (at full throughput), r_origin and r_dir its next ray where p_goes_on; on return, ps holds
 /// the layers' light over the hit's, attenuated by what they cover, and r_origin / r_dir the ray the path goes on with, if it
 /// does (the return value). r_layers: the layers peeled; r_first, r_first_alpha: the nearest one and its coverage (-1: none).
-bool peel_camera_segment(inout PathState ps, inout vec3 r_origin, inout vec3 r_dir, bool p_goes_on, vec3 p_camera_origin, vec3 p_camera_dir, float p_opaque_t, uint p_budget, out uint r_layers, out HitRecord r_first, out float r_first_alpha) {
+/// r_reactive_alpha: the alpha raster's transparent pass would leave over an opaque surface's 0 when it blends these layers,
+/// which FSR2 and FSR 3.1 read as their reactive mask (copy_output_texture()).
+bool peel_camera_segment(inout PathState ps, inout vec3 r_origin, inout vec3 r_dir, bool p_goes_on, vec3 p_camera_origin, vec3 p_camera_dir, float p_opaque_t, uint p_budget, out uint r_layers, out HitRecord r_first, out float r_first_alpha, out float r_reactive_alpha) {
 	r_layers = 0u;
 	r_first_alpha = -1.0;
+	r_reactive_alpha = 0.0;
+	// Raster blends back to front, each layer's alpha over what is behind it: alpha = s + alpha_behind * m, with s and m its
+	// blend state's alpha factors (MaterialStorage::ShaderData::blend_mode_to_blend_attachment()). Front to back, a layer's
+	// s counts weighed by the m of the layers in front of it (reactive_through).
+	float reactive_through = 1.0;
 	vec3 transmittance = vec3(1.0);
 	vec3 layers_light = vec3(0.0);
 	// The continuation: one of the bounces offered, kept with a chance proportional to its throughput's largest component;
@@ -1105,6 +1112,14 @@ bool peel_camera_segment(inout PathState ps, inout vec3 r_origin, inout vec3 r_d
 			r_first_alpha = blend == PEEL_BLEND_MIX || blend == PEEL_BLEND_PREMUL_ALPHA ? alpha : 0.0;
 		}
 		r_layers++;
+		if ((geometries[r.geometry_idx].flags & FLAG_REACTIVE_MASK_DISABLED) == 0u) {
+			// Mix and premultiplied alpha: ONE, ONE_MINUS_SRC_ALPHA. Add: SRC_ALPHA, ONE. Subtract: the same, reverse subtracted.
+			// Multiply: DST_ALPHA, ZERO. render_mode reactive_mask_disabled writes no alpha: left out.
+			const float s = blend == PEEL_BLEND_ADD ? alpha * alpha : (blend == PEEL_BLEND_SUB ? -alpha * alpha : (blend == PEEL_BLEND_MUL ? 0.0 : alpha));
+			const float m = blend == PEEL_BLEND_ADD || blend == PEEL_BLEND_SUB ? 1.0 : (blend == PEEL_BLEND_MUL ? alpha : 1.0 - alpha);
+			r_reactive_alpha += s * reactive_through;
+			reactive_through *= m;
+		}
 		if (blend != PEEL_BLEND_MUL) {
 			// Its light as raster blends it: by its alpha (Mix, Add, Subtract), whole (premultiplied alpha).
 			PathState ls;
@@ -1143,6 +1158,8 @@ bool peel_camera_segment(inout PathState ps, inout vec3 r_origin, inout vec3 r_d
 		}
 		transmittance *= peel_layer_transmittance(r, blend, alpha);
 	}
+	// A reactive mask is a weight: Subtract's negative alpha (a float color buffer keeps it in raster) counts as none.
+	r_reactive_alpha = clamp(r_reactive_alpha, 0.0, 1.0);
 	if (r_layers == 0u) {
 		return p_goes_on;
 	}
