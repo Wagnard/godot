@@ -74,7 +74,19 @@ FSR3UpscalerContext::~FSR3UpscalerContext() {
 }
 
 FSR3UpscalerEffect::FSR3UpscalerEffect() {
-	// Compiled on the first upscale(): the mode is rarely used.
+	// Created with the renderer, as FSR2Effect's passes: the export's shader baker bakes the ShaderRD versions that exist
+	// when the export starts, and an exporting editor never upscales with FSR 3. Created on the first upscale(), the
+	// reactive mask shader was compiled by every player at the first FSR 3 frame (SHADER-BAKE-FSR3-FIXES.md). Loaded from
+	// the shader cache, they cost a game that never uses FSR 3 one small compute shader each.
+	Vector<String> modes;
+	modes.push_back("\n");
+	mvec_decode_shader.initialize(modes, "");
+	mvec_decode_version = mvec_decode_shader.version_create();
+	mvec_decode_pipeline = RD::get_singleton()->compute_pipeline_create(mvec_decode_shader.version_get_shader(mvec_decode_version, 0));
+
+	reactive_shader.initialize(modes, "");
+	reactive_version = reactive_shader.version_create();
+	reactive_pipeline = RD::get_singleton()->compute_pipeline_create(reactive_shader.version_get_shader(reactive_version, 0));
 }
 
 FSR3UpscalerEffect::~FSR3UpscalerEffect() {
@@ -156,18 +168,6 @@ void FSR3UpscalerEffect::upscale(const Parameters &p_params) {
 	FSR3UpscalerContext *context = p_params.context;
 	ERR_FAIL_NULL(context);
 	ERR_FAIL_NULL(context->ffx_context);
-
-	if (mvec_decode_version.is_null()) {
-		Vector<String> modes;
-		modes.push_back("\n");
-		mvec_decode_shader.initialize(modes, "");
-		mvec_decode_version = mvec_decode_shader.version_create();
-		mvec_decode_pipeline = RD::get_singleton()->compute_pipeline_create(mvec_decode_shader.version_get_shader(mvec_decode_version, 0));
-
-		reactive_shader.initialize(modes, "");
-		reactive_version = reactive_shader.version_create();
-		reactive_pipeline = RD::get_singleton()->compute_pipeline_create(reactive_shader.version_get_shader(reactive_version, 0));
-	}
 
 	UniformSetCacheRD *uniform_set_cache = UniformSetCacheRD::get_singleton();
 	ERR_FAIL_NULL(uniform_set_cache);
