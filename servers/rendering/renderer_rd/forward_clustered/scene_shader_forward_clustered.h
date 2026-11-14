@@ -434,6 +434,21 @@ public:
 			return has_alpha || no_depth_draw || no_depth_test;
 		}
 
+		// uses_alpha_pass_for_alpha_antialiasing_only() as the path tracer classifies the material: an alpha scissor or
+		// alpha hash material that rt_uses_alpha_pass() gives to the raster transparent pass for its alpha antialiasing
+		// only. Without it, the path tracer would trace it as any other cut-out.
+		_FORCE_INLINE_ bool rt_uses_alpha_pass_for_alpha_antialiasing_only() const {
+			if (!rt) {
+				return uses_alpha_pass_for_alpha_antialiasing_only();
+			}
+			if (rt->force_opaque || rt->force_transparent || !rt->uses_alpha || !rt->uses_alpha_clip || !rt->uses_alpha_antialiasing) {
+				return false;
+			}
+			bool no_depth_draw = rt->depth_draw == DEPTH_DRAW_DISABLED;
+			bool no_depth_test = rt->depth_test != DEPTH_TEST_ENABLED;
+			return !rt->uses_blend_alpha && !rt->uses_depth_prepass_alpha && !no_depth_draw && !no_depth_test;
+		}
+
 		_FORCE_INLINE_ RTBlendClass rt_blend_class() const {
 			if (!rt_uses_alpha_pass()) {
 				return RT_BLEND_OPAQUE;

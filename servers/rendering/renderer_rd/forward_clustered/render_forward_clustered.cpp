@@ -6493,7 +6493,15 @@ void RenderForwardClustered::_geometry_instance_add_surface_with_material(Geomet
 	// RT-side pass classification; mirrors `flags` unless the shader has
 	// `#if defined(RT)` divergence.
 	uint32_t rt_pass_flags = 0;
-	if (p_material->shader_data->rt_uses_alpha_pass()) {
+	// rendering/anti_aliasing/quality/material_alpha_antialiasing: a path traced view has no multisampling
+	// (RenderForwardClusteredPT::_render_scene() ignores the viewport's MSAA), so alpha to coverage has no samples to
+	// work with there, whatever resolves the view. Unless the setting is "Always", a material that its alpha
+	// antialiasing alone makes transparent is traced as the same material without it: a cut-out the camera, shadow and
+	// bounce rays all see (any-hit alpha test or opacity micromap), with its depth and motion vectors, its edges
+	// antialiased by the camera rays' jitter as every traced edge. In the raster transparent pass it had none of those
+	// and wrote the temporal upscaler's reactive mask (godot3d's ferns and ivy boiled under path tracing + FSR 3).
+	const bool rt_alpha_antialiasing_cut_out = material_alpha_antialiasing != MATERIAL_ALPHA_ANTIALIASING_ALWAYS && p_material->shader_data->rt_uses_alpha_pass_for_alpha_antialiasing_only();
+	if (p_material->shader_data->rt_uses_alpha_pass() && !rt_alpha_antialiasing_cut_out) {
 		rt_pass_flags |= GeometryInstanceSurfaceDataCache::FLAG_PASS_ALPHA;
 		if (p_material->shader_data->rt_uses_depth_in_alpha_pass()) {
 			rt_pass_flags |= GeometryInstanceSurfaceDataCache::FLAG_PASS_DEPTH;
