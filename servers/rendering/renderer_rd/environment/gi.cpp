@@ -2451,12 +2451,14 @@ void GI::SDFGI::render_static_lights(RenderDataRD *p_render_data, Ref<RenderScen
 
 			int idx = 0;
 
-			for (uint32_t j = 0; j < (uint32_t)p_positional_light_cull_result[i].size(); j++) {
+			// The cull results are indexed by cascade (RendererSceneCull::_scene_cull()), not by position in p_cascade_indices.
+			const PagedArray<RID> &cascade_lights = p_positional_light_cull_result[p_cascade_indices[i]];
+			for (uint32_t j = 0; j < (uint32_t)cascade_lights.size(); j++) {
 				if (idx == SDFGI::MAX_STATIC_LIGHTS) {
 					break;
 				}
 
-				RID light_instance = p_positional_light_cull_result[i][j];
+				RID light_instance = cascade_lights[j];
 				ERR_CONTINUE(!light_storage->owns_light_instance(light_instance));
 
 				RID light = light_storage->light_instance_get_base_light(light_instance);

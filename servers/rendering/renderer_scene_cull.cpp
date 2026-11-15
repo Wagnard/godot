@@ -3939,7 +3939,8 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 			//check if static lights were culled
 			bool static_lights_culled = false;
 			for (uint32_t i = 0; i < cull.sdfgi.cascade_light_count; i++) {
-				if (scene_cull_result.sdfgi_cascade_lights[i].size()) {
+				// sdfgi_cascade_lights is indexed by cascade (_scene_cull()), not by position in cascade_light_index.
+				if (scene_cull_result.sdfgi_cascade_lights[cull.sdfgi.cascade_light_index[i]].size()) {
 					static_lights_culled = true;
 					break;
 				}
