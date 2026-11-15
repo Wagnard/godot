@@ -71,6 +71,7 @@ class ProgressDialog : public CenterContainer {
 		ProgressBar *progress = nullptr;
 		Label *state = nullptr;
 		uint64_t last_progress_tick = 0;
+		bool can_cancel = false;
 	};
 	HBoxContainer *cancel_hb = nullptr;
 	Button *cancel = nullptr;
@@ -89,6 +90,7 @@ class ProgressDialog : public CenterContainer {
 	void _cancel_pressed();
 
 	void _update_ui();
+	void _update_cancel_button();
 	void _reparent_and_show();
 	bool canceled = false;
 
@@ -100,6 +102,8 @@ public:
 	void add_task(const String &p_task, const String &p_label, int p_steps, bool p_can_cancel = false);
 	bool task_step(const String &p_task, const String &p_state, int p_step = -1, bool p_force_redraw = true);
 	void end_task(const String &p_task);
+	// The same as pressing Cancel, when a task under way can be canceled (a host window closed by the user).
+	void request_cancel();
 
 	void add_host_window(ObjectID p_window);
 	void remove_host_window(ObjectID p_window);

@@ -212,14 +212,15 @@ void ProgressDialog::add_task(const String &p_task, const String &p_label, int p
 	vb2->add_child(t.state);
 	main->add_child(t.vb);
 
-	tasks[p_task] = t;
-	if (p_can_cancel) {
-		cancel_hb->show();
-	} else {
-		cancel_hb->hide();
+	// A cancel holds until every task has ended: a task added meanwhile (the export's "Packing" under its "Exporting", a
+	// step that cannot be canceled) must neither forget it nor hide the button of a task that can still be canceled.
+	if (tasks.is_empty()) {
+		canceled = false;
 	}
+	t.can_cancel = p_can_cancel;
+	tasks[p_task] = t;
+	_update_cancel_button();
 	cancel_hb->move_to_front();
-	canceled = false;
 	_popup();
 	if (p_can_cancel) {
 		cancel->grab_focus();
@@ -234,7 +235,7 @@ bool ProgressDialog::task_step(const String &p_task, const String &p_state, int 
 	if (!p_force_redraw) {
 		uint64_t tus = OS::get_singleton()->get_ticks_usec();
 		if (tus - t.last_progress_tick < 200000) { //200ms
-			return canceled;
+			return canceled && t.can_cancel;
 		}
 	}
 	if (p_step < 0) {
@@ -247,7 +248,8 @@ bool ProgressDialog::task_step(const String &p_task, const String &p_state, int 
 	t.last_progress_tick = OS::get_singleton()->get_ticks_usec();
 	_update_ui();
 
-	return canceled;
+	// Only a task that can be canceled reports it: the others' callers do not expect a cancel.
+	return canceled && t.can_cancel;
 }
 
 void ProgressDialog::end_task(const String &p_task) {
@@ -267,7 +269,25 @@ void ProgressDialog::end_task(const String &p_task) {
 			}
 		}
 	} else {
+		_update_cancel_button();
 		_popup();
+	}
+}
+
+void ProgressDialog::_update_cancel_button() {
+	bool can_cancel = false;
+	for (const KeyValue<String, Task> &E : tasks) {
+		can_cancel = can_cancel || E.value.can_cancel;
+	}
+	cancel_hb->set_visible(can_cancel);
+}
+
+void ProgressDialog::request_cancel() {
+	for (const KeyValue<String, Task> &E : tasks) {
+		if (E.value.can_cancel) {
+			_cancel_pressed();
+			return;
+		}
 	}
 }
 

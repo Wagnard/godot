@@ -40,6 +40,7 @@
 #include "editor/export/editor_export.h"
 #include "editor/file_system/editor_file_system.h"
 #include "editor/gui/editor_file_dialog.h"
+#include "editor/gui/progress_dialog.h"
 #include "editor/import/resource_importer_texture_settings.h"
 #include "editor/inspector/editor_properties.h"
 #include "editor/settings/editor_settings.h"
@@ -59,6 +60,7 @@
 #include "scene/gui/tab_container.h"
 #include "scene/gui/texture_rect.h"
 #include "scene/gui/tree.h"
+#include "scene/main/scene_tree.h"
 #include "servers/display/display_server.h"
 
 #include <zstd.h>
@@ -1433,20 +1435,35 @@ void ProjectExportDialog::_export_pck_zip_selected(const String &p_path) {
 	EditorSettings::get_singleton()->set_project_metadata("export_options", "export_debug", export_debug);
 	EditorSettings::get_singleton()->set_project_metadata("export_options", "export_as_patch", export_as_patch);
 
-	if (p_path.ends_with(".zip")) {
-		if (export_as_patch) {
-			platform->export_zip_patch(current, export_debug, p_path);
+	ERR_FAIL_COND_MSG(!p_path.ends_with(".zip") && !p_path.ends_with(".pck"), "Path must end with .pck or .zip");
+
+	exporting = true;
+	{
+		// One task that can be canceled for the whole export, as in _export_project_to_path().
+		EditorProgress ep("export_pck_zip_dialog", vformat(TTR("Exporting %s"), current->get_name()), 1, true);
+		if (p_path.ends_with(".zip")) {
+			if (export_as_patch) {
+				platform->export_zip_patch(current, export_debug, p_path);
+			} else {
+				platform->export_zip(current, export_debug, p_path);
+			}
 		} else {
-			platform->export_zip(current, export_debug, p_path);
+			if (export_as_patch) {
+				platform->export_pack_patch(current, export_debug, p_path);
+			} else {
+				platform->export_pack(current, export_debug, p_path);
+			}
 		}
-	} else if (p_path.ends_with(".pck")) {
-		if (export_as_patch) {
-			platform->export_pack_patch(current, export_debug, p_path);
-		} else {
-			platform->export_pack(current, export_debug, p_path);
-		}
-	} else {
-		ERR_FAIL_MSG("Path must end with .pck or .zip");
+	}
+	exporting = false;
+}
+
+void ProjectExportDialog::cancel_pressed() {
+	// Closing this window (its title bar's close button, Escape) while an export runs cancels the export, as a Windows
+	// dialog's close does: left running behind a hidden window, nothing would show it still runs. The window closes and
+	// the export stops at its next step (ProgressDialog keeps the cancel through every phase of it).
+	if (exporting) {
+		ProgressDialog::get_singleton()->request_cancel();
 	}
 }
 
@@ -1507,7 +1524,13 @@ void ProjectExportDialog::_export_project_to_path(const String &p_path) {
 
 	EditorSettings::get_singleton()->set_project_metadata("export_options", "export_debug", export_debug);
 
-	Error err = platform->export_project(current, export_debug, current->get_export_path(), 0);
+	Error err = OK;
+	{
+		// The whole export is one task that can be canceled, as Export All's: a cancel asked during a phase that cannot
+		// be (the .NET publish) stops the export at the next one. Freed before the result dialog shows.
+		EditorProgress ep("export_project_dialog", vformat(TTR("Exporting %s"), current->get_name()), 1, true);
+		err = platform->export_project(current, export_debug, current->get_export_path(), 0);
+	}
 	result_dialog_log->clear();
 	if (err != ERR_SKIP) {
 		if (platform->fill_log_messages(result_dialog_log, err)) {
@@ -1526,7 +1549,26 @@ void ProjectExportDialog::_export_all_dialog() {
 void ProjectExportDialog::_export_all_dialog_action(const String &p_str) {
 	export_all_dialog->hide();
 
-	_export_all(p_str != "release");
+	_start_export_next_frame(callable_mp(this, &ProjectExportDialog::_export_all).bind(p_str != "release"));
+}
+
+// The export dialogs are confirmed inside the dispatch of an input event (a button press, Enter, a double click), and
+// DisplayServer drops every input event that arrives while one is being dispatched (`_dispatch_input_event()` on Windows
+// and macOS): an export run from there showed a Cancel button that no click or key could reach. Exports start at the next
+// process frame instead, as EditorFileSystem::_queue_refresh_filesystem() runs its scan actions. Not call_deferred():
+// ProgressDialog::add_task() refuses tasks while the message queue is flushing.
+void ProjectExportDialog::_start_export_next_frame(const Callable &p_export) {
+	if (!get_tree()->is_connected(SNAME("process_frame"), p_export)) {
+		get_tree()->connect(SNAME("process_frame"), p_export, CONNECT_ONE_SHOT);
+	}
+}
+
+void ProjectExportDialog::_export_project_file_selected(const String &p_path) {
+	_start_export_next_frame(callable_mp(this, &ProjectExportDialog::_export_project_to_path).bind(p_path));
+}
+
+void ProjectExportDialog::_export_pck_zip_file_selected(const String &p_path) {
+	_start_export_next_frame(callable_mp(this, &ProjectExportDialog::_export_pck_zip_selected).bind(p_path));
 }
 
 void ProjectExportDialog::_export_all(bool p_debug) {
@@ -2046,7 +2088,7 @@ ProjectExportDialog::ProjectExportDialog() {
 	export_pck_zip->set_access(EditorFileDialog::ACCESS_FILESYSTEM);
 	export_pck_zip->set_file_mode(EditorFileDialog::FILE_MODE_SAVE_FILE);
 	add_child(export_pck_zip);
-	export_pck_zip->connect("file_selected", callable_mp(this, &ProjectExportDialog::_export_pck_zip_selected));
+	export_pck_zip->connect("file_selected", callable_mp(this, &ProjectExportDialog::_export_pck_zip_file_selected));
 
 	// Export warnings and errors bottom section.
 
@@ -2095,7 +2137,7 @@ ProjectExportDialog::ProjectExportDialog() {
 	export_project = memnew(EditorFileDialog);
 	export_project->set_access(EditorFileDialog::ACCESS_FILESYSTEM);
 	add_child(export_project);
-	export_project->connect("file_selected", callable_mp(this, &ProjectExportDialog::_export_project_to_path));
+	export_project->connect("file_selected", callable_mp(this, &ProjectExportDialog::_export_project_file_selected));
 
 	export_project->add_option(TTRC("Export With Debug"), Vector<String>(), EditorSettings::get_singleton()->get_project_metadata("export_options", "export_debug", true));
 	export_pck_zip->add_option(TTRC("Export With Debug"), Vector<String>(), EditorSettings::get_singleton()->get_project_metadata("export_options", "export_debug", true));

@@ -209,6 +209,9 @@ class ProjectExportDialog : public ConfirmationDialog {
 	void _export_all_dialog();
 	void _export_all_dialog_action(const String &p_str);
 	void _export_all(bool p_debug);
+	void _start_export_next_frame(const Callable &p_export);
+	void _export_project_file_selected(const String &p_path);
+	void _export_pck_zip_file_selected(const String &p_path);
 
 	void _update_feature_list();
 	void _custom_features_changed(const String &p_text);
@@ -234,6 +237,7 @@ protected:
 	void _notification(int p_what);
 	static void _bind_methods();
 	virtual void shortcut_input(const Ref<InputEvent> &p_event) override;
+	virtual void cancel_pressed() override;
 
 public:
 	void popup_export();

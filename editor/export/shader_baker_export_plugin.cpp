@@ -253,7 +253,9 @@ void ShaderBakerExportPlugin::_end_customize_resources() {
 
 	// Run a progress bar that waits for all shader baking tasks to finish.
 	bool progress_active = true;
-	EditorProgress editor_progress("baking_shaders", TTR("Baking shaders"), tasks_total);
+	// Cancel skips the compilations not started and packs no shader; the export itself stops at the next file it stores
+	// (the cancel holds for the export's whole progress), so a cancel here cancels the export as in "Packing".
+	EditorProgress editor_progress("baking_shaders", TTR("Baking shaders"), tasks_total, true);
 	editor_progress.step("Baking...", 0);
 	while (progress_active) {
 		uint32_t tasks_for_progress = 0;
@@ -268,7 +270,7 @@ void ShaderBakerExportPlugin::_end_customize_resources() {
 		}
 
 		if (progress_active && editor_progress.step("Baking...", tasks_for_progress)) {
-			// User skipped the shader baker, we just don't pack the shaders in the project.
+			// The user canceled: the shaders are not packed, and the export stops at its next stored file.
 			tasks_cancelled = true;
 			progress_active = false;
 		}
