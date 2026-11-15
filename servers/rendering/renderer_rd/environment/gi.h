@@ -592,6 +592,10 @@ public:
 				uint32_t albedo;
 				uint32_t static_light;
 				uint32_t static_light_aniso;
+				// The cell's own emission, without the static lights: what a scroll carries over and what the static light
+				// pass starts from (static light added to a total that already held it built up at every scroll).
+				uint32_t emission;
+				uint32_t emission_aniso;
 			};
 
 			// Buffers for indirect compute dispatch.

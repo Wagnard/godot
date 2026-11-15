@@ -127,6 +127,8 @@ struct ProcessVoxel {
 	uint light; //rgbe8985 encoded total saved light, extra 2 bits for neighbors
 	uint light_aniso; //55555 light anisotropy, extra 2 bits for neighbors
 	//total neighbors: 26
+	uint emission; // rgbe8985 encoded emission alone, without the static lights (see sdfgi_direct_light.glsl).
+	uint emission_aniso; // 55555 emission anisotropy.
 };
 
 layout(set = 0, binding = 11, std430) restrict buffer writeonly ProcessVoxels {
@@ -160,6 +162,8 @@ struct ProcessVoxel {
 	uint light; //rgbe8985 encoded total saved light, extra 2 bits for neighbors
 	uint light_aniso; //55555 light anisotropy, extra 2 bits for neighbors
 	//total neighbors: 26
+	uint emission; // rgbe8985 encoded emission alone, without the static lights (see sdfgi_direct_light.glsl).
+	uint emission_aniso; // 55555 emission anisotropy.
 };
 
 layout(set = 0, binding = 6, std430) restrict buffer readonly ProcessVoxels {
@@ -213,11 +217,10 @@ void main() {
 	uint facing = (src_process_voxels.data[index].albedo >> 15) & 0x3F; //6 anisotropic facing bits
 	imageStore(dst_facing, write_pos, uvec4(facing));
 
-	uint light = src_process_voxels.data[index].light & 0x3fffffff; //30 bits of RGBE8985
-	imageStore(dst_light, write_pos, uvec4(light));
-
-	uint light_aniso = src_process_voxels.data[index].light_aniso & 0x3fffffff; //30 bits of 6 anisotropic 5 bits values
-	imageStore(dst_light_aniso, write_pos, uvec4(light_aniso));
+	// The emission alone, not the saved light: the static light pass runs again after the store (on every cell), and the
+	// saved light already holds the static lights, which built up at every scroll (godotengine/godot#55322).
+	imageStore(dst_light, write_pos, uvec4(src_process_voxels.data[index].emission));
+	imageStore(dst_light_aniso, write_pos, uvec4(src_process_voxels.data[index].emission_aniso));
 
 #endif
 
@@ -1051,6 +1054,9 @@ void main() {
 
 		store_positions[index].light = texelFetch(src_light, pos, 0).r;
 		store_positions[index].light_aniso = texelFetch(src_light_aniso, pos, 0).r;
+		// What the voxelization or a scroll stored is the emission alone: kept for the static light pass and the next scroll.
+		store_positions[index].emission = store_positions[index].light;
+		store_positions[index].emission_aniso = store_positions[index].light_aniso;
 		//add neighbors
 		store_positions[index].light |= (neighbour_bits >> 22) << 30; //store 2 bits more of neighbors with light
 		store_positions[index].light_aniso |= (neighbour_bits >> 24) << 30; //store 2 bits more of neighbors with aniso

@@ -26,6 +26,8 @@ struct ProcessVoxel {
 	uint light; // rgbe8985 encoded total saved light, extra 2 bits for neighbors.
 	uint light_aniso; // 55555 light anisotropy, extra 2 bits for neighbors.
 	//total neighbors: 26
+	uint emission; // rgbe8985 encoded emission alone, without the static lights.
+	uint emission_aniso; // 55555 emission anisotropy.
 };
 
 #ifdef MODE_PROCESS_STATIC
@@ -292,7 +294,16 @@ void main() {
 #endif
 
 	{
+#ifdef MODE_PROCESS_STATIC
+		// The static lights are added to the cell's emission alone, and the result replaces the saved light: added to the
+		// saved light, which already held them, they built up every time the pass ran again on a cell (every scroll of
+		// the cascade, godotengine/godot#55322).
+		uint rgbe = process_voxels.data[voxel_index].emission;
+		uint aniso = process_voxels.data[voxel_index].emission_aniso;
+#else
 		uint rgbe = process_voxels.data[voxel_index].light;
+		uint aniso = process_voxels.data[voxel_index].light_aniso;
+#endif
 
 		//read rgbe8985
 		float r = float((rgbe & 0xff) << 1);
@@ -303,7 +314,6 @@ void main() {
 
 		vec3 l = vec3(r, g, b) * m;
 
-		uint aniso = process_voxels.data[voxel_index].light_aniso;
 		for (uint i = 0; i < 6; i++) {
 			float strength = ((aniso >> (i * 5)) & 0x1F) / float(0x1F);
 			light_accum[i] += l * strength;
