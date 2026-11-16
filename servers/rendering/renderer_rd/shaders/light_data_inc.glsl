@@ -73,7 +73,7 @@ struct DirectionalLightData {
 	float fade_from;
 	float fade_to;
 	uint projector_enabled; // The light of directional_light_projector (one at most).
-	uint pad;
+	uint sscs_index;
 	uint bake_mode;
 	float volumetric_fog_energy;
 	vec4 shadow_bias;

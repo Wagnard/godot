@@ -35,7 +35,6 @@
 #include "core/os/mutex.h"
 #include "core/os/os.h"
 #include "core/templates/local_vector.h"
-#include "core/templates/simple_type.h"
 #include "core/templates/tuple.h"
 #include "core/typedefs.h"
 
@@ -55,7 +54,7 @@ class CommandQueueMT {
 	struct Command : public CommandBase {
 		T *instance;
 		M method;
-		Tuple<GetSimpleTypeT<Args>...> args;
+		Tuple<std::decay_t<Args>...> args;
 
 		template <typename... FwdArgs>
 		_FORCE_INLINE_ Command(T *p_instance, M p_method, FwdArgs &&...p_args) :
@@ -83,9 +82,9 @@ class CommandQueueMT {
 		T *instance;
 		M method;
 		R *ret;
-		Tuple<GetSimpleTypeT<Args>...> args;
+		Tuple<std::decay_t<Args>...> args;
 
-		_FORCE_INLINE_ CommandRet(T *p_instance, M p_method, R *p_ret, GetSimpleTypeT<Args>... p_args) :
+		_FORCE_INLINE_ CommandRet(T *p_instance, M p_method, R *p_ret, std::decay_t<Args>... p_args) :
 				CommandBase(true), instance(p_instance), method(p_method), ret(p_ret), args{ p_args... } {}
 
 		void call() override {
@@ -138,14 +137,14 @@ class CommandQueueMT {
 	bool notify_every_command = false;
 
 	template <typename T, bool NeedsSync, typename... Args>
-	_FORCE_INLINE_ void _push_internal(Args &&...args) {
+	_FORCE_INLINE_ void _push_internal(Args &&...p_args) {
 		MutexLock mlock(mutex);
 
 		// Only wake the pump when the queue goes from empty to non-empty: each wake-up is a kernel call. While `pending`
 		// is set, _flush() has not finished draining and picks up the commands appended meanwhile.
 		const bool was_idle = !pending.load(std::memory_order_relaxed);
 
-		create_command<T>(std::forward<Args>(args)...);
+		create_command<T>(std::forward<Args>(p_args)...);
 
 		// A synchronous push always notifies, whatever `pending` says: a wake-up consumed without a drain would
 		// otherwise leave `pending` set and freeze the queue. RenderingServer::sync() then recovers it once per frame.
@@ -194,7 +193,7 @@ class CommandQueueMT {
 
 			// Protect against race condition between this thread
 			// during the call to the command and other threads potentially
-			// invalidating the pointer due to reallocs by relocating the object.
+			// invalidating the pointer due to reallocs by relocating the object (see GH-100509).
 			CommandBase *cmd_original = reinterpret_cast<CommandBase *>(&command_mem[flush_read_ptr]);
 			CommandBase *cmd_local = reinterpret_cast<CommandBase *>(cmd_local_mem);
 			memcpy(cmd_local_mem, (char *)cmd_original, size);

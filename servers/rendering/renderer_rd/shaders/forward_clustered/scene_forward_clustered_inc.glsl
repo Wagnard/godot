@@ -146,14 +146,22 @@ bool sc_cluster_has_area_light() {
 	return ((sc_packed_1() >> 5) & 1U) != 0;
 }
 
+bool sc_use_lightmap_specular() {
+	return ((sc_packed_1() >> 6) & 1U) != 0;
+}
+
+bool sc_material_feedback() {
+	return ((sc_packed_1() >> 7) & 1U) != 0;
+}
+
 // Material debug view (Environment.pathtracing_debug_mode value), 0 when disabled.
 uint sc_material_debug_mode() {
-	return (sc_packed_1() >> 6) & 31U;
+	return (sc_packed_1() >> 8) & 31U;
 }
 
 // VOLUMETRIC_FOG_SAMPLING_* value.
 uint sc_volumetric_fog_sampling() {
-	return (sc_packed_1() >> 11) & 3U;
+	return (sc_packed_1() >> 13) & 3U;
 }
 
 #ifdef VISIBILITY_RANGE_DITHERED_FADE
@@ -248,7 +256,8 @@ layout(set = 0, binding = 2) uniform sampler shadow_sampler;
 #define SCREEN_SPACE_EFFECTS_FLAGS_USE_SSIL (1 << 1)
 #define SCREEN_SPACE_EFFECTS_FLAGS_USE_SSR (1 << 2)
 #define SCREEN_SPACE_EFFECTS_FLAGS_RESOLVE_SSR (1 << 3)
-#define SCREEN_SPACE_EFFECTS_FLAGS_FRONT_LAYER_REFLECTION (1 << 4)
+#define SCREEN_SPACE_EFFECTS_FLAGS_USE_SSCS (1 << 4)
+#define SCREEN_SPACE_EFFECTS_FLAGS_FRONT_LAYER_REFLECTION (1 << 5)
 
 layout(set = 0, binding = 3, std430) restrict readonly buffer OmniLights {
 	LightData data[];
@@ -284,7 +293,7 @@ directional_lights;
 #define LIGHTMAP_SHADOWMASK_MODE_ONLY 3
 
 struct Lightmap {
-	mat3 normal_xform;
+	mat3x4 normal_xform_and_specular_intensity; // "normal_xform" is the 3x3 matrix. "specular_intensity" is the 4th row of the 1st column.
 	vec2 light_texture_size;
 	float exposure_normalization;
 	uint flags;
@@ -360,9 +369,9 @@ layout(set = 0, binding = 16) uniform texture2D best_fit_normal_texture;
 
 layout(set = 0, binding = 17) uniform texture2D dfg;
 
-layout(set = 0, binding = 18) uniform sampler2D ltc_lut1;
+layout(set = 0, binding = 18) uniform texture2D ltc_lut1;
 
-layout(set = 0, binding = 19) uniform sampler2D ltc_lut2;
+layout(set = 0, binding = 19) uniform texture2D ltc_lut2;
 
 layout(set = 0, binding = 20) uniform texture2D area_light_atlas;
 
@@ -435,18 +444,20 @@ struct InstanceSlotData {
 #endif
 };
 
-layout(set = 1, binding = 37, std430) buffer restrict readonly InstanceSlotBuffer {
+// 37/38 are upstream's SSCS and texture streaming feedback, 39-44 RT shadows, projector, SDFGI reflection cascades.
+layout(set = 1, binding = 45, std430) buffer restrict readonly InstanceSlotBuffer {
 	InstanceSlotData data[];
 }
 instance_slots;
 
 struct SurfaceSlotData {
 	vec4 compressed_aabb_position_pad; // Only .xyz is used. .w is padding.
-	vec4 compressed_aabb_size_pad; // Only .xyz is used. .w is padding.
+	vec3 compressed_aabb_size;
+	uint material_feedback_index; // Texture streaming: index into the material feedback buffer.
 	vec4 uv_scale;
 };
 
-layout(set = 1, binding = 38, std430) buffer restrict readonly SurfaceSlotBuffer {
+layout(set = 1, binding = 46, std430) buffer restrict readonly SurfaceSlotBuffer {
 	SurfaceSlotData data[];
 }
 surface_slots;
@@ -459,6 +470,9 @@ uint instance_flags;
 uint instance_gi_offset;
 uint instance_layer_mask;
 uint instance_uniform_base;
+#if defined(TEXTURE_STREAMING) && !defined(MODE_RENDER_DEPTH)
+uint instance_material_feedback_index;
+#endif
 
 void load_element_data(uint p_index) {
 	ElementData element = elements.data[p_index];
@@ -476,7 +490,13 @@ void load_element_data_interp(uvec4 p_data) {
 	surface_slot = 0; // Only the vertex stage reads surface slots.
 	instance_flags = p_data.y;
 	instance_gi_offset = p_data.z;
+#if defined(TEXTURE_STREAMING) && !defined(MODE_RENDER_DEPTH)
+	// .w carries the surface's material feedback index (texture streaming); the layer mask comes from the slot.
+	instance_layer_mask = instance_slots.data[instance_slot].layer_mask;
+	instance_material_feedback_index = p_data.w;
+#else
 	instance_layer_mask = p_data.w;
+#endif
 	instance_uniform_base = instance_slots.data[instance_slot].instance_uniforms_ofs;
 }
 
@@ -595,10 +615,12 @@ layout(set = 1, binding = 33) uniform texture3D volumetric_fog_texture;
 layout(set = 1, binding = 34) uniform texture2DArray ssil_buffer;
 layout(set = 1, binding = 35) uniform texture2DArray ssr_buffer;
 layout(set = 1, binding = 36) uniform texture2DArray ssr_mip_level_buffer;
+layout(set = 1, binding = 37) uniform texture2DArray sscs_buffer;
 #else
 layout(set = 1, binding = 34) uniform texture2D ssil_buffer;
 layout(set = 1, binding = 35) uniform texture2D ssr_buffer;
 layout(set = 1, binding = 36) uniform texture2D ssr_mip_level_buffer;
+layout(set = 1, binding = 37) uniform texture2DArray sscs_buffer;
 #endif // USE_MULTIVIEW
 
 // The projector of the directional light whose projector_enabled is set (white when none).
@@ -618,9 +640,9 @@ vec4 normal_roughness_compatibility(vec4 p_normal_roughness) {
 }
 
 // https://google.github.io/filament/Filament.html#toc5.3.4.7
-// Note: The roughness value is inverted
-vec3 prefiltered_dfg(float lod, float NoV) {
-	return textureLod(sampler2D(dfg, SAMPLER_LINEAR_CLAMP), vec2(NoV, 1.0 - lod), 0.0).rgb;
+// Note: We have an inverted Y-axis in the DFG; therefore, the roughness value must be inverted.
+vec2 prefiltered_dfg(float lod, float NoV) {
+	return textureLod(sampler2D(dfg, SAMPLER_LINEAR_CLAMP), vec2(NoV, 1.0 - lod), 0.0).rg;
 }
 
 // Compute multiscatter compensation
@@ -628,6 +650,14 @@ vec3 prefiltered_dfg(float lod, float NoV) {
 vec3 get_energy_compensation(vec3 f0, float env) {
 	return 1.0 + f0 * (1.0 / env - 1.0);
 }
+
+#ifdef TEXTURE_STREAMING
+// Texture streaming material feedback buffer access
+layout(set = 1, binding = 38, std430) buffer restrict MaterialFeedbackBuffer {
+	uint data[];
+}
+material_feedback;
+#endif
 
 /* Set 2 Skeleton & Instancing (can change per item) */
 

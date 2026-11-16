@@ -176,7 +176,7 @@ private:
 
 	static void _thread_function(void *p_user);
 
-	void _process_task(Task *task);
+	void _process_task(Task *p_task);
 	void _run_group_task_elements(Task *p_task);
 	Task *_take_queued_group_task(Group *p_group);
 

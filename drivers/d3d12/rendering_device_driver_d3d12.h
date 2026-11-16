@@ -52,6 +52,7 @@ namespace D3D12MA {
 class Allocation;
 class Allocator;
 class VirtualBlock;
+class Pool;
 }; // namespace D3D12MA
 
 struct IDXGIAdapter;
@@ -94,6 +95,13 @@ class RenderingDeviceDriverD3D12 : public RenderingDeviceDriver {
 		bool native_16bit_ops = false;
 		// ResourceDescriptorHeap indexing (SM 6.6 + resource binding tier 3): buffer device addresses and ray tracing.
 		bool heap_indexing = false;
+
+		// Upstream tests the shader model only; ResourceDescriptorHeap also needs resource binding tier 3 ("must be
+		// supported on devices that support both D3D12_RESOURCE_BINDING_TIER_3 and D3D_SHADER_MODEL_6_6", HLSL SM 6.6
+		// Dynamic Resources, "Device Capability").
+		_FORCE_INLINE_ bool buffer_device_address_supported() const {
+			return heap_indexing;
+		}
 	};
 
 	struct FormatCapabilities {
@@ -107,6 +115,8 @@ class RenderingDeviceDriverD3D12 : public RenderingDeviceDriver {
 	struct MiscFeaturesSupport {
 		bool depth_bounds_supported = false;
 		bool shader_output_layer_supported = false; // SV_RenderTargetArrayIndex written by a vertex shader.
+		bool uma_supported = false;
+		bool gpu_upload_heap_supported = false;
 	};
 
 	struct SamplerCapabilities {
@@ -148,6 +158,7 @@ class RenderingDeviceDriverD3D12 : public RenderingDeviceDriver {
 	struct DescriptorHeap {
 		struct Allocation {
 			uint64_t virtual_alloc_handle = {}; // This is the handle value in "D3D12MA::VirtualAllocation".
+			uint64_t offset = UINT64_MAX;
 			D3D12_CPU_DESCRIPTOR_HANDLE cpu_handle = {};
 			D3D12_GPU_DESCRIPTOR_HANDLE gpu_handle = {};
 		};
@@ -230,7 +241,11 @@ class RenderingDeviceDriverD3D12 : public RenderingDeviceDriver {
 	DescriptorHeap resource_descriptor_heap;
 	uint32_t resource_descriptor_heap_capacity = 0; // Its size, for get_descriptor_report().
 	uint32_t device_address_descriptor_count = 0; // Buffers with a GPU pointer descriptor, for get_descriptor_report().
+	// The heaps lock themselves (DescriptorHeap::mutex). This one guards sampler_descriptor_heap_allocations, which
+	// upstream made reachable from several threads.
 	DescriptorHeap sampler_descriptor_heap;
+	BinaryMutex sampler_descriptor_heap_mutex;
+
 	CPUDescriptorHeapPool resource_descriptor_heap_pool;
 	CPUDescriptorHeapPool rtv_descriptor_heap_pool;
 	CPUDescriptorHeapPool dsv_descriptor_heap_pool;
@@ -261,6 +276,11 @@ private:
 	/****************/
 
 	Microsoft::WRL::ComPtr<D3D12MA::Allocator> allocator;
+
+	// These pools allow UPLOAD and READBACK heap types to bypass runtime validation
+	// for GPU features that are supported in practice, such as ALLOW_UNORDERED_ACCESS.
+	Microsoft::WRL::ComPtr<D3D12MA::Pool> custom_upload_pool;
+	Microsoft::WRL::ComPtr<D3D12MA::Pool> custom_readback_pool;
 
 	/******************/
 	/**** RESOURCE ****/
@@ -385,6 +405,8 @@ private:
 	UINT _compute_subresource_from_layers(TextureInfo *p_texture, const TextureSubresourceLayers &p_layers, uint32_t p_layer_offset);
 
 	void _discard_texture_subresources(const TextureInfo *p_tex_info, const CommandBufferInfo *p_cmd_buf_info);
+
+	bool _data_format_is_compressed(DataFormat p_format);
 
 protected:
 	virtual bool _unordered_access_supported_by_format(DataFormat p_format);
@@ -565,9 +587,9 @@ private:
 		// Store a self list reference to be used by the command pool.
 		SelfList<CommandBufferInfo> command_buffer_info_elem{ this };
 
+		D3D12_COMMAND_LIST_TYPE list_type = D3D12_COMMAND_LIST_TYPE_DIRECT;
 		Microsoft::WRL::ComPtr<ID3D12CommandAllocator> cmd_allocator;
 		Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> cmd_list;
-		D3D12_COMMAND_LIST_TYPE list_type = D3D12_COMMAND_LIST_TYPE_DIRECT;
 		Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList1> cmd_list_1;
 		Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList4> cmd_list_4;
 		Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList5> cmd_list_5;
@@ -775,7 +797,7 @@ private:
 		SamplerDescriptorHeapAllocation *sampler_descriptor_heap_alloc = nullptr;
 
 		struct DynamicBuffer {
-			BufferDynamicInfo const *info = nullptr;
+			const BufferDynamicInfo *info = nullptr;
 			uint32_t binding = UINT_MAX;
 		};
 

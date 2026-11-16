@@ -152,6 +152,8 @@ public:
 				uint32_t multimesh_has_custom_data : 1;
 				uint32_t fog_use_legacy_blending : 1;
 				uint32_t cluster_has_area_light : 1;
+				uint32_t use_lightmap_specular : 1;
+				uint32_t material_feedback : 1;
 				uint32_t material_debug_mode : 5; // See material_debug_mode_from_environment().
 				uint32_t volumetric_fog_sampling : 2; // RSE::EnvironmentVolumetricFogSampling.
 				uint32_t use_dither_fade : 1; // The draw's instance fade is a dithered discard (rendering/visibility_range/dithered_fade).
@@ -549,6 +551,7 @@ public:
 	bool emulate_point_size = false;
 	// The device has opacity micromaps: the transparent pass' ray queries use SHADER_GROUP_RT_SHADOWS_OPACITY_MICROMAPS.
 	bool rt_shadows_opacity_micromaps = false;
+	bool depth_prepass_enabled = false;
 
 	RID default_shader;
 	RID default_material;
@@ -558,10 +561,12 @@ public:
 	RID debug_shadow_splits_material;
 	RID default_shader_rd;
 	RID default_shader_rt_shadows_rd; // Its render pass uniform set has the TLAS; set by enable_rt_shadows_shader_group().
+	RID default_multiview_shader_rd; // This is lazily initialized, use "get_default_shader_rd" instead.
 	RID default_shader_sdfgi_rd;
 
 	RID default_vec4_xform_buffer;
 	RID default_vec4_xform_uniform_set;
+	RID default_material_feedback_buffer;
 
 	RID shadow_sampler;
 
@@ -597,6 +602,7 @@ public:
 	void enable_rt_capture_shader_group();
 	bool is_rt_capture_shader_group_enabled() const;
 	uint32_t get_pipeline_compilations(RSE::PipelineSource p_source);
+	RID get_default_shader_rd(bool p_is_multiview = false);
 };
 
 } // namespace RendererSceneRenderImplementation

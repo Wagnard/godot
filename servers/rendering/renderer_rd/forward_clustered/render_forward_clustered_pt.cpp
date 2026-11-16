@@ -324,7 +324,7 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 	uint32_t pt_positional_light_count = 0;
 	if (volumetric_fog && !fog_traces_shadows) {
 		// The volumetric fog lights its volume through the shadow maps, as in raster: render them, then update it.
-		_pre_opaque_render(p_render_data, false, false, false, false, nullptr, RID());
+		_pre_opaque_render(p_render_data, false, false, false, false, false, nullptr, nullptr);
 	} else {
 		_setup_lights_cluster_decals(p_render_data, pt_directional_light_count, pt_positional_light_count);
 		if (rb_data.is_valid() && !fog_traces_shadows) {
@@ -690,11 +690,12 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 			rt_shadow_geometry_buffer = rt_state->geometry_buffer;
 			rt_shadow_material_buffer = rt_state->material_buffer;
 		}
-		rp_uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_ALPHA, p_render_data, radiance_texture, samplers, transparent_pass_uniform_buffer_index, true);
+		const bool is_multiview = rb->get_view_count() > 1;
+		rp_uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_ALPHA, p_render_data, is_multiview, radiance_texture, samplers, transparent_pass_uniform_buffer_index, true);
 		rt_shadow_tlas = RID();
 		rt_shadow_geometry_buffer = RID();
 		rt_shadow_material_buffer = RID();
-		depth_uniform_set = rasterized_count > 0 ? _setup_render_pass_uniform_set(RENDER_LIST_ALPHA, nullptr, RID(), samplers, transparent_pass_uniform_buffer_index) : RID();
+		depth_uniform_set = rasterized_count > 0 ? _setup_render_pass_uniform_set(RENDER_LIST_ALPHA, nullptr, is_multiview, RID(), samplers, transparent_pass_uniform_buffer_index) : RID();
 	};
 	setup_transparent_pass_sets();
 
@@ -1212,7 +1213,7 @@ void RenderForwardClusteredPT::_rt_record_vertex_captures(RID p_params_buffer, R
 	}
 	// Offset 0 starts another of the list's per-frame buffers: the shadow passes drawn before keep theirs.
 	_fill_instance_data(RENDER_LIST_SECONDARY);
-	const RID render_pass_uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_SECONDARY, nullptr, RID(), RendererRD::MaterialStorage::get_singleton()->samplers_rd_get_default(), 0);
+	const RID render_pass_uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_SECONDARY, nullptr, false, RID(), RendererRD::MaterialStorage::get_singleton()->samplers_rd_get_default(), 0);
 
 	if (rt_capture_framebuffer.is_null()) {
 		rt_capture_framebuffer = rd->framebuffer_create_empty(Size2i(1, 1), RD::TEXTURE_SAMPLES_1, rd->framebuffer_format_create_empty());
