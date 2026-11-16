@@ -3232,6 +3232,10 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	bool reverse_cull = p_render_data->scene_data->cam_transform.basis.determinant() < 0;
 	bool using_ssil = !is_reflection_probe && p_render_data->environment.is_valid() && environment_get_ssil_enabled(p_render_data->environment);
 	bool using_motion_pass = rb_data.is_valid() && using_upscaling;
+	if (using_motion_pass && scale_type != SCALE_3D_DLSS) {
+		// The transparent pass' pipelines writing no alpha (render_list_params.no_reactive_alpha below), compiled ahead.
+		global_pipeline_data_required.use_no_reactive_alpha = true;
+	}
 
 	if (is_reflection_probe) {
 		uint32_t resolution = light_storage->reflection_probe_instance_get_resolution(p_render_data->reflection_probe);
@@ -7003,6 +7007,79 @@ static RD::FramebufferFormatID _get_reflection_probe_depth_framebuffer_format_fo
 	return RD::get_singleton()->framebuffer_format_create(Vector<RD::AttachmentFormat>(attachments));
 }
 
+const RD::DataFormat RenderForwardClustered::pt_rr_material_formats[PT_RR_MATERIAL_ATTACHMENT_COUNT] = { RD::DATA_FORMAT_R8G8B8A8_UNORM, RD::DATA_FORMAT_R8G8B8A8_UNORM, RD::DATA_FORMAT_R8G8B8A8_UNORM, RD::DATA_FORMAT_R16G16B16A16_SFLOAT, RD::DATA_FORMAT_R32_SFLOAT, RD::DATA_FORMAT_D32_SFLOAT };
+
+uint32_t RenderForwardClustered::_pt_rr_material_usage_bits(int p_attachment) {
+	const uint32_t attachment_bit = p_attachment == PT_RR_MATERIAL_ATTACHMENT_COUNT - 1 ? RD::TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT : RD::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT;
+	return attachment_bit | RD::TEXTURE_USAGE_SAMPLING_BIT;
+}
+
+// The format of the framebuffer RenderForwardClusteredPT::_render_scene() makes of the material pass' textures
+// (RenderingDevice::framebuffer_create(): the color attachments in order, then the depth one).
+RD::FramebufferFormatID RenderForwardClustered::_get_pt_rr_material_framebuffer_format_for_pipeline() {
+	thread_local Vector<RD::AttachmentFormat> attachments;
+	attachments.resize(RenderForwardClustered::PT_RR_MATERIAL_ATTACHMENT_COUNT);
+	for (int i = 0; i < RenderForwardClustered::PT_RR_MATERIAL_ATTACHMENT_COUNT; i++) {
+		RD::AttachmentFormat &attachment = attachments.ptrw()[i];
+		attachment.format = RenderForwardClustered::pt_rr_material_formats[i];
+		attachment.samples = RD::TEXTURE_SAMPLES_1;
+		attachment.usage_flags = RenderForwardClustered::_pt_rr_material_usage_bits(i);
+	}
+
+	thread_local Vector<RD::FramebufferPass> passes;
+	passes.resize(1);
+	passes.ptrw()[0].color_attachments.resize(RenderForwardClustered::PT_RR_MATERIAL_ATTACHMENT_COUNT - 1);
+	for (int i = 0; i < RenderForwardClustered::PT_RR_MATERIAL_ATTACHMENT_COUNT - 1; i++) {
+		passes.ptrw()[0].color_attachments.ptrw()[i] = i;
+	}
+	passes.ptrw()[0].depth_attachment = RenderForwardClustered::PT_RR_MATERIAL_ATTACHMENT_COUNT - 1;
+
+	return RD::get_singleton()->framebuffer_format_create_multipass(attachments, passes);
+}
+
+// The format of DLSS-RR's transparency layer framebuffer (RenderForwardClusteredPT::_render_scene()): the layer, the color
+// pass' unused specular and velocity slots, the view's depth. A path traced view has no multisampling.
+RD::FramebufferFormatID RenderForwardClustered::_get_pt_rr_transparency_layer_framebuffer_format_for_pipeline(RD::DataFormat p_color_format, bool p_can_be_storage) {
+	RD::AttachmentFormat unused_attachment;
+	unused_attachment.usage_flags = RD::AttachmentFormat::UNUSED_ATTACHMENT;
+
+	thread_local Vector<RD::AttachmentFormat> attachments;
+	attachments.clear();
+
+	RD::AttachmentFormat attachment;
+	attachment.samples = RD::TEXTURE_SAMPLES_1;
+	attachment.format = p_color_format;
+	attachment.usage_flags = RenderForwardClustered::PT_RR_TRANSPARENCY_LAYER_USAGE_BITS;
+	attachments.push_back(attachment);
+	attachments.push_back(unused_attachment);
+	attachments.push_back(unused_attachment);
+	attachment.format = RenderSceneBuffersRD::get_depth_format(false, false, p_can_be_storage);
+	attachment.usage_flags = RenderSceneBuffersRD::get_depth_usage_bits(false, false, p_can_be_storage);
+	attachments.push_back(attachment);
+
+	thread_local Vector<RD::FramebufferPass> passes;
+	passes.resize(1);
+	passes.ptrw()[0].color_attachments = { 0, RD::ATTACHMENT_UNUSED, RD::ATTACHMENT_UNUSED };
+	passes.ptrw()[0].depth_attachment = 3;
+
+	return RD::get_singleton()->framebuffer_format_create_multipass(attachments, passes);
+}
+
+bool RenderForwardClustered::_rr_transparency_layer_shader(const SceneShaderForwardClustered::ShaderData *p_shader, bool p_pt_rasterized) {
+	// Unshaded: nothing in it is traced, so nothing to denoise; RR smeared such effects (godot3d's buff halo and its
+	// sparkles, moving without motion vectors) as if they were noise. Add writes no alpha into the layer (its pipelines
+	// there, PipelineKey::rr_transparency_layer). Sub and mul darken what is under
+	// them, which the premultiplied layer cannot hold.
+	// Not a pathtracing_rasterized surface (a sprite): RR moves the layer by the motion vectors under it, which the layer
+	// does not write, so a card standing in front of a farther background smeared as the camera moved. Drawn into the
+	// color, the card is noise free there too.
+	if (!p_shader || !p_shader->unshaded || p_pt_rasterized || p_shader->uses_screen_texture || p_shader->uses_depth_texture || p_shader->uses_normal_texture) {
+		return false;
+	}
+	return p_shader->blend_mode == RendererRD::MaterialStorage::ShaderData::BLEND_MODE_MIX || p_shader->blend_mode == RendererRD::MaterialStorage::ShaderData::BLEND_MODE_PREMULTIPLIED_ALPHA ||
+			p_shader->blend_mode == RendererRD::MaterialStorage::ShaderData::BLEND_MODE_ADD;
+}
+
 void RenderForwardClustered::_mesh_compile_pipeline_for_surface(SceneShaderForwardClustered::ShaderData *p_shader, void *p_mesh_surface, bool p_ubershader, bool p_instanced_surface, RSE::PipelineSource p_source, SceneShaderForwardClustered::ShaderData::PipelineKey &r_pipeline_key, Vector<ShaderPipelinePair> *r_pipeline_pairs) {
 	RendererRD::MeshStorage *mesh_storage = RendererRD::MeshStorage::get_singleton();
 	uint64_t input_mask = p_shader->get_vertex_input_mask(r_pipeline_key.version, r_pipeline_key.color_pass_flags, p_ubershader);
@@ -7065,11 +7142,36 @@ void RenderForwardClustered::_mesh_compile_pipelines_for_surface(const SurfacePi
 				pipeline_key.framebuffer_format_id = _get_color_framebuffer_format_for_pipeline(buffers_color_format, buffers_can_be_storage, RD::TextureSamples(p_global.texture_samples), false, false, view_count);
 				_mesh_compile_pipeline_for_surface(p_surface.shader, p_surface.mesh_surface, true, p_surface.instanced, p_source, pipeline_key, r_pipeline_pairs);
 
+				if (alpha && p_global.use_no_reactive_alpha && p_surface.shader->reactive_mask_disabled) {
+					// The transparent pass under an upscaler that reads the color's alpha as its reactive mask: a material with
+					// render_mode reactive_mask_disabled writes no alpha (RenderListParameters::no_reactive_alpha).
+					SceneShaderForwardClustered::ShaderData::PipelineKey no_reactive_key = pipeline_key;
+					no_reactive_key.no_reactive_alpha = true;
+					_mesh_compile_pipeline_for_surface(p_surface.shader, p_surface.mesh_surface, true, p_surface.instanced, p_source, no_reactive_key, r_pipeline_pairs);
+				}
+
 				if (alpha && !multiview && p_global.use_rt_shadows && scene_shader.is_rt_shadows_shader_group_enabled()) {
 					// The path tracer's transparent pass.
 					SceneShaderForwardClustered::ShaderData::PipelineKey rt_shadows_key = pipeline_key;
 					rt_shadows_key.color_pass_flags |= SceneShaderForwardClustered::PIPELINE_COLOR_PASS_FLAG_RT_SHADOWS;
 					_mesh_compile_pipeline_for_surface(p_surface.shader, p_surface.mesh_surface, true, p_surface.instanced, p_source, rt_shadows_key, r_pipeline_pairs);
+
+					if (p_global.use_no_reactive_alpha && p_surface.shader->reactive_mask_disabled) {
+						rt_shadows_key.no_reactive_alpha = true;
+						_mesh_compile_pipeline_for_surface(p_surface.shader, p_surface.mesh_surface, true, p_surface.instanced, p_source, rt_shadows_key, r_pipeline_pairs);
+					}
+				}
+
+				if (alpha && !multiview && p_global.use_pt_rr_transparency_layer && p_surface.pt_rr_transparency_layer) {
+					// DLSS-RR's transparency layer: the path tracer's transparent pass into a target of its own, with
+					// pipelines of their own (PipelineKey::rr_transparency_layer), never writing the reactive mask.
+					SceneShaderForwardClustered::ShaderData::PipelineKey layer_key = pipeline_key;
+					if (p_global.use_rt_shadows && scene_shader.is_rt_shadows_shader_group_enabled()) {
+						layer_key.color_pass_flags |= SceneShaderForwardClustered::PIPELINE_COLOR_PASS_FLAG_RT_SHADOWS;
+					}
+					layer_key.rr_transparency_layer = true;
+					layer_key.framebuffer_format_id = _get_pt_rr_transparency_layer_framebuffer_format_for_pipeline(buffers_color_format, buffers_can_be_storage);
+					_mesh_compile_pipeline_for_surface(p_surface.shader, p_surface.mesh_surface, true, p_surface.instanced, p_source, layer_key, r_pipeline_pairs);
 				}
 
 				// Generate all the possible variants used during the advanced color passes.
@@ -7098,6 +7200,44 @@ void RenderForwardClustered::_mesh_compile_pipelines_for_surface(const SurfacePi
 					}
 				}
 			}
+		}
+	}
+
+	if (p_surface.pt_rasterized && p_global.use_pt_rasterized_cards) {
+		// A path traced view's rasterized cards ("Render Rasterized Cards", RenderForwardClusteredPT::_render_scene()): their
+		// color drawn with the transparent pass' pipelines, with motion vectors when the view has them, writing no alpha under
+		// an upscaler that reads it as its reactive mask; their depth is the depth pre-pass' (below). Single view only.
+		// Lit by their traced probes as lightmap captures (PTProbes): the lightmap variant once a probe has its coefficients,
+		// whatever lightmap the instance has.
+		const bool rt_shadows = p_global.use_rt_shadows && scene_shader.is_rt_shadows_shader_group_enabled();
+		for (uint32_t lightmap = 0; lightmap < 2; lightmap++) {
+			pipeline_key.version = SceneShaderForwardClustered::PIPELINE_VERSION_COLOR_PASS;
+			pipeline_key.color_pass_flags = SceneShaderForwardClustered::PIPELINE_COLOR_PASS_FLAG_TRANSPARENT;
+			if (lightmap) {
+				pipeline_key.color_pass_flags |= SceneShaderForwardClustered::PIPELINE_COLOR_PASS_FLAG_LIGHTMAP;
+			}
+			if (rt_shadows) {
+				pipeline_key.color_pass_flags |= SceneShaderForwardClustered::PIPELINE_COLOR_PASS_FLAG_RT_SHADOWS;
+			}
+			if (p_global.use_motion_vectors) {
+				pipeline_key.color_pass_flags |= SceneShaderForwardClustered::PIPELINE_COLOR_PASS_FLAG_MOTION_VECTORS;
+			}
+			pipeline_key.framebuffer_format_id = _get_color_framebuffer_format_for_pipeline(buffers_color_format, buffers_can_be_storage, RD::TextureSamples(p_global.texture_samples), false, p_global.use_motion_vectors, 1);
+			_mesh_compile_pipeline_for_surface(p_surface.shader, p_surface.mesh_surface, true, p_surface.instanced, p_source, pipeline_key, r_pipeline_pairs);
+
+			if (p_global.use_no_reactive_alpha) {
+				pipeline_key.no_reactive_alpha = true;
+				_mesh_compile_pipeline_for_surface(p_surface.shader, p_surface.mesh_surface, true, p_surface.instanced, p_source, pipeline_key, r_pipeline_pairs);
+				pipeline_key.no_reactive_alpha = false;
+			}
+		}
+
+		if (p_global.use_pt_rr_guides) {
+			// Their material pass for DLSS-RR's guides, into the textures of its own.
+			pipeline_key.version = SceneShaderForwardClustered::PIPELINE_VERSION_DEPTH_PASS_WITH_MATERIAL;
+			pipeline_key.color_pass_flags = 0;
+			pipeline_key.framebuffer_format_id = _get_pt_rr_material_framebuffer_format_for_pipeline();
+			_mesh_compile_pipeline_for_surface(p_surface.shader, p_surface.mesh_surface, true, p_surface.instanced, p_source, pipeline_key, r_pipeline_pairs);
 		}
 	}
 
@@ -7193,6 +7333,8 @@ void RenderForwardClustered::_mesh_generate_all_pipelines_for_surface_cache(Geom
 	surface.uses_transparent = uses_alpha_pass || uses_fade;
 	surface.uses_depth = (p_surface_cache->flags & (GeometryInstanceSurfaceDataCache::FLAG_PASS_DEPTH | GeometryInstanceSurfaceDataCache::FLAG_PASS_OPAQUE | GeometryInstanceSurfaceDataCache::FLAG_PASS_SHADOW)) != 0;
 	surface.can_use_lightmap = p_surface_cache->owner->lightmap_instance.is_valid() || p_surface_cache->owner->lightmap_sh;
+	surface.pt_rasterized = p_surface_cache->rt_pass_flags & GeometryInstanceSurfaceDataCache::FLAG_PT_RASTERIZED;
+	surface.pt_rr_transparency_layer = (p_surface_cache->rt_pass_flags & GeometryInstanceSurfaceDataCache::FLAG_PASS_ALPHA) && _rr_transparency_layer_shader(p_surface_cache->shader, surface.pt_rasterized);
 	_mesh_compile_pipelines_for_surface(surface, p_global, RSE::PIPELINE_SOURCE_SURFACE);
 	_mesh_generate_extra_pipelines_for_surface_cache(p_surface_cache);
 }
@@ -7576,6 +7718,11 @@ void RenderForwardClustered::mesh_generate_pipelines(RID p_mesh, bool p_backgrou
 		surface.uses_transparent = material->shader_data->uses_alpha_pass();
 		surface.uses_depth = surface.uses_opaque || (surface.uses_transparent && material->shader_data->uses_depth_in_alpha_pass());
 		surface.can_use_lightmap = mesh_storage->mesh_surface_get_format(mesh_surface) & RSE::ARRAY_FORMAT_TEX_UV2;
+		// As _geometry_instance_add_surface_with_material() classifies the surface for the path tracer, from its material
+		// alone (an instance's own pathtracing_rasterized is known only with the instance).
+		const bool rt_alpha = shader->rt_uses_alpha_pass() && !(material_alpha_antialiasing != MATERIAL_ALPHA_ANTIALIASING_ALWAYS && shader->rt_uses_alpha_pass_for_alpha_antialiasing_only());
+		surface.pt_rasterized = shader->pathtracing_rasterized && !rt_alpha;
+		surface.pt_rr_transparency_layer = rt_alpha && _rr_transparency_layer_shader(shader, false);
 		_mesh_compile_pipelines_for_surface(surface, global_pipeline_data_required, RSE::PIPELINE_SOURCE_MESH, &pipeline_pairs);
 	}
 
