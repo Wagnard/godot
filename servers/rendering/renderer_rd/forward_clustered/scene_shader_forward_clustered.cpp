@@ -973,8 +973,9 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 
 		Vector<uint64_t> dynamic_buffers;
 		dynamic_buffers.push_back(ShaderRD::DynamicBuffer::encode(RenderForwardClustered::RENDER_PASS_UNIFORM_SET, 2));
-		dynamic_buffers.push_back(ShaderRD::DynamicBuffer::encode(RenderForwardClustered::RENDER_PASS_UNIFORM_SET, 37));
-		dynamic_buffers.push_back(ShaderRD::DynamicBuffer::encode(RenderForwardClustered::RENDER_PASS_UNIFORM_SET, 38));
+		// The instance and surface slot buffers (RenderForwardClustered::_slot_buffers_append_uniforms()).
+		dynamic_buffers.push_back(ShaderRD::DynamicBuffer::encode(RenderForwardClustered::RENDER_PASS_UNIFORM_SET, 45));
+		dynamic_buffers.push_back(ShaderRD::DynamicBuffer::encode(RenderForwardClustered::RENDER_PASS_UNIFORM_SET, 46));
 		shader.initialize(shader_versions, p_defines, Vector<RD::PipelineImmutableSampler>(), dynamic_buffers);
 
 		// The transparent pass of the path tracer has no separate specular or multiview. Its motion vectors are the rasterized
