@@ -1201,6 +1201,11 @@ protected:
 		bool uses_transparent = false;
 		bool uses_depth = false;
 		bool can_use_lightmap = false;
+		// Drawn by a path traced view's raster passes (RenderForwardClusteredPT::_render_scene()) as a card: an opaque or
+		// cut-out surface the camera rays leave out (GeometryInstanceSurfaceDataCache::FLAG_PT_RASTERIZED).
+		bool pt_rasterized = false;
+		// Drawn into DLSS-RR's transparency layer by a path traced view (_rr_transparency_layer_surface()).
+		bool pt_rr_transparency_layer = false;
 	};
 
 	struct GlobalPipelineData {
@@ -1222,6 +1227,15 @@ protected:
 				uint32_t use_shadow_cubemaps : 1;
 				uint32_t use_shadow_dual_paraboloid : 1;
 				uint32_t use_rt_shadows : 1;
+				// The transparent pass of a view under an upscaler that reads the color's alpha as its reactive mask
+				// (RenderListParameters::no_reactive_alpha).
+				uint32_t use_no_reactive_alpha : 1;
+				// A path traced view's rasterized cards (SurfacePipelineData::pt_rasterized).
+				uint32_t use_pt_rasterized_cards : 1;
+				// Their material pass for DLSS-RR's guides (RenderForwardClusteredPT::_rr_rasterized_guides_enabled()).
+				uint32_t use_pt_rr_guides : 1;
+				// DLSS-RR's transparency layer (SurfacePipelineData::pt_rr_transparency_layer).
+				uint32_t use_pt_rr_transparency_layer : 1;
 			};
 		};
 	};
@@ -1242,6 +1256,19 @@ protected:
 	void _mesh_generate_all_pipelines_for_surface_cache(GeometryInstanceSurfaceDataCache *p_surface_cache, const GlobalPipelineData &p_global);
 	void _update_dirty_geometry_instances();
 	void _update_dirty_geometry_pipelines();
+
+	// A path traced view draws the transparent surfaces of such a shader into DLSS-RR's transparency layer
+	// (RenderForwardClusteredPT::_rr_transparency_layer_surface(), which the pipeline compilation reads too).
+	static bool _rr_transparency_layer_shader(const SceneShaderForwardClustered::ShaderData *p_shader, bool p_pt_rasterized);
+	// The attachments of the rasterized cards' material pass for DLSS-RR's guides (RenderForwardClusteredPT::_render_scene()):
+	// albedo, view normal, ORM, emission, view depth, and a depth buffer of its own. Its pipelines are compiled with them.
+	static constexpr int PT_RR_MATERIAL_ATTACHMENT_COUNT = 6;
+	static const RD::DataFormat pt_rr_material_formats[PT_RR_MATERIAL_ATTACHMENT_COUNT];
+	static uint32_t _pt_rr_material_usage_bits(int p_attachment);
+	static RD::FramebufferFormatID _get_pt_rr_material_framebuffer_format_for_pipeline();
+	static RD::FramebufferFormatID _get_pt_rr_transparency_layer_framebuffer_format_for_pipeline(RD::DataFormat p_color_format, bool p_can_be_storage);
+	// DLSS-RR's transparency layer: a color texture of the view's color format, with the view's depth.
+	static constexpr uint32_t PT_RR_TRANSPARENCY_LAYER_USAGE_BITS = RD::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT;
 
 	// Path tracing: the materials of the surfaces built since the path tracer last took them, so that their hit groups
 	// compile when the instances are created (a loading screen), not when they first enter the TLAS. Filled only once a

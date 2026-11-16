@@ -77,6 +77,8 @@ class RenderForwardClusteredPT : public RenderForwardClustered {
 	RendererRD::NRDDenoiser *nrd_denoiser = nullptr;
 	void _warn_non_finite_layer(const RenderDataRD *p_render_data, const RendererRD::FiniteLayer::Report &p_report, uint32_t p_from, uint32_t p_to);
 	static bool _rr_transparency_layer_surface(const GeometryInstanceSurfaceDataCache *p_surf);
+	// The rasterized cards' material pass writes DLSS-RR's guides where they are.
+	static bool _rr_rasterized_guides_enabled();
 	// The factor that brings the rasterized instances' probes (pt_probes) to the units a lightmap capture is given in.
 	float _pt_probe_sh_scale(const RenderDataRD *p_render_data, float p_luminance_multiplier);
 

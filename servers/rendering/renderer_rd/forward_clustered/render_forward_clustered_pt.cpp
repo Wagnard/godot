@@ -162,6 +162,18 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 		global_pipeline_data_required.use_motion_vectors = true;
 	}
 
+	// The pipelines of this view's raster passes are compiled ahead of their first draw (_mesh_compile_pipelines_for_surface()):
+	// the rasterized cards', and those writing no alpha under an upscaler that reads it as its reactive mask.
+	// The cards are lit by their traced probes as lightmap captures (pt_probes, _fill_render_list()): the lightmap variants,
+	// in the advanced group.
+	if (raytracing) {
+		scene_shader.enable_advanced_shader_group(p_render_data->scene_data->view_count > 1);
+		global_pipeline_data_required.use_pt_rasterized_cards = true;
+	}
+	if (using_upscaling && scale_type != SCALE_3D_DLSS) {
+		global_pipeline_data_required.use_no_reactive_alpha = true;
+	}
+
 	// Free GPU resources for the screen-space effects the path tracer replaces.
 	rb->clear_context(RB_SCOPE_SSIL);
 	rb->clear_context(RB_SCOPE_SSAO);
@@ -221,6 +233,9 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 	uint32_t peel_from = UINT32_MAX;
 	{
 		const bool use_layer = raytracing && raytracing->dlss_rr_has_buffers(rb.ptr()) && p_render_data->scene_data->view_count == 1 && _rr_transparency_layer_enabled();
+		if (use_layer) {
+			global_pipeline_data_required.use_pt_rr_transparency_layer = true;
+		}
 		// As compute_rt_flags() sets RT_FLAG_TRANSPARENCY_PEELING.
 		const bool use_peeling = raytracing && p_render_data->environment.is_valid() && RenderRaytracing::get_transparency_peel_layers() > 0;
 		LocalVector<GeometryInstanceSurfaceDataCache *> &elements = render_list[RENDER_LIST_ALPHA].elements;
@@ -403,6 +418,12 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 	if (rt_shadows) {
 		scene_shader.enable_rt_shadows_shader_group();
 		global_pipeline_data_required.use_rt_shadows = true;
+	}
+
+	// The rasterized cards' material pass for DLSS-RR's guides: its variants are in the advanced group (see where it is drawn).
+	if (raytracing && raytracing->dlss_rr_has_buffers(rb.ptr()) && p_render_data->scene_data->view_count == 1 && _rr_rasterized_guides_enabled()) {
+		scene_shader.enable_advanced_shader_group(false);
+		global_pipeline_data_required.use_pt_rr_guides = true;
 	}
 
 	// Recompile pipelines if any of the requirements changed this frame.
@@ -831,21 +852,18 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 				// scene's. PTRasterizedGuides then writes what the raygen would, where that card's depth is the scene's (their
 				// depth pass, before the sky, cut the cards out). After dlss_rr_write_background_albedo(), which writes the
 				// background's albedo from the color where the camera rays missed: a card in front of the sky is drawn there.
-				// GODOT_RR_RASTERIZED_GUIDES=0: the path tracer's guides stay where the cards are, as before (comparisons).
-				static const bool rasterized_guides_off = OS::get_singleton()->get_environment("GODOT_RR_RASTERIZED_GUIDES") == "0";
-				if (raytracing && raytracing->dlss_rr_has_buffers(rb.ptr()) && !rasterized_guides_off) {
+				if (raytracing && raytracing->dlss_rr_has_buffers(rb.ptr()) && _rr_rasterized_guides_enabled()) {
 					RENDER_TIMESTAMP("Rasterized Cards RR Guides");
 					// The material pass' variants are in the advanced group, which the motion vectors enable. RR's buffers follow
 					// the Environment, not the viewport's scaling: on the first frame of a map, before DLSS, the group could
 					// be off and the pipeline fell on a placeholder ("Pre-raster shader is not provided", once).
 					scene_shader.enable_advanced_shader_group(p_render_data->scene_data->view_count > 1);
-					const RD::DataFormat material_formats[6] = { RD::DATA_FORMAT_R8G8B8A8_UNORM, RD::DATA_FORMAT_R8G8B8A8_UNORM, RD::DATA_FORMAT_R8G8B8A8_UNORM, RD::DATA_FORMAT_R16G16B16A16_SFLOAT, RD::DATA_FORMAT_R32_SFLOAT, RD::DATA_FORMAT_D32_SFLOAT };
-					const StringName material_names[6] = { SNAME("rasterized_albedo"), SNAME("rasterized_normal"), SNAME("rasterized_orm"), SNAME("rasterized_emission"), SNAME("rasterized_view_depth"), SNAME("rasterized_depth") };
-					RID material_textures[6];
-					for (int i = 0; i < 6; i++) {
+					// Formats and usage shared with the pipeline compilation (_mesh_compile_pipelines_for_surface()).
+					const StringName material_names[PT_RR_MATERIAL_ATTACHMENT_COUNT] = { SNAME("rasterized_albedo"), SNAME("rasterized_normal"), SNAME("rasterized_orm"), SNAME("rasterized_emission"), SNAME("rasterized_view_depth"), SNAME("rasterized_depth") };
+					RID material_textures[PT_RR_MATERIAL_ATTACHMENT_COUNT];
+					for (int i = 0; i < PT_RR_MATERIAL_ATTACHMENT_COUNT; i++) {
 						if (!rb->has_texture(RB_SCOPE_DLSS_RR, material_names[i])) {
-							const uint32_t attachment_bit = i == 5 ? RD::TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT : RD::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT;
-							rb->create_texture(RB_SCOPE_DLSS_RR, material_names[i], material_formats[i], attachment_bit | RD::TEXTURE_USAGE_SAMPLING_BIT, RD::TEXTURE_SAMPLES_1);
+							rb->create_texture(RB_SCOPE_DLSS_RR, material_names[i], pt_rr_material_formats[i], _pt_rr_material_usage_bits(i), RD::TEXTURE_SAMPLES_1);
 						}
 						material_textures[i] = rb->get_texture(RB_SCOPE_DLSS_RR, material_names[i]);
 					}
@@ -903,7 +921,7 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 				// same depth: the pipelines are the color pass' own. Mix and premultiplied alpha leave premultiplied color
 				// in RGB and the coverage in alpha, the layer DLSS-RR composites over its denoised output.
 				if (!rb->has_texture(RB_SCOPE_DLSS_RR, SNAME("transparency_layer"))) {
-					rb->create_texture(RB_SCOPE_DLSS_RR, SNAME("transparency_layer"), rb->get_base_data_format(), RD::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT, RD::TEXTURE_SAMPLES_1);
+					rb->create_texture(RB_SCOPE_DLSS_RR, SNAME("transparency_layer"), rb->get_base_data_format(), PT_RR_TRANSPARENCY_LAYER_USAGE_BITS, RD::TEXTURE_SAMPLES_1);
 				}
 				rr_transparency_layer = rb->get_texture(RB_SCOPE_DLSS_RR, SNAME("transparency_layer"));
 				RID layer_framebuffer;
@@ -1069,19 +1087,13 @@ bool RenderForwardClusteredPT::_rr_transparency_layer_enabled() {
 }
 
 bool RenderForwardClusteredPT::_rr_transparency_layer_surface(const GeometryInstanceSurfaceDataCache *p_surf) {
-	// Unshaded: nothing in it is traced, so nothing to denoise; RR smeared such effects (godot3d's buff halo and its
-	// sparkles, moving without motion vectors) as if they were noise. Add writes no alpha into the layer (its pipelines
-	// there, PipelineKey::rr_transparency_layer). Sub and mul darken what is under
-	// them, which the premultiplied layer cannot hold.
-	// Not a pathtracing_rasterized surface (a sprite): RR moves the layer by the motion vectors under it, which the layer
-	// does not write, so a card standing in front of a farther background smeared as the camera moved. Drawn into the
-	// color, the card is noise free there too.
-	const SceneShaderForwardClustered::ShaderData *shader = p_surf->shader;
-	if (!shader || !shader->unshaded || (p_surf->rt_pass_flags & GeometryInstanceSurfaceDataCache::FLAG_PT_RASTERIZED) || shader->uses_screen_texture || shader->uses_depth_texture || shader->uses_normal_texture) {
-		return false;
-	}
-	return shader->blend_mode == RendererRD::MaterialStorage::ShaderData::BLEND_MODE_MIX || shader->blend_mode == RendererRD::MaterialStorage::ShaderData::BLEND_MODE_PREMULTIPLIED_ALPHA ||
-			shader->blend_mode == RendererRD::MaterialStorage::ShaderData::BLEND_MODE_ADD;
+	return _rr_transparency_layer_shader(p_surf->shader, p_surf->rt_pass_flags & GeometryInstanceSurfaceDataCache::FLAG_PT_RASTERIZED);
+}
+
+bool RenderForwardClusteredPT::_rr_rasterized_guides_enabled() {
+	// GODOT_RR_RASTERIZED_GUIDES=0: the path tracer's guides stay where the cards are, as before (comparisons).
+	static const bool off = OS::get_singleton()->get_environment("GODOT_RR_RASTERIZED_GUIDES") == "0";
+	return !off;
 }
 
 bool RenderForwardClusteredPT::_transparent_pass_traces_shadows() {
