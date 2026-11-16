@@ -113,6 +113,7 @@ class RenderingDeviceDriverVulkan : public RenderingDeviceDriver {
 		bool validation = false;
 		// VK_KHR_pipeline_library: ray tracing pipelines linked from libraries, to which hit groups can be added.
 		bool pipeline_library_support = false;
+		bool position_fetch = false; // VK_KHR_ray_tracing_position_fetch.
 	};
 
 	struct DescriptorIndexingCapabilities {
@@ -812,6 +813,7 @@ public:
 		uint32_t scratch_alignment;
 		// Size of the scratch buffer for building the structure
 		uint32_t scratch_size;
+		uint64_t size = 0; // accelerationStructureSize of the backing buffer.
 
 		// Required for building
 		TightLocalVector<VkAccelerationStructureGeometryKHR> geometries;
@@ -832,6 +834,7 @@ public:
 	virtual void acceleration_structure_free(AccelerationStructureID p_acceleration_structure) override final;
 	virtual uint32_t acceleration_structure_get_scratch_size_bytes(AccelerationStructureID p_acceleration_structure) override final;
 	virtual AccelerationStructureID opacity_micromap_create(VectorView<OpacityMicromapUsage> p_usages, BufferID p_data_buffer, uint64_t p_data_offset, BufferID p_triangle_buffer, uint64_t p_triangle_offset) override final;
+	virtual uint64_t acceleration_structure_get_size_bytes(AccelerationStructureID p_acceleration_structure) override final;
 	virtual void acceleration_structure_debug_record_build(AccelerationStructureID p_acceleration_structure, bool p_update, uint64_t p_frame) override final;
 
 private:

@@ -1002,6 +1002,7 @@ public:
 	virtual void acceleration_structure_instance_write(uint8_t *r_driver_instance, const AccelerationStructureInstance &p_instance) override final;
 	virtual void acceleration_structure_free(AccelerationStructureID p_acceleration_structure) override final;
 	virtual uint32_t acceleration_structure_get_scratch_size_bytes(AccelerationStructureID p_acceleration_structure) override final;
+	virtual uint64_t acceleration_structure_get_size_bytes(AccelerationStructureID p_acceleration_structure) override final;
 	virtual AccelerationStructureID opacity_micromap_create(VectorView<OpacityMicromapUsage> p_usages, BufferID p_data_buffer, uint64_t p_data_offset, BufferID p_triangle_buffer, uint64_t p_triangle_offset) override final;
 
 	// ----- PIPELINE -----

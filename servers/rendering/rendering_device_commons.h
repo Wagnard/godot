@@ -951,6 +951,7 @@ public:
 		ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT = (1 << 2),
 		ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT = (1 << 3),
 		ACCELERATION_STRUCTURE_LOW_MEMORY_BIT = (1 << 4),
+		ACCELERATION_STRUCTURE_ALLOW_DATA_ACCESS_BIT = (1 << 11), // Requires SUPPORTS_RAYTRACING_POSITION_FETCH.
 	};
 
 	enum AccelerationStructureGeometryFlagBits {
@@ -1072,6 +1073,8 @@ public:
 		SUPPORTS_GPU_MAPPABLE_BUFFER,
 		SUPPORTS_SHADER_DEVICE_CLOCK,
 		SUPPORTS_VERTEX_PIPELINE_STORES,
+		SUPPORTS_RAYTRACING_POSITION_FETCH,
+		// The fork's values come after upstream's and NVIDIA's, so that theirs keep NVIDIA's numbers.
 		// A vertex shader may choose the layer of a layered framebuffer it renders to (gl_Layer). Not exposed to scripts.
 		SUPPORTS_SHADER_OUTPUT_LAYER,
 		// Ray tracing shaders may reorder invocations (hit objects; VK_EXT_ray_tracing_invocation_reorder). Not exposed to scripts.

@@ -45,6 +45,7 @@
 #include "servers/rendering/rendering_device_driver.h"
 #include "servers/rendering/rendering_device_enums.h"
 #include "servers/rendering/rendering_device_graph.h"
+#include "servers/rendering/rendering_device_rt_scratch_sizer.h"
 
 class RDTextureFormat;
 class RDTextureView;
@@ -1452,10 +1453,11 @@ private:
 		RDD::AccelerationStructureType type = {};
 		RDG::ResourceTracker *draw_tracker = nullptr;
 
-		// BLAS/TLAS are weakly linked, as opposed to RD dependencies. Builds of acceleration_structure_build_batch() add no links.
+		// BLAS/TLAS links weak, unlike RD dependencies.
 		HashSet<RID> acceleration_structure_dependencies;
 		bool invalidated = true;
-		uint64_t build_serial = 0; // The acceleration_structure_build_serial of the last build or refit.
+		uint64_t build_serial = 0;
+		uint64_t size = 0;
 
 		// Scratch buffer of the tracked builds of a TLAS, owned by it. A tracked BLAS build takes a range of the frame's
 		// scratch (Frame::acceleration_structure_scratch); batched builds use acceleration_structure_scratch.
@@ -1490,6 +1492,7 @@ private:
 		uint64_t used = 0;
 		uint64_t batch_peak = 0;
 		uint32_t batch_rollovers = 0;
+		RenderingDeviceRTScratchSizer sizer;
 	};
 
 	struct AccelerationStructureBatch {
@@ -1522,6 +1525,8 @@ private:
 	void _acceleration_structure_scratch_reset(AccelerationStructureFrameScratch &r_scratch);
 	void _acceleration_structure_scratch_free(AccelerationStructureFrameScratch &r_scratch);
 	Error _acceleration_structure_scratch_grow(uint64_t p_size);
+	Error _acceleration_structure_scratch_reallocate(uint64_t p_size);
+	void _acceleration_structure_scratch_trim();
 	Error _acceleration_structure_batch_push(RDG::RecordedAccelerationStructureBuild &r_build);
 	Error _blas_batch_add(RID p_blas, bool p_refit);
 	void _blas_remove_tlas_dependencies(AccelerationStructure *p_blas, RID p_blas_id);
@@ -2201,6 +2206,9 @@ private:
 
 	SafeNumeric<uint64_t> texture_memory;
 	SafeNumeric<uint64_t> buffer_memory;
+	SafeNumeric<uint64_t> blas_memory;
+	SafeNumeric<uint64_t> tlas_memory;
+	SafeNumeric<uint64_t> &_acceleration_structure_memory(RDD::AccelerationStructureType p_type) { return p_type == RDD::ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL ? tlas_memory : blas_memory; }
 
 protected:
 	void execute_chained_cmds(uint32_t p_frame, bool p_present_swap_chain,
@@ -2270,7 +2278,9 @@ public:
 	enum MemoryType {
 		MEMORY_TEXTURES,
 		MEMORY_BUFFERS,
-		MEMORY_TOTAL
+		MEMORY_TOTAL,
+		MEMORY_BLAS,
+		MEMORY_TLAS,
 	};
 
 	uint64_t get_memory_usage(MemoryType p_type) const;

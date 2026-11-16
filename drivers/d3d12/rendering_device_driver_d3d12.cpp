@@ -6942,6 +6942,13 @@ uint32_t RenderingDeviceDriverD3D12::acceleration_structure_get_scratch_size_byt
 	return acceleration_structure_info->scratch_buffer_size;
 }
 
+uint64_t RenderingDeviceDriverD3D12::acceleration_structure_get_size_bytes(AccelerationStructureID p_acceleration_structure) {
+	const AccelerationStructureInfo *acceleration_structure_info = (const AccelerationStructureInfo *)p_acceleration_structure.id;
+	ERR_FAIL_NULL_V(acceleration_structure_info, 0);
+	// The ResultDataMaxSizeInBytes of its prebuild info, as Vulkan reports accelerationStructureSize.
+	return acceleration_structure_info->buffer ? ((const BufferInfo *)acceleration_structure_info->buffer.id)->size : 0;
+}
+
 // RDD's opacity micromap values are D3D12's (and Vulkan's).
 static_assert(ENUM_MEMBERS_EQUAL(RDD::OPACITY_MICROMAP_FORMAT_2_STATE, D3D12_RAYTRACING_OPACITY_MICROMAP_FORMAT_OC1_2_STATE));
 static_assert(ENUM_MEMBERS_EQUAL(RDD::OPACITY_MICROMAP_FORMAT_4_STATE, D3D12_RAYTRACING_OPACITY_MICROMAP_FORMAT_OC1_4_STATE));
