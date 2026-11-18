@@ -495,6 +495,13 @@ public:
 			return rt ? rt->depth_test : depth_test;
 		}
 
+		// A surface of the raster transparent pass with this shader is left out of the path tracer's TLAS
+		// (RenderRaytracing::_front_layer_skipped()): unshaded, it has no reflection; drawn without the depth test, it is not
+		// where its triangles are (a volume or decal projected from the depth buffer); or its shader opts out.
+		_FORCE_INLINE_ bool rt_front_layer_skipped() const {
+			return unshaded || front_layer_reflection_disabled || rt_depth_test() != DEPTH_TEST_ENABLED;
+		}
+
 		_FORCE_INLINE_ bool uses_shared_shadow_material() const {
 			bool backface_culling = cull_mode == RSE::CULL_MODE_BACK;
 			return !uses_particle_trails && !writes_modelview_or_projection && !uses_vertex && !uses_position && !uses_discard && !uses_depth_prepass_alpha && !uses_alpha_clip && !uses_alpha_antialiasing && backface_culling && !uses_point_size && !uses_world_coordinates && !billboard.is_camera_dependent() && !wireframe && !uses_z_clip_scale && !stencil_enabled;

@@ -6658,8 +6658,7 @@ void RenderForwardClustered::_geometry_instance_add_surface_with_material(Geomet
 	// bounce rays all see (any-hit alpha test or opacity micromap), with its depth and motion vectors, its edges
 	// antialiased by the camera rays' jitter as every traced edge. In the raster transparent pass it had none of those
 	// and wrote the temporal upscaler's reactive mask (godot3d's ferns and ivy boiled under path tracing + FSR 3).
-	const bool rt_alpha_antialiasing_cut_out = material_alpha_antialiasing != MATERIAL_ALPHA_ANTIALIASING_ALWAYS && p_material->shader_data->rt_uses_alpha_pass_for_alpha_antialiasing_only();
-	if (p_material->shader_data->rt_uses_alpha_pass() && !rt_alpha_antialiasing_cut_out) {
+	if (rt_uses_alpha_pass(p_material->shader_data)) {
 		rt_pass_flags |= GeometryInstanceSurfaceDataCache::FLAG_PASS_ALPHA;
 		if (p_material->shader_data->rt_uses_depth_in_alpha_pass()) {
 			rt_pass_flags |= GeometryInstanceSurfaceDataCache::FLAG_PASS_DEPTH;
@@ -7508,9 +7507,9 @@ void RenderForwardClustered::_rt_precache_surface_material(const GeometryInstanc
 		return;
 	}
 	if ((p_surface->rt_pass_flags & GeometryInstanceSurfaceDataCache::FLAG_PASS_ALPHA) && !(p_surface->rt_pass_flags & GeometryInstanceSurfaceDataCache::FLAG_PT_RASTERIZED)) {
-		// Rasterized by the transparent pass; a mesh's is traced for the front layer's reflections, unless unshaded.
-		// A pathtracing_rasterized surface is traced as an opaque one (for the rays but the camera's).
-		if (base_type == RSE::INSTANCE_MULTIMESH || !p_surface->shader || p_surface->shader->unshaded) {
+		// Rasterized by the transparent pass; a mesh's is traced for the front layer's reflections, unless the TLAS leaves
+		// it out (rt_never_traced()). A pathtracing_rasterized surface is traced as an opaque one (for the rays but the camera's).
+		if (base_type == RSE::INSTANCE_MULTIMESH || !p_surface->shader || p_surface->shader->rt_front_layer_skipped()) {
 			return;
 		}
 	}
@@ -7870,7 +7869,7 @@ void RenderForwardClustered::mesh_generate_pipelines(RID p_mesh, bool p_backgrou
 		surface.can_use_lightmap = mesh_storage->mesh_surface_get_format(mesh_surface) & RSE::ARRAY_FORMAT_TEX_UV2;
 		// As _geometry_instance_add_surface_with_material() classifies the surface for the path tracer, from its material
 		// alone (an instance's own pathtracing_rasterized is known only with the instance).
-		const bool rt_alpha = shader->rt_uses_alpha_pass() && !(material_alpha_antialiasing != MATERIAL_ALPHA_ANTIALIASING_ALWAYS && shader->rt_uses_alpha_pass_for_alpha_antialiasing_only());
+		const bool rt_alpha = rt_uses_alpha_pass(shader);
 		surface.pt_rasterized = shader->pathtracing_rasterized && !rt_alpha;
 		surface.pt_rr_transparency_layer = rt_alpha && _rr_transparency_layer_shader(shader, false);
 		_mesh_compile_pipelines_for_surface(surface, global_pipeline_data_required, RSE::PIPELINE_SOURCE_MESH, &pipeline_pairs);

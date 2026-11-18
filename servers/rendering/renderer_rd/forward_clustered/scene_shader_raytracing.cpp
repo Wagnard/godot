@@ -1726,6 +1726,12 @@ void SceneShaderRaytracing::get_material_bake_programs(RID p_material, bool p_si
 		valid = _preprocess_shader(p_material, true, entry) && !entry.intersection_code.is_empty();
 	}
 	if (!valid) {
+		// A triangle hit group no ray can meet is not baked (the run time never precompiles it either).
+		const SceneShaderForwardClustered::MaterialData *material_data = static_cast<const SceneShaderForwardClustered::MaterialData *>(material_storage->material_get_data(p_material, RendererRD::MaterialStorage::SHADER_TYPE_3D));
+		const RenderForwardClustered *renderer = RenderForwardClustered::get_singleton();
+		if (renderer && material_data->shader_data && renderer->rt_never_traced(material_data->shader_data)) {
+			return;
+		}
 		entry = CustomShaderEntry();
 		valid = _preprocess_shader(p_material, false, entry) && !(entry.fragment_code.is_empty() && entry.vertex_code.is_empty());
 	}

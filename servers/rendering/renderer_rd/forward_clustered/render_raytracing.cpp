@@ -1641,8 +1641,7 @@ bool RenderRaytracing::_transparent_shadow_blend(const void *p_surf) {
 bool RenderRaytracing::_front_layer_skipped(const void *p_surf) {
 	const RenderForwardClustered::GeometryInstanceSurfaceDataCache *surf =
 			static_cast<const RenderForwardClustered::GeometryInstanceSurfaceDataCache *>(p_surf);
-	return !surf->shader || surf->shader->unshaded || surf->shader->front_layer_reflection_disabled ||
-			surf->shader->rt_depth_test() != SceneShaderForwardClustered::ShaderData::DEPTH_TEST_ENABLED;
+	return !surf->shader || surf->shader->rt_front_layer_skipped();
 }
 
 uint32_t RenderRaytracing::get_transparency_peel_layers() {

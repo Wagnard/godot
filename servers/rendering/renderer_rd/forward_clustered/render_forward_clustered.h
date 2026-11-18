@@ -1673,6 +1673,20 @@ protected:
 public:
 	static RenderForwardClustered *get_singleton() { return singleton; }
 
+	// The path tracer draws this shader's surfaces with the raster transparent pass (rt_pass_flags' FLAG_PASS_ALPHA, as a
+	// material classifies them): unless the setting is "Always", one that its alpha antialiasing alone makes transparent
+	// is traced as a cut-out instead (rendering/anti_aliasing/quality/material_alpha_antialiasing).
+	bool rt_uses_alpha_pass(const SceneShaderForwardClustered::ShaderData *p_shader) const {
+		return p_shader->rt_uses_alpha_pass() && !(material_alpha_antialiasing != MATERIAL_ALPHA_ANTIALIASING_ALWAYS && p_shader->rt_uses_alpha_pass_for_alpha_antialiasing_only());
+	}
+	// No ray of the path tracer ever meets a triangle surface of this shader: a transparent one the TLAS leaves out
+	// (RenderRaytracing::_front_layer_skipped()). Its hit group is neither precompiled nor baked at export: a 3D texture
+	// in godot3d's spell volumes made every such material warn and bake for nothing. pathtracing_rasterized and
+	// particle cards apply to opaque surfaces only, so the material alone decides it.
+	bool rt_never_traced(const SceneShaderForwardClustered::ShaderData *p_shader) const {
+		return rt_uses_alpha_pass(p_shader) && p_shader->rt_front_layer_skipped();
+	}
+
 	// True when FRONT_FACING follows the mesh winding on mirrored instances instead of the screen winding.
 	bool is_front_facing_preserved_when_mirrored() const { return preserve_front_facing_when_mirrored; }
 
