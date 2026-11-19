@@ -155,8 +155,11 @@ private:
 	void _apply_node_render_modes(HashMap<String, int> &r_modes, HashSet<StringName> &r_flags) const;
 
 protected:
-	virtual void _update_shader() const override;
 	static void _bind_methods();
+
+	// Necessary for the debugger to forward changes to a running project.
+	virtual void _resource_path_changed() override;
+	virtual void _update_shader() const override;
 
 	bool _set(const StringName &p_name, const Variant &p_value);
 	bool _get(const StringName &p_name, Variant &r_ret) const;

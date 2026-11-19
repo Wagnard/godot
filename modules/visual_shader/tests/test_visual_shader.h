@@ -1,5 +1,5 @@
 /**************************************************************************/
-/*  test_visual_shader.cpp                                                */
+/*  test_visual_shader.h                                                  */
 /**************************************************************************/
 /*                         This file is part of:                          */
 /*                             GODOT ENGINE                               */
@@ -28,12 +28,12 @@
 /* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
 /**************************************************************************/
 
-#include "tests/test_macros.h"
-
-TEST_FORCE_LINK(test_visual_shader)
+#pragma once
 
 #include "../visual_shader.h"
 #include "../vs_nodes/visual_shader_nodes.h"
+
+#include "tests/test_macros.h"
 
 namespace TestVisualShader {
 

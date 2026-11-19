@@ -1377,9 +1377,12 @@ void ParticlesStorage::_particles_update_buffers(Particles *particles) {
 	bool buffers_changed = false;
 
 	if (userdata_count != particles->userdata_count) {
-		// Mismatch userdata, re-create all buffers.
-		_particles_free_data(particles);
-		buffers_changed = true;
+		// Mismatch userdata, re-create the particle buffer only: the instance buffer (and the transforms uniform set the
+		// geometry instances hold) does not depend on it, and the emission buffer must survive (upstream 34df259b4c).
+		if (particles->particle_buffer.is_valid()) {
+			RD::get_singleton()->free_rid(particles->particle_buffer);
+			particles->particle_buffer = RID();
+		}
 	} else if (enable_motion_vectors) {
 		// Only motion vectors are required, release the transforms buffer and uniform set.
 		if (particles->particle_instance_buffer.is_valid()) {
@@ -1417,23 +1420,25 @@ void ParticlesStorage::_particles_update_buffers(Particles *particles) {
 			particles->restart_request = true;
 		}
 
-		PackedByteArray data;
-		uint32_t particle_instance_buffer_size = total_amount * (xform_size + 1 + 1) * sizeof(float) * 4;
-		// Says whether this buffer has room for the previous frame's instances: update_particles() moves the current
-		// offset to the second half only then.
-		particles->instance_motion_vectors_enabled = uses_motion_vectors;
-		if (uses_motion_vectors) {
-			particle_instance_buffer_size *= 2;
-		}
+		if (particles->particle_instance_buffer.is_null()) {
+			PackedByteArray data;
+			uint32_t particle_instance_buffer_size = total_amount * (xform_size + 1 + 1) * sizeof(float) * 4;
+			// Says whether this buffer has room for the previous frame's instances: update_particles() moves the current
+			// offset to the second half only then.
+			particles->instance_motion_vectors_enabled = uses_motion_vectors;
+			if (uses_motion_vectors) {
+				particle_instance_buffer_size *= 2;
+			}
 
-		data.resize_initialized(particle_instance_buffer_size);
+			data.resize_initialized(particle_instance_buffer_size);
 
-		// Ray tracing reads per-instance custom data through the buffer device address.
-		BitField<RD::BufferCreationBits> instance_flags = 0;
-		if (RD::get_singleton()->has_feature(RD::SUPPORTS_RAYTRACING_PIPELINE) || RD::get_singleton()->has_feature(RD::SUPPORTS_RAY_QUERY)) {
-			instance_flags.set_flag(RD::BUFFER_CREATION_DEVICE_ADDRESS_BIT);
+			// Ray tracing reads per-instance custom data through the buffer device address.
+			BitField<RD::BufferCreationBits> instance_flags = 0;
+			if (RD::get_singleton()->has_feature(RD::SUPPORTS_RAYTRACING_PIPELINE) || RD::get_singleton()->has_feature(RD::SUPPORTS_RAY_QUERY)) {
+				instance_flags.set_flag(RD::BUFFER_CREATION_DEVICE_ADDRESS_BIT);
+			}
+			particles->particle_instance_buffer = RD::get_singleton()->storage_buffer_create(particle_instance_buffer_size, data, 0, instance_flags);
 		}
-		particles->particle_instance_buffer = RD::get_singleton()->storage_buffer_create(particle_instance_buffer_size, data, 0, instance_flags);
 
 		{
 			Vector<RD::Uniform> uniforms;

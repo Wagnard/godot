@@ -280,7 +280,7 @@ functionality to IPv4 only and no DTLS. We recommend against it.
 ## etcpak
 
 - Upstream: https://github.com/wolfpld/etcpak
-- Version: 2.0 (a43d6925bee49277945cf3e311e4a022ae0c2073, 2024)
+- Version: 2.1 (7f15da4739cc5f8562311bdbb800436986d268ca, 2026)
 - License: BSD-3-Clause
 
 Files extracted from upstream source:
@@ -861,7 +861,7 @@ Collection of single-file libraries used in Godot components.
 
 - `bcdec.h`
   * Upstream: https://github.com/iOrange/bcdec
-  * Version: git (3b29f8f44466c7d59852670f82f53905cf627d48, 2024)
+  * Version: git (80859ed3b7afb1c527a2a99d70c61457bea72d0c, 2026)
   * License: MIT or Unlicense
 - `cubemap_coeffs.h`
   * Upstream: https://research.activision.com/publications/archives/fast-filtering-of-reflection-probes
@@ -1104,7 +1104,7 @@ proposed by these libraries and better integrate them with Godot.
 ## sdl
 
 - Upstream: https://github.com/libsdl-org/SDL
-- Version: 3.4.16 (fa2c02bb6e21974a89ea9824bc53c9932abe5f9c, 2026)
+- Version: 3.4.20 (f00dc919ca35b9756316e86c4777392de442f9b2, 2026)
 - License: Zlib
 - Vendored: hidapi 0.14.0, license BSD-3-Clause
 
