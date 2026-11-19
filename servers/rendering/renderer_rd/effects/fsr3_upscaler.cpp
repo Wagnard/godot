@@ -36,7 +36,10 @@
 #ifdef D3D12_ENABLED
 #include "drivers/d3d12/fsr_upscaler_d3d12.h"
 #endif
-#ifdef VULKAN_ENABLED
+// AMD ships the FidelityFX DLLs for Windows only, so the Vulkan driver's FSR upscaler is called on Windows only (as the
+// D3D12 one): elsewhere the servers library must not reference the drivers one (GNU ld links drivers before servers).
+#if defined(VULKAN_ENABLED) && defined(WINDOWS_ENABLED)
+#define FSR3_VULKAN_ENABLED
 #include "drivers/vulkan/fsr_upscaler_vulkan.h"
 #endif
 
@@ -56,7 +59,7 @@ FSR3UpscalerContext::~FSR3UpscalerContext() {
 		// record their dispatches first, then every frame in flight completes (as DLSSContextInner does).
 		RD::get_singleton()->wait_for_frame_threads();
 		RD::get_singleton()->_flush_and_stall_for_all_frames();
-#ifdef VULKAN_ENABLED
+#ifdef FSR3_VULKAN_ENABLED
 		if (vulkan) {
 			FSRUpscalerVulkan::destroy_context(ffx_context);
 		}
@@ -105,7 +108,7 @@ FSR3UpscalerContext *FSR3UpscalerEffect::create_context(Size2i p_internal_size, 
 	// Godot upscales before tonemapping, in linear HDR, with a reversed-Z depth and a finite far plane. AMD recommends its
 	// input checker in development builds only: here, with --gpu-validation.
 	const bool debug_checking = Engine::get_singleton()->is_validation_layers_enabled();
-#ifdef VULKAN_ENABLED
+#ifdef FSR3_VULKAN_ENABLED
 	if (vulkan) {
 		FSRUpscalerVulkan::ContextParams params;
 		params.device = (void *)rd->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_LOGICAL_DEVICE);
@@ -272,7 +275,7 @@ static void fsr3_fill_dispatch(T &r_dispatch, const FSR3UpscalerEffect::Paramete
 	r_dispatch.fov_vertical_radians = Math::deg_to_rad(p.fovy);
 }
 
-#ifdef VULKAN_ENABLED
+#ifdef FSR3_VULKAN_ENABLED
 static FSRUpscalerVulkan::Texture fsr3_vulkan_texture(const FSR3UpscalerEffect::ResolvedTexture &p_texture) {
 	FSRUpscalerVulkan::Texture texture;
 	texture.image = p_texture.image;
@@ -289,7 +292,7 @@ static FSRUpscalerVulkan::Texture fsr3_vulkan_texture(const FSR3UpscalerEffect::
 void FSR3UpscalerEffect::_upscale_graph_callback(RenderingDeviceDriver *p_driver, RDD::CommandBufferID p_command_buffer, void *p_userdata) {
 	CallbackPayload *payload = (CallbackPayload *)p_userdata;
 	void *native_command_buffer = p_driver->command_buffer_get_native_handle(p_command_buffer);
-#ifdef VULKAN_ENABLED
+#ifdef FSR3_VULKAN_ENABLED
 	if (payload->vulkan) {
 		FSRUpscalerVulkan::DispatchParams dispatch;
 		dispatch.native_command_buffer = native_command_buffer;

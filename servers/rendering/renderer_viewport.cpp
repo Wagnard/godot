@@ -58,7 +58,9 @@
 #ifdef D3D12_ENABLED
 #include "drivers/d3d12/fsr_upscaler_d3d12.h"
 #endif
-#ifdef VULKAN_ENABLED
+// The Vulkan driver's FSR upscaler is called on Windows only, where AMD ships its DLLs (see fsr3_upscaler.cpp).
+#if defined(VULKAN_ENABLED) && defined(WINDOWS_ENABLED)
+#define FSR3_VULKAN_ENABLED
 #include "drivers/vulkan/fsr_upscaler_vulkan.h"
 #endif
 
@@ -75,7 +77,7 @@ static bool _fsr3_upscaler_supported() {
 		return FSRUpscalerD3D12::is_available((void *)rd->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_LOGICAL_DEVICE));
 	}
 #endif
-#ifdef VULKAN_ENABLED
+#ifdef FSR3_VULKAN_ENABLED
 	if (api == "vulkan") {
 		return FSRUpscalerVulkan::is_available((void *)rd->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_LOGICAL_DEVICE), (void *)rd->get_driver_resource(RD::DriverResource::DRIVER_RESOURCE_PHYSICAL_DEVICE));
 	}

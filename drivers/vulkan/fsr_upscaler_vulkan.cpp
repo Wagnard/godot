@@ -270,23 +270,5 @@ bool FSRUpscalerVulkan::dispatch(void *p_context, const DispatchParams &p_params
 	return true;
 }
 
-#else // WINDOWS_ENABLED
-
-// AMD ships the FidelityFX DLLs for Windows only.
-
-bool FSRUpscalerVulkan::is_available(void *p_device, void *p_physical_device) {
-	return false;
-}
-
-void *FSRUpscalerVulkan::create_context(const ContextParams &p_params) {
-	return nullptr;
-}
-
-void FSRUpscalerVulkan::destroy_context(void *p_context) {
-}
-
-bool FSRUpscalerVulkan::dispatch(void *p_context, const DispatchParams &p_params) {
-	return false;
-}
-
+// AMD ships the FidelityFX DLLs for Windows only: elsewhere the renderer never calls this class (FSR3_VULKAN_ENABLED).
 #endif // WINDOWS_ENABLED
