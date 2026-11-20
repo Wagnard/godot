@@ -630,6 +630,8 @@ struct RTMaterialData {
 	RID normal_texture_rd;
 	RID orm_texture_rd;
 	RID emission_texture_rd;
+	// The RD textures the material put in the bindless tables: one destroyed makes process_material() rebuild it.
+	LocalVector<RID> bindless_textures;
 };
 
 struct RTCacheEntry {

@@ -3224,6 +3224,18 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 	bool needs_refresh = !entry->ptr ||
 			entry->cached_rid_version != mat_version ||
 			entry->cached_counter != p_material_invalidation_counter;
+	// A texture of the material was destroyed (texture streaming replaces a texture's RD texture at each mip change; a
+	// resource reload does too): BindlessBlock::_scrub_dead_textures() frees its slot and gives it to the next texture
+	// added, so the material would sample another one (a normal map as albedo). Rebuilt now, before this frame's table:
+	// the material's invalidation counter is not enough, it advances only when the material's raster uniform set dies.
+	if (!needs_refresh) {
+		for (const RID &texture : entry->ptr->bindless_textures) {
+			if (!RD::get_singleton()->texture_is_valid(texture)) {
+				needs_refresh = true;
+				break;
+			}
+		}
+	}
 
 	if (!needs_refresh) {
 		entry->last_used_frame = current_frame;
@@ -3249,6 +3261,13 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 
 	RTMaterialData *mat_data = entry->ptr;
 	RT_MaterialData &mat = mat_data->data;
+
+	// Every texture the material puts in a bindless table, checked by the cache hit above.
+	mat_data->bindless_textures.clear();
+	auto bindless_add = [mat_data](BindlessBlock *p_table, RID p_texture) -> uint32_t {
+		mat_data->bindless_textures.push_back(p_texture);
+		return p_table->add_texture(p_texture);
+	};
 
 	// Initialize defaults
 	mat.albedo_color[0] = 1.0f;
@@ -3315,12 +3334,12 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 	// Albedo is a color texture - needs sRGB->linear conversion
 	RID albedo_rd = get_material_texture("texture_albedo", true);
 	if (albedo_rd.is_valid()) {
-		mat.albedo_texture_idx = bindless_block->add_texture(albedo_rd);
+		mat.albedo_texture_idx = bindless_add(bindless_block, albedo_rd);
 	}
 
 	RID normal_rd = get_material_texture("texture_normal");
 	if (normal_rd.is_valid()) {
-		mat.normal_texture_idx = bindless_block->add_texture(normal_rd);
+		mat.normal_texture_idx = bindless_add(bindless_block, normal_rd);
 		mat.flags |= RT_MAT_FLAG_HAS_NORMAL_MAP;
 
 		Variant normal_scale_var = material_storage->material_get_param(p_material_rid, "normal_scale");
@@ -3334,17 +3353,17 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 	// of their hints). orm_texture_idx holds the roughness texture then.
 	RID orm_rd = get_material_texture("texture_orm");
 	if (orm_rd.is_valid()) {
-		mat.orm_texture_idx = bindless_block->add_texture(orm_rd);
+		mat.orm_texture_idx = bindless_add(bindless_block, orm_rd);
 		mat.metallic_texture_idx = mat.orm_texture_idx;
 		mat.flags |= (RT_TEXTURE_CHANNEL_GREEN << RT_MAT_ROUGHNESS_CHANNEL_SHIFT) | (RT_TEXTURE_CHANNEL_BLUE << RT_MAT_METALLIC_CHANNEL_SHIFT);
 	} else {
 		RID roughness_rd = get_material_texture("texture_roughness");
 		if (roughness_rd.is_valid()) {
-			mat.orm_texture_idx = bindless_block->add_texture(roughness_rd);
+			mat.orm_texture_idx = bindless_add(bindless_block, roughness_rd);
 		}
 		RID metallic_rd = get_material_texture("texture_metallic");
 		if (metallic_rd.is_valid()) {
-			mat.metallic_texture_idx = bindless_block->add_texture(metallic_rd);
+			mat.metallic_texture_idx = bindless_add(bindless_block, metallic_rd);
 		}
 		// The roughness channel is a constant of the generated code, the metallic one a parameter (a channel mask).
 		uint32_t roughness_channel = RT_TEXTURE_CHANNEL_RED;
@@ -3382,7 +3401,7 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 	// Emission is a color texture - needs sRGB->linear conversion
 	RID emission_rd = get_material_texture("texture_emission", true);
 	if (emission_rd.is_valid()) {
-		mat.emission_texture_idx = bindless_block->add_texture(emission_rd);
+		mat.emission_texture_idx = bindless_add(bindless_block, emission_rd);
 		mat.flags |= RT_MAT_FLAG_HAS_EMISSION_TEX;
 		// Set sensible defaults for emission when texture is present
 		mat.emission_color[0] = 1.0f;
@@ -3457,7 +3476,7 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 					if (tex_rid.is_valid()) {
 						RID rd_tex = ts->texture_get_rd_texture(tex_rid, tui.use_color);
 						if (rd_tex.is_valid()) {
-							bindless_idx = table->add_texture(rd_tex);
+							bindless_idx = bindless_add(table, rd_tex);
 						}
 					}
 				} else {
@@ -3467,7 +3486,7 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 						if (tex_rid.is_valid()) {
 							RID rd_tex = ts->texture_get_rd_texture(tex_rid, tui.use_color);
 							if (rd_tex.is_valid()) {
-								bindless_idx = table->add_texture(rd_tex);
+								bindless_idx = bindless_add(table, rd_tex);
 							}
 						}
 					}
@@ -3496,7 +3515,7 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 					}
 					RID default_tex = ts->texture_rd_get_default(default_type);
 					if (default_tex.is_valid()) {
-						bindless_idx = table->add_texture(default_tex);
+						bindless_idx = bindless_add(table, default_tex);
 					}
 				}
 
@@ -3619,7 +3638,7 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 		if (code.contains("AO = dot(texture(texture_ambient_occlusion, base_uv)") || code.contains("AO = dot(triplanar_texture(texture_ambient_occlusion, uv1_power_normal")) {
 			const RID ao_rd = get_material_texture("texture_ambient_occlusion");
 			if (ao_rd.is_valid()) {
-				mat.ao_texture_idx = bindless_block->add_texture(ao_rd);
+				mat.ao_texture_idx = bindless_add(bindless_block, ao_rd);
 				mat.flags |= RT_MAT_FLAG_AO_TEXTURE;
 				const Variant channel_var = material_storage->material_get_param(p_material_rid, "ao_texture_channel");
 				Vector4 channel_mask(1, 0, 0, 0);
@@ -3664,7 +3683,7 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 			}
 			const RID backlight_rd = get_material_texture("texture_backlight", true);
 			if (backlight_rd.is_valid()) {
-				mat.backlight_texture_idx = bindless_block->add_texture(backlight_rd);
+				mat.backlight_texture_idx = bindless_add(bindless_block, backlight_rd);
 				mat.flags |= RT_MAT_FLAG_HAS_BACKLIGHT_TEX;
 			}
 		}
