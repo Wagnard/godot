@@ -583,6 +583,15 @@ public:
 		return material->rt_invalidation_counter;
 	}
 
+	// The path tracer found a texture of the material destroyed (RenderRaytracing::process_material()): every RT cache keyed
+	// by the counter (material data, opacity micromaps, displaced geometry) rebuilds, as when its raster uniform set dies.
+	void material_rt_invalidate(RID p_material) {
+		Material *material = material_owner.get_or_null(p_material);
+		if (material) {
+			_material_rt_invalidate(material);
+		}
+	}
+
 	// Advances whenever any material's rt_invalidation_counter changes.
 	uint64_t material_get_rt_version() const { return material_rt_version; }
 

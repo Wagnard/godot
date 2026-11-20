@@ -3228,10 +3228,15 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 	// resource reload does too): BindlessBlock::_scrub_dead_textures() frees its slot and gives it to the next texture
 	// added, so the material would sample another one (a normal map as albedo). Rebuilt now, before this frame's table:
 	// the material's invalidation counter is not enough, it advances only when the material's raster uniform set dies.
+	// The material's counter is advanced too, so that the other caches keyed by it (its opacity micromaps, baked from the
+	// alpha texture's resident level; displaced geometry) rebuild as well: the rebuilt data is cached with the new value.
 	if (!needs_refresh) {
 		for (const RID &texture : entry->ptr->bindless_textures) {
 			if (!RD::get_singleton()->texture_is_valid(texture)) {
 				needs_refresh = true;
+				RendererRD::MaterialStorage *material_storage_rd = RendererRD::MaterialStorage::get_singleton();
+				material_storage_rd->material_rt_invalidate(p_material_rid);
+				p_material_invalidation_counter = material_storage_rd->material_get_rt_invalidation_counter(p_material_rid);
 				break;
 			}
 		}
@@ -3264,8 +3269,12 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 
 	// Every texture the material puts in a bindless table, checked by the cache hit above.
 	mat_data->bindless_textures.clear();
+	// Only valid ones: a texture already dead here is replaced by the default one, and recorded it would rebuild the
+	// material (and its micromaps) every frame.
 	auto bindless_add = [mat_data](BindlessBlock *p_table, RID p_texture) -> uint32_t {
-		mat_data->bindless_textures.push_back(p_texture);
+		if (p_texture.is_valid() && RD::get_singleton()->texture_is_valid(p_texture)) {
+			mat_data->bindless_textures.push_back(p_texture);
+		}
 		return p_table->add_texture(p_texture);
 	};
 
