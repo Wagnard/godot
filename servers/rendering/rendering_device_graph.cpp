@@ -432,6 +432,19 @@ void RenderingDeviceGraph::_add_command_to_graph(ResourceTracker **p_resource_tr
 		// samples put right after it. Independent work overlapping the build left a faulty TLAS on NVIDIA.
 		_add_adjacent_command(command_tlas_build_index, p_command_index, r_command);
 		r_command->memory_barrier.src_access = r_command->memory_barrier.src_access | RDD::BARRIER_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT;
+		// A command that reads an acceleration structure (a ray tracing list, a draw or compute list with ray queries, a
+		// TLAS build reading BLASes) must see the build's writes: the barrier names that read as its destination access,
+		// as the barrier NVIDIA's and Khronos's samples put after a build (Vulkan: ACCELERATION_STRUCTURE_WRITE ->
+		// ACCELERATION_STRUCTURE_READ). Without it D3D12 turned the destination into D3D12_BARRIER_ACCESS_NO_ACCESS, which
+		// the Enhanced Barriers spec defines as "the data is no longer needed": Intel's D3D12 driver then traced the
+		// TLAS before the build's writes were visible (whole traces missing the scene, page faults in DispatchRays).
+		bool reads_acceleration_structure = r_command->type == RecordedCommand::TYPE_RAYTRACING_LIST;
+		for (uint32_t i = 0; i < p_resource_count && !reads_acceleration_structure; i++) {
+			reads_acceleration_structure = p_resource_usages[i] == RESOURCE_USAGE_ACCELERATION_STRUCTURE_READ || p_resource_usages[i] == RESOURCE_USAGE_ACCELERATION_STRUCTURE_READ_WRITE;
+		}
+		if (reads_acceleration_structure) {
+			r_command->memory_barrier.dst_access = r_command->memory_barrier.dst_access | RDD::BARRIER_ACCESS_ACCELERATION_STRUCTURE_READ_BIT;
+		}
 	}
 
 	if (r_command->type == RecordedCommand::TYPE_TOP_LEVEL_ACCELERATION_STRUCTURE_BUILD) {

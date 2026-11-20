@@ -2906,7 +2906,7 @@ void RenderingDeviceDriverD3D12::command_pipeline_barrier(CommandBufferID p_cmd_
 		return;
 	}
 
-	if (p_memory_barriers.size() == 0 && p_buffer_barriers.size() == 0 && p_texture_barriers.size() == 0) {
+	if (p_memory_barriers.size() == 0 && p_buffer_barriers.size() == 0 && p_texture_barriers.size() == 0 && p_acceleration_structure_barriers.size() == 0) {
 		// At least one barrier must be present in the arguments.
 		return;
 	}
@@ -2922,11 +2922,36 @@ void RenderingDeviceDriverD3D12::command_pipeline_barrier(CommandBufferID p_cmd_
 	texture_barriers.clear();
 
 	D3D12_GLOBAL_BARRIER global_barrier = {};
+	bool after_acceleration_structure_write = false;
 	for (uint32_t i = 0; i < p_memory_barriers.size(); i++) {
 		const MemoryAccessBarrier &memory_barrier = p_memory_barriers[i];
 		_rd_stages_and_access_to_d3d12(p_src_stages, RDD::TEXTURE_LAYOUT_MAX, memory_barrier.src_access, global_barrier.SyncBefore, global_barrier.AccessBefore);
 		_rd_stages_and_access_to_d3d12(p_dst_stages, RDD::TEXTURE_LAYOUT_MAX, memory_barrier.dst_access, global_barrier.SyncAfter, global_barrier.AccessAfter);
 		_push_split_global_barrier(global_barriers, global_barrier);
+		after_acceleration_structure_write = after_acceleration_structure_write || memory_barrier.src_access.has_flag(RDD::BARRIER_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT);
+	}
+	for (uint32_t i = 0; i < p_acceleration_structure_barriers.size(); i++) {
+		after_acceleration_structure_write = after_acceleration_structure_write || p_acceleration_structure_barriers[i].src_access.has_flag(RDD::BARRIER_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT);
+	}
+	if (after_acceleration_structure_write && cmd_buf_info->list_type != D3D12_COMMAND_LIST_TYPE_COPY) {
+		// After an acceleration structure build (BLAS, TLAS, refit, opacity micromap), also the barrier the DXR samples put
+		// there, a UAV barrier, in the enhanced form the Enhanced Barriers spec gives as its equivalent ("UAV Barriers":
+		// SyncBefore = SyncAfter = ALL_SHADING | BUILD | COPY | EMIT_POSTBUILD_INFO, AccessBefore = AccessAfter =
+		// UNORDERED_ACCESS | RTAS_WRITE | RTAS_READ). The barrier converted above (e.g. BUILD -> RAYTRACING, RTAS_WRITE ->
+		// RTAS_READ) is valid but Intel's D3D12 driver did not honor it (Arc B580, 32.0.101.9150 and .9175): the first
+		// DispatchRays after a TLAS build in the same command list traced the unbuilt TLAS, even after a SYNC_ALL / COMMON
+		// global barrier, and path tracing showed white dots and hung in DispatchRays; this form and a legacy UAV barrier
+		// work (render-benches/raytcurrenttest, ptsnowtest; INTEL-D3D12-AS-BUILD-BARRIER-WA.md). Every vendor gets it.
+		const D3D12_BARRIER_SYNC sync = D3D12_BARRIER_SYNC_ALL_SHADING | D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE |
+				D3D12_BARRIER_SYNC_COPY_RAYTRACING_ACCELERATION_STRUCTURE | D3D12_BARRIER_SYNC_EMIT_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO;
+		const D3D12_BARRIER_ACCESS access = D3D12_BARRIER_ACCESS_UNORDERED_ACCESS | D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_WRITE |
+				D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_READ;
+		D3D12_GLOBAL_BARRIER uav_equivalent = {};
+		uav_equivalent.SyncBefore = sync;
+		uav_equivalent.SyncAfter = sync;
+		uav_equivalent.AccessBefore = access;
+		uav_equivalent.AccessAfter = access;
+		global_barriers.push_back(uav_equivalent);
 	}
 
 	const bool copy_list = cmd_buf_info->list_type == D3D12_COMMAND_LIST_TYPE_COPY;
@@ -7442,6 +7467,13 @@ void RenderingDeviceDriverD3D12::command_build_tlas(CommandBufferID p_cmd_buffer
 	}
 
 	cmd_buffer_info->cmd_list_4->BuildRaytracingAccelerationStructure(&acceleration_structure_info->build_desc, 0, nullptr);
+
+	if (!barrier_capabilities.enhanced_barriers_supported) {
+		// Legacy barriers: the DXR samples' UAV barrier on the TLAS itself (a NULL UAV barrier did not order the next
+		// DispatchRays on Intel; INTEL-D3D12-AS-BUILD-BARRIER-WA.md). Enhanced barriers get theirs in command_pipeline_barrier().
+		const D3D12_RESOURCE_BARRIER uav_barrier = CD3DX12_RESOURCE_BARRIER::UAV(((const BufferInfo *)acceleration_structure_info->buffer.id)->resource);
+		cmd_buffer_info->cmd_list->ResourceBarrier(1, &uav_barrier);
+	}
 }
 
 void RenderingDeviceDriverD3D12::command_bind_raytracing_pipeline(CommandBufferID p_cmd_buffer, RaytracingPipelineID p_pipeline) {
