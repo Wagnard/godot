@@ -2874,6 +2874,14 @@ RDD::TextureID RenderingDeviceDriverVulkan::texture_create(const TextureFormat &
 		uint32_t mem_type_index = 0;
 		vmaFindMemoryTypeIndexForImageInfo(allocator, &create_info, &alloc_create_info, &mem_type_index);
 		alloc_create_info.pool = _find_or_create_small_allocs_pool(mem_type_index);
+	} else if (!(p_format.usage_bits & (TEXTURE_USAGE_TRANSIENT_BIT | TEXTURE_USAGE_CPU_READ_BIT))) {
+		// VMA shares 256 MB blocks between textures and releases a block only once it is empty
+		// (RenderingDeviceDriver::dedicated_texture_min_size()). Every dedicated allocation counts against
+		// maxMemoryAllocationCount (4096 on Windows drivers): past half of it, textures are pooled again.
+		const uint64_t dedicated_min_size = dedicated_texture_min_size();
+		if (dedicated_min_size > 0 && image_size >= dedicated_min_size && dedicated_texture_count.get() < physical_device_properties.limits.maxMemoryAllocationCount / 2) {
+			alloc_create_info.flags |= VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
+		}
 	}
 
 	// Create.
@@ -2893,6 +2901,9 @@ RDD::TextureID RenderingDeviceDriverVulkan::texture_create(const TextureFormat &
 		ERR_FAIL_COND_V_MSG(err, TextureID(), vformat("Couldn't allocate memory for Vulkan image (VkResult error %d).", err));
 		err = vmaBindImageMemory2(allocator, allocation, 0, vk_image, nullptr);
 		ERR_FAIL_COND_V_MSG(err, TextureID(), vformat("Couldn't bind memory to Vulkan image (VkResult error %d).", err));
+	}
+	if (_is_dedicated_allocation(allocation)) {
+		dedicated_texture_count.increment();
 	}
 
 	// Create view.
@@ -3110,6 +3121,9 @@ void RenderingDeviceDriverVulkan::texture_free(TextureID p_texture) {
 	TextureInfo *tex_info = (TextureInfo *)p_texture.id;
 	vkDestroyImageView(vk_device, tex_info->vk_view, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_IMAGE_VIEW));
 	if (tex_info->allocation.handle) {
+		if (_is_dedicated_allocation(tex_info->allocation.handle)) {
+			dedicated_texture_count.decrement();
+		}
 		if (!Engine::get_singleton()->is_extra_gpu_memory_tracking_enabled()) {
 			vmaDestroyImage(allocator, tex_info->vk_view_create_info.image, tex_info->allocation.handle);
 		} else {
@@ -8679,6 +8693,12 @@ uint64_t RenderingDeviceDriverVulkan::get_total_memory_used() {
 	}
 
 	return total_memory_used;
+}
+
+bool RenderingDeviceDriverVulkan::_is_dedicated_allocation(VmaAllocation p_allocation) const {
+	VmaAllocationInfo2 info = {};
+	vmaGetAllocationInfo2(allocator, p_allocation, &info);
+	return info.dedicatedMemory;
 }
 
 uint64_t RenderingDeviceDriverVulkan::get_total_memory_reserved() {

@@ -284,6 +284,10 @@ private:
 	HashMap<uint32_t, VmaPool> small_allocs_pools;
 
 	VmaPool _find_or_create_small_allocs_pool(uint32_t p_mem_type_index);
+	// Textures with a VkDeviceMemory of their own (RenderingDeviceDriver::dedicated_texture_min_size(), or the driver's
+	// VkMemoryDedicatedRequirements): each counts against maxMemoryAllocationCount.
+	SafeNumeric<uint32_t> dedicated_texture_count;
+	bool _is_dedicated_allocation(VmaAllocation p_allocation) const;
 
 private:
 #if defined(DEBUG_ENABLED) || defined(DEV_ENABLED)

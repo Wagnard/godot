@@ -1051,6 +1051,9 @@ public:
 	// Device memory the driver's allocator holds: its blocks and dedicated allocations, freed allocations inside a block
 	// still counted. A driver without such a pool reports what it uses.
 	virtual uint64_t get_total_memory_reserved() { return get_total_memory_used(); }
+	// Textures at least this large (bytes) get an allocation of their own (a D3D12 committed resource, a Vulkan dedicated
+	// allocation) instead of a place in the allocator's shared blocks; 0 disables it. GODOT_DEDICATED_TEXTURE_MB.
+	static uint64_t dedicated_texture_min_size();
 	virtual uint64_t get_lazily_memory_used() = 0;
 	// Occupancy of the driver's shader-visible descriptor heap, when it has a fixed size. Empty otherwise.
 	virtual String get_descriptor_report() { return String(); }

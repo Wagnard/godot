@@ -1723,6 +1723,12 @@ RDD::TextureID RenderingDeviceDriverD3D12::texture_create(const TextureFormat &p
 	if ((resource_desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)) {
 		allocation_desc.ExtraHeapFlags |= D3D12_HEAP_FLAG_ALLOW_SHADER_ATOMICS;
 	}
+	// D3D12MA only commits resources above half its 64 MB block: smaller textures share heaps, and a heap is released only
+	// when every resource in it is gone (RenderingDeviceDriver::dedicated_texture_min_size()).
+	const uint64_t dedicated_min_size = dedicated_texture_min_size();
+	if (dedicated_min_size > 0 && device->GetResourceAllocationInfo(0, 1, (const D3D12_RESOURCE_DESC *)&resource_desc).SizeInBytes >= dedicated_min_size) {
+		allocation_desc.Flags = (D3D12MA::ALLOCATION_FLAGS)(allocation_desc.Flags | D3D12MA::ALLOCATION_FLAG_COMMITTED);
+	}
 
 	D3D12_RESOURCE_STATES initial_state = {};
 	ID3D12Resource *texture = nullptr;

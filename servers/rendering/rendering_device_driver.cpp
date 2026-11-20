@@ -30,9 +30,28 @@
 
 #include "rendering_device_driver.h"
 
+#include "core/os/os.h"
+
 /**************/
 /**** MISC ****/
 /**************/
+
+uint64_t RenderingDeviceDriver::dedicated_texture_min_size() {
+	// A texture freed from a shared block leaves a gap the allocator gives back to the device only once the whole block
+	// is empty: replacements created before the old textures go fill those gaps, and the blocks stay reserved (a live
+	// texture quality switch, a zone unload). Large textures get memory of their own, returned when they are freed. Both
+	// allocators document their flag for "special, big resources, like fullscreen images used as attachments"
+	// (VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT, D3D12MA::ALLOCATION_FLAG_COMMITTED); the threshold below that is
+	// this engine's measured choice (VRAM-DEDICATED-TEXTURES-FIXES.md). Small textures stay pooled (creation cost, 64 KB
+	// alignment).
+	static const uint64_t min_size = []() {
+		const String value = OS::get_singleton()->get_environment("GODOT_DEDICATED_TEXTURE_MB");
+		// 1 MB measured best of 1/2/4 MB (godot3d: same load time and frame rate as off, D3D12 and Vulkan).
+		const double megabytes = value.is_empty() ? 1.0 : value.to_float();
+		return megabytes > 0.0 ? uint64_t(megabytes * 1024.0 * 1024.0) : uint64_t(0);
+	}();
+	return min_size;
+}
 
 uint64_t RenderingDeviceDriver::api_trait_get(ApiTrait p_trait) {
 	// Sensible canonical defaults.
