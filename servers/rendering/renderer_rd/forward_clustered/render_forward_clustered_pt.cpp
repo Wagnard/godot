@@ -748,7 +748,10 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 		// buffer the path tracer wrote. Without them, RR took the motion of what is behind a card for the card's
 		// own and, under parallax (the camera moving sideways), blended it with that background.
 		const uint32_t rasterized_color_pass_flags = transparent_color_pass_flags | (color_pass_flags & uint32_t(COLOR_PASS_FLAG_MOTION_VECTORS));
-		RenderListParameters rasterized_params(render_list[RENDER_LIST_ALPHA].elements.ptr(), render_list[RENDER_LIST_ALPHA].element_info.ptr(), rasterized_count, reverse_cull, PASS_MODE_COLOR, rasterized_color_pass_flags, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, 0, base_specialization);
+		// Every color pass drawn over the traced image writes texture streaming feedback (the last argument), as raster's
+		// opaque and transparent passes do: a texture seen only through them stayed at its first resident level (godot3d's
+		// tree cards). A path traced view is never a reflection probe, the one view raster leaves without feedback.
+		RenderListParameters rasterized_params(render_list[RENDER_LIST_ALPHA].elements.ptr(), render_list[RENDER_LIST_ALPHA].element_info.ptr(), rasterized_count, reverse_cull, PASS_MODE_COLOR, rasterized_color_pass_flags, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, 0, base_specialization, true);
 		rasterized_params.rt_shadow_texture_uniform_set = rt_shadow_texture_set;
 		rasterized_params.buffer_dependencies = rt_shadow_buffer_dependencies;
 		// Under an upscaler that reads the color's alpha as its reactive mask (FSR2, FSR 3.1: every temporal one but DLSS),
@@ -837,7 +840,7 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 			const uint32_t lit_count = MIN(rr_layer_from, alpha_count);
 			const uint32_t raster_lit_count = MIN(peel_from, lit_count);
 			// The lit transparent surfaces, after the rasterized cards (drawn before the sky).
-			RenderListParameters render_list_params(render_list[RENDER_LIST_ALPHA].elements.ptr() + rasterized_count, render_list[RENDER_LIST_ALPHA].element_info.ptr() + rasterized_count, raster_lit_count - rasterized_count, reverse_cull, PASS_MODE_COLOR, transparent_color_pass_flags, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, rasterized_count, base_specialization);
+			RenderListParameters render_list_params(render_list[RENDER_LIST_ALPHA].elements.ptr() + rasterized_count, render_list[RENDER_LIST_ALPHA].element_info.ptr() + rasterized_count, raster_lit_count - rasterized_count, reverse_cull, PASS_MODE_COLOR, transparent_color_pass_flags, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, rasterized_count, base_specialization, true);
 			render_list_params.rt_shadow_texture_uniform_set = rt_shadow_texture_set;
 			render_list_params.buffer_dependencies = rt_shadow_buffer_dependencies;
 			// As raster's transparent pass: under an upscaler that reads the color's alpha as its reactive mask (every
@@ -908,7 +911,7 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 				while (to < lit_count && !(view_peeled && raytracing->peeled_in_last_build(alpha_elements[to]))) {
 					to++;
 				}
-				RenderListParameters unpeeled_params(render_list[RENDER_LIST_ALPHA].elements.ptr() + from, render_list[RENDER_LIST_ALPHA].element_info.ptr() + from, to - from, reverse_cull, PASS_MODE_COLOR, transparent_color_pass_flags, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, from, base_specialization);
+				RenderListParameters unpeeled_params(render_list[RENDER_LIST_ALPHA].elements.ptr() + from, render_list[RENDER_LIST_ALPHA].element_info.ptr() + from, to - from, reverse_cull, PASS_MODE_COLOR, transparent_color_pass_flags, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, from, base_specialization, true);
 				unpeeled_params.rt_shadow_texture_uniform_set = rt_shadow_texture_set;
 				unpeeled_params.no_reactive_alpha = render_list_params.no_reactive_alpha;
 				unpeeled_params.buffer_dependencies = render_list_params.buffer_dependencies;
@@ -931,7 +934,7 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 				} else {
 					layer_framebuffer = FramebufferCacheRD::get_singleton()->get_cache_multiview(1, rr_transparency_layer, RID(), RID(), layer_depth);
 				}
-				RenderListParameters layer_params(render_list[RENDER_LIST_ALPHA].elements.ptr() + lit_count, render_list[RENDER_LIST_ALPHA].element_info.ptr() + lit_count, alpha_count - lit_count, reverse_cull, PASS_MODE_COLOR, transparent_color_pass_flags, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, lit_count, base_specialization);
+				RenderListParameters layer_params(render_list[RENDER_LIST_ALPHA].elements.ptr() + lit_count, render_list[RENDER_LIST_ALPHA].element_info.ptr() + lit_count, alpha_count - lit_count, reverse_cull, PASS_MODE_COLOR, transparent_color_pass_flags, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, lit_count, base_specialization, true);
 				layer_params.rt_shadow_texture_uniform_set = rt_shadow_texture_set;
 				layer_params.buffer_dependencies = render_list_params.buffer_dependencies;
 				// Pipelines of their own, where additive blending writes no alpha (PipelineKey::rr_transparency_layer).
