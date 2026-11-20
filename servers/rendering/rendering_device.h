@@ -2283,6 +2283,7 @@ public:
 		MEMORY_TOTAL,
 		MEMORY_BLAS,
 		MEMORY_TLAS,
+		MEMORY_RESERVED,
 	};
 
 	uint64_t get_memory_usage(MemoryType p_type) const;

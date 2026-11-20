@@ -1893,6 +1893,12 @@ Error RenderingDeviceDriverVulkan::_initialize_allocator() {
 	allocator_info.physicalDevice = physical_device;
 	allocator_info.device = vk_device;
 	allocator_info.instance = context_driver->instance_get();
+	// "It must match the Vulkan version used by the application and supported on the selected physical device, so it must
+	// be no higher than VkApplicationInfo::apiVersion passed to vkCreateInstance and no higher than
+	// VkPhysicalDeviceProperties::apiVersion" (VmaAllocatorCreateInfo::vulkanApiVersion). Left at 0 VMA works as on
+	// Vulkan 1.0: it never asks the driver whether an image or buffer wants a dedicated allocation (core since 1.1,
+	// VkMemoryDedicatedRequirements) and sub-allocates every texture below half a 256 MB block from shared blocks.
+	allocator_info.vulkanApiVersion = MIN(context_driver->application_api_version_get(), physical_device_properties.apiVersion);
 	const bool use_1_3_features = physical_device_properties.apiVersion >= VK_API_VERSION_1_3;
 	if (use_1_3_features) {
 		allocator_info.flags |= VMA_ALLOCATOR_CREATE_KHR_MAINTENANCE5_BIT;
@@ -8673,6 +8679,22 @@ uint64_t RenderingDeviceDriverVulkan::get_total_memory_used() {
 	}
 
 	return total_memory_used;
+}
+
+uint64_t RenderingDeviceDriverVulkan::get_total_memory_reserved() {
+	// VmaStatistics::blockBytes: the VkDeviceMemory blocks and dedicated allocations VMA holds, unused space included.
+	const VkPhysicalDeviceMemoryProperties *memory_properties = nullptr;
+	vmaGetMemoryProperties(allocator, &memory_properties);
+
+	VmaBudget *budgets = ALLOCA_ARRAY(VmaBudget, memory_properties->memoryHeapCount);
+	vmaGetHeapBudgets(allocator, budgets);
+
+	uint64_t total_memory_reserved = 0;
+	for (uint32_t i = 0; i < memory_properties->memoryHeapCount; i++) {
+		total_memory_reserved += budgets[i].statistics.blockBytes;
+	}
+
+	return total_memory_reserved;
 }
 
 uint64_t RenderingDeviceDriverVulkan::get_lazily_memory_used() {

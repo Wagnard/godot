@@ -9703,6 +9703,9 @@ uint64_t RenderingDevice::get_memory_usage(MemoryType p_type) const {
 		case MEMORY_TLAS: {
 			return tlas_memory.get();
 		}
+		case MEMORY_RESERVED: {
+			return driver->get_total_memory_reserved();
+		}
 		default: {
 			DEV_ASSERT(false);
 			return 0;
@@ -11837,6 +11840,7 @@ void RenderingDevice::_bind_methods() {
 	BIND_ENUM_CONSTANT(MEMORY_TOTAL);
 	BIND_ENUM_CONSTANT(MEMORY_BLAS);
 	BIND_ENUM_CONSTANT(MEMORY_TLAS);
+	BIND_ENUM_CONSTANT(MEMORY_RESERVED);
 
 	BIND_CONSTANT(INVALID_ID);
 	BIND_CONSTANT(INVALID_FORMAT_ID);

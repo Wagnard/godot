@@ -1124,6 +1124,7 @@ public:
 	virtual void set_object_name(ObjectType p_type, ID p_driver_id, const String &p_name) override final;
 	virtual uint64_t get_resource_native_handle(DriverResource p_type, ID p_driver_id) override final;
 	virtual uint64_t get_total_memory_used() override final;
+	virtual uint64_t get_total_memory_reserved() override final;
 	virtual uint64_t get_lazily_memory_used() override final;
 	virtual String get_descriptor_report() override final;
 	virtual uint64_t limit_get(Limit p_limit) override final;

@@ -1048,6 +1048,9 @@ public:
 	virtual void set_object_name(ObjectType p_type, ID p_driver_id, const String &p_name) = 0;
 	virtual uint64_t get_resource_native_handle(DriverResource p_type, ID p_driver_id) = 0;
 	virtual uint64_t get_total_memory_used() = 0;
+	// Device memory the driver's allocator holds: its blocks and dedicated allocations, freed allocations inside a block
+	// still counted. A driver without such a pool reports what it uses.
+	virtual uint64_t get_total_memory_reserved() { return get_total_memory_used(); }
 	virtual uint64_t get_lazily_memory_used() = 0;
 	// Occupancy of the driver's shader-visible descriptor heap, when it has a fixed size. Empty otherwise.
 	virtual String get_descriptor_report() { return String(); }

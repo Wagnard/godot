@@ -694,7 +694,7 @@ Error RenderingContextDriverVulkan::_initialize_instance() {
 	// We'll set application version to the Vulkan version we're developing against, even if our instance is based on an older Vulkan
 	// version, devices can still support newer versions of Vulkan. The exception is when we're on Vulkan 1.0, we should not set this
 	// to anything but 1.0. Note that this value is only used by validation layers to warn us about version issues.
-	uint32_t application_api_version = instance_api_version == VK_API_VERSION_1_0 ? VK_API_VERSION_1_0 : VK_API_VERSION_1_2;
+	application_api_version = instance_api_version == VK_API_VERSION_1_0 ? VK_API_VERSION_1_0 : VK_API_VERSION_1_2;
 
 	CharString cs = GLOBAL_GET("application/config/name").operator String().utf8();
 	VkApplicationInfo app_info = {};
@@ -1113,6 +1113,10 @@ bool RenderingContextDriverVulkan::is_colorspace_supported() const {
 
 VkInstance RenderingContextDriverVulkan::instance_get() const {
 	return instance;
+}
+
+uint32_t RenderingContextDriverVulkan::application_api_version_get() const {
+	return application_api_version;
 }
 
 VkPhysicalDevice RenderingContextDriverVulkan::physical_device_get(uint32_t p_device_index) const {

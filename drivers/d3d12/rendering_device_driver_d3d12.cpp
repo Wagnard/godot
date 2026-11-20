@@ -7753,6 +7753,16 @@ uint64_t RenderingDeviceDriverD3D12::get_total_memory_used() {
 	return local_budget.Stats.AllocationBytes + non_local_budget.Stats.AllocationBytes;
 }
 
+uint64_t RenderingDeviceDriverD3D12::get_total_memory_reserved() {
+	// D3D12MA::Statistics::BlockBytes, "Number of bytes allocated in memory blocks" (heaps and committed allocations):
+	// "(BlockBytes - AllocationBytes) is the amount of memory allocated from D3D12 but unused by any D3D12MA::Allocation".
+	D3D12MA::Budget local_budget;
+	D3D12MA::Budget non_local_budget;
+	allocator->GetBudget(&local_budget, &non_local_budget);
+
+	return local_budget.Stats.BlockBytes + non_local_budget.Stats.BlockBytes;
+}
+
 uint64_t RenderingDeviceDriverD3D12::get_lazily_memory_used() {
 	return 0;
 }

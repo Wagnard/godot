@@ -104,6 +104,8 @@ private:
 
 	VkInstance instance = VK_NULL_HANDLE;
 	uint32_t instance_api_version = VK_API_VERSION_1_0;
+	// VkApplicationInfo::apiVersion given to vkCreateInstance().
+	uint32_t application_api_version = VK_API_VERSION_1_0;
 	HashMap<CharString, bool> requested_instance_extensions;
 	HashSet<CharString> enabled_instance_extension_names;
 	TightLocalVector<Device> driver_devices;
@@ -185,6 +187,8 @@ public:
 	};
 
 	VkInstance instance_get() const;
+	// The Vulkan version the instance was created for (VkApplicationInfo::apiVersion).
+	uint32_t application_api_version_get() const;
 	VkPhysicalDevice physical_device_get(uint32_t p_device_index) const;
 	uint32_t queue_family_get_count(uint32_t p_device_index) const;
 	VkQueueFamilyProperties queue_family_get(uint32_t p_device_index, uint32_t p_queue_family_index) const;

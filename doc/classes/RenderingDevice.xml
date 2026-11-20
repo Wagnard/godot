@@ -3014,6 +3014,9 @@
 		<constant name="MEMORY_TLAS" value="4" enum="MemoryType">
 			Memory taken by top-level acceleration structures, excluding build scratch and instance buffers (counted in [constant MEMORY_BUFFERS]). Included in [constant MEMORY_TOTAL]. Only reported by the Vulkan driver.
 		</constant>
+		<constant name="MEMORY_RESERVED" value="5" enum="MemoryType">
+			Video memory the driver's allocator holds from the device: its memory blocks and dedicated allocations. Space freed inside a block that still holds other resources stays counted, so this is at least [constant MEMORY_TOTAL]; the difference is memory that freed resources left reserved. Drivers without such an allocator report [constant MEMORY_TOTAL].
+		</constant>
 		<constant name="INVALID_ID" value="-1">
 			Returned by functions that return an ID if a value is invalid.
 		</constant>
