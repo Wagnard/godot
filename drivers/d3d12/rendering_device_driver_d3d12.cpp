@@ -1095,6 +1095,9 @@ void RenderingDeviceDriverD3D12::_resource_transitions_flush(CommandBufferInfo *
 /**** BUFFERS ****/
 /*****************/
 
+// Half of D3D12MA_DEFAULT_BLOCK_SIZE, the largest heap of a custom pool made with POOL_DESC::BlockSize 0.
+static const uint64_t RAYTRACING_POOL_COMMITTED_MIN_SIZE = 32ull * 1024 * 1024;
+
 RDD::BufferID RenderingDeviceDriverD3D12::buffer_create(uint64_t p_size, BitField<BufferUsageBits> p_usage, MemoryAllocationType p_allocation_type, uint64_t p_frames_drawn) {
 	uint32_t alignment = D3D12_RAW_UAV_SRV_BYTE_ALIGNMENT; // 16 bytes is reasonable.
 	if (p_usage.has_flag(BUFFER_USAGE_UNIFORM_BIT)) {
@@ -1173,6 +1176,15 @@ RDD::BufferID RenderingDeviceDriverD3D12::buffer_create(uint64_t p_size, BitFiel
 			}
 			if (p_usage.has_flag(RDD::BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT)) {
 				initial_state = D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE;
+			}
+			if (raytracing_pool && !p_usage.has_flag(BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT) && (p_usage.has_flag(RDD::BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT) || p_usage.has_flag(RDD::BUFFER_USAGE_RAYTRACING_POOL_BIT))) {
+				// A default heap pool: never the persistently mapped buffers above.
+				allocation_desc.CustomPool = raytracing_pool.Get();
+				// The default pools commit a resource above half of their 64 MB heaps (D3D12MA's CalcAllocationParams()
+				// heuristic); custom pools do not, and would place it in a heap of its own of up to twice its size.
+				if (resource_desc.Width > RAYTRACING_POOL_COMMITTED_MIN_SIZE) {
+					allocation_desc.Flags = (D3D12MA::ALLOCATION_FLAGS)(allocation_desc.Flags | D3D12MA::ALLOCATION_FLAG_COMMITTED);
+				}
 			}
 		} break;
 		case MEMORY_ALLOCATION_TYPE_GPU_MAPPABLE: {
@@ -8490,6 +8502,23 @@ Error RenderingDeviceDriverD3D12::_initialize_allocator() {
 #endif
 		pool_desc.HeapFlags = D3D12MA_RECOMMENDED_HEAP_FLAGS | D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS;
 		res = allocator->CreatePool(&pool_desc, custom_readback_pool.GetAddressOf());
+
+		ERR_FAIL_COND_V_MSG(!SUCCEEDED(res), ERR_CANT_CREATE, "D3D12MA::Allocator::CreatePool failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
+	}
+
+	// Acceleration structures, their scratch and the buffers that live only while ray tracing runs
+	// (BUFFER_USAGE_RAYTRACING_POOL_BIT), in a pool of their own ("To keep some resources separate from others in
+	// memory", D3D12MA "Custom memory pools"). MinBlockCount 0 "allow[s] the pool be completely empty"; BlockSize 0 keeps
+	// the default pools' variable block sizes (1/8, 1/4, 1/2 of 64 MB first). Like every D3D12MA block vector it keeps one
+	// empty heap after frees (BlockVector::Free), unless the budget is exceeded.
+	if (raytracing_capabilities.raytracing_pipeline_supported || raytracing_capabilities.ray_query_supported) {
+		D3D12MA::POOL_DESC pool_desc = {};
+		pool_desc.Flags = D3D12MA_RECOMMENDED_POOL_FLAGS;
+		pool_desc.HeapProperties.Type = D3D12_HEAP_TYPE_DEFAULT;
+		pool_desc.HeapFlags = D3D12MA_RECOMMENDED_HEAP_FLAGS | D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS;
+		pool_desc.MinBlockCount = 0;
+		pool_desc.MaxBlockCount = 0; // No limit.
+		res = allocator->CreatePool(&pool_desc, raytracing_pool.GetAddressOf());
 
 		ERR_FAIL_COND_V_MSG(!SUCCEEDED(res), ERR_CANT_CREATE, "D3D12MA::Allocator::CreatePool failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
 	}

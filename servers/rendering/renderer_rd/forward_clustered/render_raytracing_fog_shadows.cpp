@@ -122,7 +122,8 @@ bool RTFogShadows::prepare(RenderRaytracing *p_raytracing, RTViewportState *p_st
 	}
 
 	if (p_state->fog_shadows_params_buffer.is_null()) {
-		p_state->fog_shadows_params_buffer = RD::get_singleton()->uniform_buffer_create(sizeof(ParamsUBO));
+		// The view's path tracing state, freed when path tracing stops: in the ray tracing memory pool.
+		p_state->fog_shadows_params_buffer = RD::get_singleton()->uniform_buffer_create(sizeof(ParamsUBO), {}, RD::BUFFER_CREATION_RAYTRACING_POOL_BIT);
 		RD::get_singleton()->set_resource_name(p_state->fog_shadows_params_buffer, "RT Fog Shadows UBO");
 	}
 

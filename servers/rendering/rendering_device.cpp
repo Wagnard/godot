@@ -325,7 +325,7 @@ Error RenderingDevice::_acceleration_structure_scratch_buffer_create(Acceleratio
 	}
 
 	if (!p_acceleration_structure->scratch_buffer) {
-		p_acceleration_structure->scratch_buffer = driver->buffer_create(scratch_size, RDD::BUFFER_USAGE_STORAGE_BIT | RDD::BUFFER_USAGE_DEVICE_ADDRESS_BIT, RDD::MEMORY_ALLOCATION_TYPE_GPU, frames_drawn);
+		p_acceleration_structure->scratch_buffer = driver->buffer_create(scratch_size, RDD::BUFFER_USAGE_STORAGE_BIT | RDD::BUFFER_USAGE_DEVICE_ADDRESS_BIT | RDD::BUFFER_USAGE_RAYTRACING_POOL_BIT, RDD::MEMORY_ALLOCATION_TYPE_GPU, frames_drawn);
 		ERR_FAIL_COND_V(!p_acceleration_structure->scratch_buffer, ERR_CANT_CREATE);
 
 		buffer_memory.add(scratch_size);
@@ -359,7 +359,7 @@ Error RenderingDevice::_acceleration_structure_scratch_allocate(uint64_t p_size,
 		capacity += existing;
 	}
 	const uint64_t chunk_size = MAX(MAX(size, AS_SCRATCH_MIN_CHUNK_SIZE), MAX(scratch.next_chunk_size, capacity));
-	const RDD::BufferID buffer = driver->buffer_create(chunk_size, RDD::BUFFER_USAGE_STORAGE_BIT | RDD::BUFFER_USAGE_DEVICE_ADDRESS_BIT, RDD::MEMORY_ALLOCATION_TYPE_GPU, frames_drawn);
+	const RDD::BufferID buffer = driver->buffer_create(chunk_size, RDD::BUFFER_USAGE_STORAGE_BIT | RDD::BUFFER_USAGE_DEVICE_ADDRESS_BIT | RDD::BUFFER_USAGE_RAYTRACING_POOL_BIT, RDD::MEMORY_ALLOCATION_TYPE_GPU, frames_drawn);
 	ERR_FAIL_COND_V(!buffer, ERR_CANT_CREATE);
 	buffer_memory.add(chunk_size);
 	scratch.next_chunk_size = 0;
@@ -1140,7 +1140,7 @@ Error RenderingDevice::_acceleration_structure_scratch_reallocate(uint64_t p_siz
 		scratch.size = 0;
 	}
 
-	scratch.buffer = driver->buffer_create(p_size, RDD::BUFFER_USAGE_STORAGE_BIT | RDD::BUFFER_USAGE_DEVICE_ADDRESS_BIT, RDD::MEMORY_ALLOCATION_TYPE_GPU, frames_drawn);
+	scratch.buffer = driver->buffer_create(p_size, RDD::BUFFER_USAGE_STORAGE_BIT | RDD::BUFFER_USAGE_DEVICE_ADDRESS_BIT | RDD::BUFFER_USAGE_RAYTRACING_POOL_BIT, RDD::MEMORY_ALLOCATION_TYPE_GPU, frames_drawn);
 	ERR_FAIL_COND_V(!scratch.buffer, ERR_CANT_CREATE);
 	scratch.size = p_size;
 	scratch.used = 0;
@@ -2316,6 +2316,9 @@ RID RenderingDevice::storage_buffer_create(uint32_t p_size_bytes, Span<uint8_t> 
 	if (p_creation_bits.has_flag(BUFFER_CREATION_OPACITY_MICROMAP_BUILD_INPUT_READ_ONLY_BIT)) {
 		ERR_FAIL_COND_V_MSG(!has_feature(SUPPORTS_OPACITY_MICROMAP), RID(), "The GPU doesn't support opacity micromaps.");
 		buffer.usage.set_flag(RDD::BUFFER_USAGE_OPACITY_MICROMAP_BUILD_INPUT_READ_ONLY_BIT);
+	}
+	if (p_creation_bits.has_flag(BUFFER_CREATION_RAYTRACING_POOL_BIT)) {
+		buffer.usage.set_flag(RDD::BUFFER_USAGE_RAYTRACING_POOL_BIT);
 	}
 
 	buffer.alloc_type = _get_buffer_alloc_type(!p_data.is_empty(), Thread::get_caller_id());
@@ -4724,6 +4727,9 @@ RID RenderingDevice::vertex_buffer_create(uint32_t p_size_bytes, Span<uint8_t> p
 	if (p_creation_bits.has_flag(BUFFER_CREATION_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT)) {
 		buffer.usage.set_flag(RDD::BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT);
 	}
+	if (p_creation_bits.has_flag(BUFFER_CREATION_RAYTRACING_POOL_BIT)) {
+		buffer.usage.set_flag(RDD::BUFFER_USAGE_RAYTRACING_POOL_BIT);
+	}
 
 	buffer.alloc_type = _get_buffer_alloc_type(!p_data.is_empty(), Thread::get_caller_id());
 
@@ -4942,6 +4948,9 @@ RID RenderingDevice::index_buffer_create(uint32_t p_index_count, IndexBufferForm
 	}
 	if (p_creation_bits.has_flag(BUFFER_CREATION_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT)) {
 		index_buffer.usage.set_flag(RDD::BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT);
+	}
+	if (p_creation_bits.has_flag(BUFFER_CREATION_RAYTRACING_POOL_BIT)) {
+		index_buffer.usage.set_flag(RDD::BUFFER_USAGE_RAYTRACING_POOL_BIT);
 	}
 
 	index_buffer.alloc_type = _get_buffer_alloc_type(!p_data.is_empty(), Thread::get_caller_id());
@@ -5208,6 +5217,9 @@ RID RenderingDevice::uniform_buffer_create(uint32_t p_size_bytes, Span<uint8_t> 
 		// same time. It's probably fine (since CPU always advances the pointer before writing) but let's
 		// stick to the known/intended use cases and scream if we deviate from it.
 		buffer.usage.clear_flag(RDD::BUFFER_USAGE_TRANSFER_TO_BIT);
+	}
+	if (p_creation_bits.has_flag(BUFFER_CREATION_RAYTRACING_POOL_BIT)) {
+		buffer.usage.set_flag(RDD::BUFFER_USAGE_RAYTRACING_POOL_BIT);
 	}
 
 	buffer.alloc_type = _get_buffer_alloc_type(!p_data.is_empty(), Thread::get_caller_id());

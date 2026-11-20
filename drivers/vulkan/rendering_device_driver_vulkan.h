@@ -284,6 +284,12 @@ private:
 	HashMap<uint32_t, VmaPool> small_allocs_pools;
 
 	VmaPool _find_or_create_small_allocs_pool(uint32_t p_mem_type_index);
+	// Acceleration structures, opacity micromaps, their build scratch and the buffers that live only while ray tracing runs
+	// (BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT, BUFFER_USAGE_OPACITY_MICROMAP_STORAGE_BIT,
+	// BUFFER_USAGE_RAYTRACING_POOL_BIT), per memory type: blocks of their own, emptied and released when ray tracing stops,
+	// instead of holes in blocks shared with every other buffer.
+	HashMap<uint32_t, VmaPool> raytracing_pools;
+	VmaPool _find_or_create_raytracing_pool(uint32_t p_mem_type_index);
 	// Textures with a VkDeviceMemory of their own (RenderingDeviceDriver::dedicated_texture_min_size(), or the driver's
 	// VkMemoryDedicatedRequirements): each counts against maxMemoryAllocationCount.
 	SafeNumeric<uint32_t> dedicated_texture_count;

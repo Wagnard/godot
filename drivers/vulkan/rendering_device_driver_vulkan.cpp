@@ -2404,6 +2404,39 @@ VmaPool RenderingDeviceDriverVulkan::_find_or_create_small_allocs_pool(uint32_t 
 	return pool;
 }
 
+// "Keep certain kind of allocations separate from others" and "Enforce particular, fixed size of Vulkan memory blocks"
+// (VMA, "Custom memory pools"). minBlockCount 0 lets "the pool be completely empty". Like every VMA block vector it keeps
+// one empty block after frees ("A hysteresis to avoid allocating whole block back and forth", VmaBlockVector::Free),
+// unless the heap's budget is exceeded: with VMA's own block sizes (up to 256 MB on a large heap) that block alone held
+// 256 MB once ray tracing stopped, hence blocks of D3D12MA's default size. Buffers above half a block get a dedicated
+// allocation outside the pool (buffer_create()): VMA supports dedicated allocations in custom pools "only when
+// VmaPoolCreateInfo::blockSize = 0".
+static const VkDeviceSize RAYTRACING_POOL_BLOCK_SIZE = 64ull * 1024 * 1024;
+
+VmaPool RenderingDeviceDriverVulkan::_find_or_create_raytracing_pool(uint32_t p_mem_type_index) {
+	if (raytracing_pools.has(p_mem_type_index)) {
+		return raytracing_pools[p_mem_type_index];
+	}
+
+	print_verbose("Creating VMA ray tracing pool for memory type index " + itos(p_mem_type_index));
+
+	VmaPoolCreateInfo pci = {};
+	pci.memoryTypeIndex = p_mem_type_index;
+	pci.flags = 0;
+	pci.blockSize = RAYTRACING_POOL_BLOCK_SIZE;
+	pci.minBlockCount = 0;
+	pci.maxBlockCount = 0; // No limit.
+	pci.priority = 0.5f;
+	pci.minAllocationAlignment = 0;
+	pci.pMemoryAllocateNext = nullptr;
+	VmaPool pool = VK_NULL_HANDLE;
+	VkResult res = vmaCreatePool(allocator, &pci, &pool);
+	raytracing_pools[p_mem_type_index] = pool; // Don't try to create it again if failed the first time.
+	ERR_FAIL_COND_V_MSG(res, pool, vformat("Couldn't create Vulkan memory allocator pool (VkResult error %d)", res));
+
+	return pool;
+}
+
 /*****************/
 /**** BUFFERS ****/
 /*****************/
@@ -2445,7 +2478,7 @@ RDD::BufferID RenderingDeviceDriverVulkan::buffer_create(uint64_t p_size, BitFie
 	VkBufferCreateInfo create_info = {};
 	create_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
 	create_info.size = p_size;
-	create_info.usage = p_usage & ~BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT;
+	create_info.usage = p_usage & ~(BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT | BUFFER_USAGE_RAYTRACING_POOL_BIT);
 	create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
 	VmaMemoryUsage vma_usage = VMA_MEMORY_USAGE_UNKNOWN;
@@ -2481,7 +2514,21 @@ RDD::BufferID RenderingDeviceDriverVulkan::buffer_create(uint64_t p_size, BitFie
 				alloc_create_info.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
 			}
 			alloc_create_info.preferredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-			if (p_size <= SMALL_ALLOCATION_MAX_SIZE) {
+			if (!p_usage.has_flag(BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT) && (p_usage.has_flag(BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT) || p_usage.has_flag(BUFFER_USAGE_OPACITY_MICROMAP_STORAGE_BIT) || p_usage.has_flag(BUFFER_USAGE_RAYTRACING_POOL_BIT))) {
+				if (p_size > RAYTRACING_POOL_BLOCK_SIZE / 2) {
+					// Memory of its own, released when freed: what VMA's default pools give an allocation above half
+					// their block (VmaAllocator_T::AllocateMemoryOfType()).
+					alloc_create_info.flags |= VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
+				} else {
+					// The memory type VMA would pick for this buffer, as VmaPoolCreateInfo::memoryTypeIndex
+					// ("vmaFindMemoryTypeIndexForBufferInfo ... can be useful e.g. to determine value to be used as
+					// VmaPoolCreateInfo::memoryTypeIndex").
+					uint32_t mem_type_index = 0;
+					if (vmaFindMemoryTypeIndexForBufferInfo(allocator, &create_info, &alloc_create_info, &mem_type_index) == VK_SUCCESS) {
+						alloc_create_info.pool = _find_or_create_raytracing_pool(mem_type_index);
+					}
+				}
+			} else if (p_size <= SMALL_ALLOCATION_MAX_SIZE) {
 				uint32_t mem_type_index = 0;
 				vmaFindMemoryTypeIndexForBufferInfo(allocator, &create_info, &alloc_create_info, &mem_type_index);
 				alloc_create_info.pool = _find_or_create_small_allocs_pool(mem_type_index);
@@ -8974,6 +9021,11 @@ RenderingDeviceDriverVulkan::~RenderingDeviceDriverVulkan() {
 		HashMap<uint32_t, VmaPool>::Iterator E = small_allocs_pools.begin();
 		vmaDestroyPool(allocator, E->value);
 		small_allocs_pools.remove(E);
+	}
+	while (raytracing_pools.size()) {
+		HashMap<uint32_t, VmaPool>::Iterator E = raytracing_pools.begin();
+		vmaDestroyPool(allocator, E->value);
+		raytracing_pools.remove(E);
 	}
 	vmaDestroyAllocator(allocator);
 

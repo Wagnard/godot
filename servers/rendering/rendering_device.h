@@ -967,6 +967,10 @@ public:
 		BUFFER_CREATION_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT = (1 << 3),
 		// Read by an opacity micromap build (opacity_micromap_create()), storage buffers only. Not exposed to scripts.
 		BUFFER_CREATION_OPACITY_MICROMAP_BUILD_INPUT_READ_ONLY_BIT = (1 << 4),
+		// Lives only while ray tracing runs (the path tracer's geometry copies, per-view data): kept with the acceleration
+		// structures in the drivers' memory pool of their own (RDD::BUFFER_USAGE_RAYTRACING_POOL_BIT), so that turning ray
+		// tracing off gives whole blocks back. A buffer that outlives ray tracing would pin a block. Not exposed to scripts.
+		BUFFER_CREATION_RAYTRACING_POOL_BIT = (1 << 5),
 	};
 
 	enum StorageBufferUsage {

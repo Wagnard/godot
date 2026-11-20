@@ -186,6 +186,11 @@ public:
 		BUFFER_USAGE_OPACITY_MICROMAP_BUILD_INPUT_READ_ONLY_BIT = (1 << 23),
 		BUFFER_USAGE_OPACITY_MICROMAP_STORAGE_BIT = (1 << 24),
 		// There are no Vulkan-equivalent. Try to use unused/unclaimed bits.
+		// Kept with the acceleration structures and opacity micromaps (BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT,
+		// BUFFER_USAGE_OPACITY_MICROMAP_STORAGE_BIT) in a memory pool of their own: their build scratch, and buffers that
+		// live only while ray tracing runs. Freeing them all (ray tracing turned off) then empties whole blocks the
+		// allocator gives back, instead of leaving holes in blocks shared with every other buffer. GPU memory only.
+		BUFFER_USAGE_RAYTRACING_POOL_BIT = (1 << 30),
 		BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT = (1 << 31),
 	};
 

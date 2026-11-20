@@ -544,9 +544,10 @@ void RenderRaytracing::mat_ubo_pool_ensure_initialized() {
 	Vector<uint8_t> init;
 	init.resize(MAT_UBO_POOL_TOTAL_BYTES);
 	memset(init.ptrw(), 0, MAT_UBO_POOL_TOTAL_BYTES);
+	// Freed with the caches when path tracing stops (cleanup_caches()): in the ray tracing memory pool.
 	mat_ubo_pool_buffer = RD::get_singleton()->storage_buffer_create(
 			MAT_UBO_POOL_TOTAL_BYTES, init, 0,
-			RD::BUFFER_CREATION_DEVICE_ADDRESS_BIT);
+			RD::BUFFER_CREATION_DEVICE_ADDRESS_BIT | RD::BUFFER_CREATION_RAYTRACING_POOL_BIT);
 	if (mat_ubo_pool_buffer.is_valid()) {
 		RD::get_singleton()->set_resource_name(mat_ubo_pool_buffer, "RT Material UBO Pool");
 		mat_ubo_pool_bda = RD::get_singleton()->buffer_get_device_address(mat_ubo_pool_buffer);
@@ -1220,10 +1221,11 @@ RTSurfaceData *RenderRaytracing::process_deformed_surface(
 			(p_source.no_duplicate_any_hit && !entry.ptr->no_duplicate_any_hit);
 
 	// Storage: a displaced surface's refit reads the positions its BLAS has (raytracing_displace.glsl's NaN guard).
+	// Both freed with the caches when path tracing stops (cleanup_caches()): in the ray tracing memory pool.
 	BitField<RD::BufferCreationBits> owned_full_flags = RD::BUFFER_CREATION_DEVICE_ADDRESS_BIT |
-			RD::BUFFER_CREATION_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT | RD::BUFFER_CREATION_AS_STORAGE_BIT;
+			RD::BUFFER_CREATION_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT | RD::BUFFER_CREATION_AS_STORAGE_BIT | RD::BUFFER_CREATION_RAYTRACING_POOL_BIT;
 	BitField<RD::BufferCreationBits> prev_flags = RD::BUFFER_CREATION_AS_STORAGE_BIT |
-			RD::BUFFER_CREATION_DEVICE_ADDRESS_BIT;
+			RD::BUFFER_CREATION_DEVICE_ADDRESS_BIT | RD::BUFFER_CREATION_RAYTRACING_POOL_BIT;
 
 	// Reallocate owned storage if the surface grew.
 	if (entry.owned_vb_full_capacity < full_size) {
@@ -2065,7 +2067,7 @@ void RenderRaytracing::_displace_surfaces(const RenderDataRD *p_render_data, con
 					displaced_vb_bytes -= entry->displaced_vb_capacity;
 				}
 				entry->displaced_vb_capacity = 0;
-				entry->displaced_vb = rd->storage_buffer_create(size, Vector<uint8_t>(), 0, RD::BUFFER_CREATION_DEVICE_ADDRESS_BIT);
+				entry->displaced_vb = rd->storage_buffer_create(size, Vector<uint8_t>(), 0, RD::BUFFER_CREATION_DEVICE_ADDRESS_BIT | RD::BUFFER_CREATION_RAYTRACING_POOL_BIT);
 				ERR_CONTINUE(!entry->displaced_vb.is_valid());
 				rd->set_resource_name(entry->displaced_vb, "RT displaced VB");
 				entry->displaced_vb_capacity = size;
@@ -2278,7 +2280,7 @@ void RenderRaytracing::_displace_surfaces(const RenderDataRD *p_render_data, con
 				rd->free_rid(vertex_capture_params_buffer);
 			}
 			vertex_capture_params_capacity = Math::next_power_of_2(capture_draws.size());
-			vertex_capture_params_buffer = rd->storage_buffer_create(vertex_capture_params_capacity * sizeof(RT_VertexCaptureDraw));
+			vertex_capture_params_buffer = rd->storage_buffer_create(vertex_capture_params_capacity * sizeof(RT_VertexCaptureDraw), {}, 0, RD::BUFFER_CREATION_RAYTRACING_POOL_BIT);
 			rd->set_resource_name(vertex_capture_params_buffer, "RT vertex capture params");
 		}
 		rd->buffer_update(vertex_capture_params_buffer, 0, capture_draws.size() * sizeof(RT_VertexCaptureDraw), capture_draws.ptr());
@@ -2288,7 +2290,7 @@ void RenderRaytracing::_displace_surfaces(const RenderDataRD *p_render_data, con
 				rd->free_rid(vertex_capture_guard_buffer);
 			}
 			vertex_capture_guard_capacity = Math::next_power_of_2(capture_guard_size);
-			vertex_capture_guard_buffer = rd->storage_buffer_create(vertex_capture_guard_capacity);
+			vertex_capture_guard_buffer = rd->storage_buffer_create(vertex_capture_guard_capacity, {}, 0, RD::BUFFER_CREATION_RAYTRACING_POOL_BIT);
 			rd->set_resource_name(vertex_capture_guard_buffer, "RT vertex capture guard counts");
 		}
 		rd->buffer_clear(vertex_capture_guard_buffer, 0, capture_guard_size);
@@ -2345,7 +2347,7 @@ void RenderRaytracing::_displace_surfaces(const RenderDataRD *p_render_data, con
 			rd->free_rid(displace_job_buffer);
 		}
 		displace_job_capacity = Math::next_power_of_2(job_data.size());
-		displace_job_buffer = rd->storage_buffer_create(displace_job_capacity * sizeof(RT_DisplaceJob));
+		displace_job_buffer = rd->storage_buffer_create(displace_job_capacity * sizeof(RT_DisplaceJob), {}, 0, RD::BUFFER_CREATION_RAYTRACING_POOL_BIT);
 		rd->set_resource_name(displace_job_buffer, "RT displace jobs");
 	}
 	rd->buffer_update(displace_job_buffer, 0, job_data.size() * sizeof(RT_DisplaceJob), job_data.ptr());
@@ -2354,7 +2356,7 @@ void RenderRaytracing::_displace_surfaces(const RenderDataRD *p_render_data, con
 			rd->free_rid(displace_guard_buffer);
 		}
 		displace_guard_capacity = displace_job_capacity;
-		displace_guard_buffer = rd->storage_buffer_create(displace_guard_capacity * sizeof(uint32_t));
+		displace_guard_buffer = rd->storage_buffer_create(displace_guard_capacity * sizeof(uint32_t), {}, 0, RD::BUFFER_CREATION_RAYTRACING_POOL_BIT);
 		rd->set_resource_name(displace_guard_buffer, "RT displace guard counts");
 	}
 	const uint32_t guard_size = jobs.size() * sizeof(uint32_t);
@@ -2578,10 +2580,11 @@ RTOmmEntry *RenderRaytracing::_omm_entry(void *p_mesh_surface, RID p_mesh, uint3
 	const uint64_t desc_size = uint64_t(triangle_count) * 8;
 	ERR_FAIL_COND_V(data_size > UINT32_MAX || desc_size > UINT32_MAX, nullptr);
 
-	const BitField<RD::BufferCreationBits> input_bits = RD::BUFFER_CREATION_DEVICE_ADDRESS_BIT | RD::BUFFER_CREATION_OPACITY_MICROMAP_BUILD_INPUT_READ_ONLY_BIT;
+	// Freed with the caches when path tracing stops (_omm_evict(true)): in the ray tracing memory pool.
+	const BitField<RD::BufferCreationBits> input_bits = RD::BUFFER_CREATION_DEVICE_ADDRESS_BIT | RD::BUFFER_CREATION_OPACITY_MICROMAP_BUILD_INPUT_READ_ONLY_BIT | RD::BUFFER_CREATION_RAYTRACING_POOL_BIT;
 	entry.data_buffer = rd->storage_buffer_create(uint32_t(data_size), Span<uint8_t>(), 0, input_bits);
 	entry.desc_buffer = rd->storage_buffer_create(uint32_t(desc_size), Span<uint8_t>(), 0, input_bits);
-	entry.cost_buffer = rd->storage_buffer_create(triangle_count * sizeof(uint32_t));
+	entry.cost_buffer = rd->storage_buffer_create(triangle_count * sizeof(uint32_t), Span<uint8_t>(), 0, RD::BUFFER_CREATION_RAYTRACING_POOL_BIT);
 	ERR_FAIL_COND_V(!entry.data_buffer.is_valid() || !entry.desc_buffer.is_valid() || !entry.cost_buffer.is_valid(), nullptr);
 	rd->set_resource_name(entry.data_buffer, "RT OMM data");
 	rd->set_resource_name(entry.desc_buffer, "RT OMM descriptions");
@@ -3581,7 +3584,7 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 					print_verbose(vformat("RT: material uniforms in a buffer of their own (%s): sbt_offset=%d, %d bytes, pool slots %d bytes.",
 							cse->uniform_total_size > MAT_UBO_POOL_SLOT_SIZE ? "larger than a pool slot" : "pool exhausted",
 							mat_data->rt_sbt_offset, cse->uniform_total_size, MAT_UBO_POOL_SLOT_SIZE));
-					mat_data->uniform_buffer = RD::get_singleton()->storage_buffer_create(cse->uniform_total_size, ubo_data, 0, RD::BUFFER_CREATION_DEVICE_ADDRESS_BIT);
+					mat_data->uniform_buffer = RD::get_singleton()->storage_buffer_create(cse->uniform_total_size, ubo_data, 0, RD::BUFFER_CREATION_DEVICE_ADDRESS_BIT | RD::BUFFER_CREATION_RAYTRACING_POOL_BIT);
 					mat_data->uniform_buffer_size = cse->uniform_total_size;
 					mat_ubo_dedicated_buffers.insert(mat_data->uniform_buffer);
 					RD::get_singleton()->set_resource_name(mat_data->uniform_buffer, String("RT Material UBO [sbt=") + itos(mat_data->rt_sbt_offset) + "]");
@@ -3814,7 +3817,7 @@ void RenderRaytracing::_build_tlas_with_expanded_multimeshes(RTViewportState *p_
 		}
 		p_state->tlas_instance_buffer_capacity = p_state->tlas_max_instances;
 		p_state->tlas_instance_buffer = rd->storage_buffer_create(p_state->tlas_instance_buffer_capacity * instance_size, {}, 0,
-				RD::BUFFER_CREATION_DEVICE_ADDRESS_BIT | RD::BUFFER_CREATION_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT);
+				RD::BUFFER_CREATION_DEVICE_ADDRESS_BIT | RD::BUFFER_CREATION_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT | RD::BUFFER_CREATION_RAYTRACING_POOL_BIT);
 		ERR_FAIL_COND(!p_state->tlas_instance_buffer.is_valid());
 		rd->set_resource_name(p_state->tlas_instance_buffer, "RT TLAS instances");
 	}
@@ -3967,7 +3970,8 @@ void RenderRaytracing::finalize_buffers(RTViewportState *p_state) {
 			}
 			// With room for the GPU's part to grow a little (units entering the view) without a new buffer each frame.
 			p_capacity = p_size == p_total_size ? p_total_size : STEPIFY(p_total_size + p_total_size / 4, 16u);
-			p_buffer = RD::get_singleton()->storage_buffer_create(p_capacity);
+			// The view's state, freed when path tracing stops: in the ray tracing memory pool.
+			p_buffer = RD::get_singleton()->storage_buffer_create(p_capacity, {}, 0, RD::BUFFER_CREATION_RAYTRACING_POOL_BIT);
 		}
 		if (p_size > 0) {
 			RD::get_singleton()->buffer_update(p_buffer, 0, p_size, p_data);
@@ -4037,8 +4041,9 @@ const RTLodView *RenderRaytracing::_get_lod_view(void *p_mesh_surface, uint32_t 
 	new_view.index_count = index_count;
 	new_view.surface_counter = surface_counter;
 	new_view.last_used_frame = current_frame;
-	new_view.vertex_remap_buffer = rd->storage_buffer_create(kept_bound * sizeof(uint32_t), Span<uint8_t>(zeros.ptr(), kept_bound * sizeof(uint32_t)));
-	new_view.index_buffer = rd->storage_buffer_create(index_count * sizeof(uint32_t));
+	// Freed with the caches when path tracing stops (_free_lod_view()): in the ray tracing memory pool.
+	new_view.vertex_remap_buffer = rd->storage_buffer_create(kept_bound * sizeof(uint32_t), Span<uint8_t>(zeros.ptr(), kept_bound * sizeof(uint32_t)), 0, RD::BUFFER_CREATION_RAYTRACING_POOL_BIT);
+	new_view.index_buffer = rd->storage_buffer_create(index_count * sizeof(uint32_t), Span<uint8_t>(), 0, RD::BUFFER_CREATION_RAYTRACING_POOL_BIT);
 	const RID kept_buffer = rd->storage_buffer_create(vertex_count * sizeof(uint32_t), Span<uint8_t>(zeros.ptr(), vertex_count * sizeof(uint32_t)));
 	const RID counter_buffer = rd->storage_buffer_create(16, Span<uint8_t>(zeros.ptr(), 16));
 	if (!new_view.vertex_remap_buffer.is_valid() || !new_view.index_buffer.is_valid() || !kept_buffer.is_valid() || !counter_buffer.is_valid()) {
@@ -4240,10 +4245,12 @@ bool RenderRaytracing::_build_merged_mm_blas(
 	const uint32_t MIN_ATTR_BYTES = 16;
 
 	RD *rd = RD::get_singleton();
+	// Freed with the caches when path tracing stops (_free_merged_mm_entry()): in the ray tracing memory pool.
 	BitField<RD::BufferCreationBits> gpu_buf_flags =
 			RD::BUFFER_CREATION_AS_STORAGE_BIT |
 			RD::BUFFER_CREATION_DEVICE_ADDRESS_BIT |
-			RD::BUFFER_CREATION_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT;
+			RD::BUFFER_CREATION_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT |
+			RD::BUFFER_CREATION_RAYTRACING_POOL_BIT;
 
 	// --- Capacity: units entering or leaving a MultiMesh, or a LOD switch, change N*V and N*I every few frames. Within
 	// the capacity the buffers, the BLAS and its scratch stay; past it they are all made again (the BLAS's geometry
@@ -4362,7 +4369,7 @@ bool RenderRaytracing::_build_merged_mm_blas(
 			rd->free_rid(entry.omm_index_buffer);
 		}
 		entry.omm_index_buffer = rd->storage_buffer_create(omm_indices.size(), Span<uint8_t>(omm_indices.ptr(), omm_indices.size()), 0,
-				RD::BUFFER_CREATION_DEVICE_ADDRESS_BIT | RD::BUFFER_CREATION_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT);
+				RD::BUFFER_CREATION_DEVICE_ADDRESS_BIT | RD::BUFFER_CREATION_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT | RD::BUFFER_CREATION_RAYTRACING_POOL_BIT);
 		ERR_FAIL_COND_V(!entry.omm_index_buffer.is_valid(), false);
 		rd->set_resource_name(entry.omm_index_buffer, "RT MM merged OMM indices [" + itos(cache_key) + "]");
 		entry.omm_index_triangles = cap_triangles;
@@ -4398,7 +4405,7 @@ bool RenderRaytracing::_build_merged_mm_blas(
 
 	// --- Displacement by the material's vertex(), after the merge (_displace_merged_multimeshes()) ---
 	if (p_displace && !entry.merged_prev_buffer.is_valid()) {
-		entry.merged_prev_buffer = rd->storage_buffer_create(entry.cap_vertices * 12, {}, 0, RD::BUFFER_CREATION_DEVICE_ADDRESS_BIT);
+		entry.merged_prev_buffer = rd->storage_buffer_create(entry.cap_vertices * 12, {}, 0, RD::BUFFER_CREATION_DEVICE_ADDRESS_BIT | RD::BUFFER_CREATION_RAYTRACING_POOL_BIT);
 		ERR_FAIL_COND_V(!entry.merged_prev_buffer.is_valid(), false);
 		rd->set_resource_name(entry.merged_prev_buffer, "RT MM displaced prev [" + itos(cache_key) + "]");
 		entry.displaced = false; // Its previous positions are not written yet.
@@ -6559,7 +6566,8 @@ static void _rt_upload_if_changed(RID &r_buffer, uint32_t &r_capacity, LocalVect
 			RD::get_singleton()->free_rid(r_buffer);
 		}
 		r_capacity = Math::next_power_of_2(size);
-		r_buffer = RD::get_singleton()->storage_buffer_create(r_capacity);
+		// The view's state, freed when path tracing stops: in the ray tracing memory pool.
+		r_buffer = RD::get_singleton()->storage_buffer_create(r_capacity, {}, 0, RD::BUFFER_CREATION_RAYTRACING_POOL_BIT);
 		RD::get_singleton()->set_resource_name(r_buffer, p_name);
 	}
 	RD::get_singleton()->buffer_update(r_buffer, 0, size, p_data.ptr());
@@ -6954,7 +6962,7 @@ static_assert(SceneShaderRaytracing::RT_MAX_BOUNCES < 16, "The path payload's bo
 void RenderRaytracing::build_sky_sampling(RTViewportState *p_state, RID p_radiance_texture, bool p_octmap_array, float p_border_size) {
 	RD *rd = RD::get_singleton();
 	if (!p_state->sky_sampling_buffer.is_valid()) {
-		p_state->sky_sampling_buffer = rd->storage_buffer_create(SKY_SAMPLING_FLOATS * sizeof(float));
+		p_state->sky_sampling_buffer = rd->storage_buffer_create(SKY_SAMPLING_FLOATS * sizeof(float), {}, 0, RD::BUFFER_CREATION_RAYTRACING_POOL_BIT);
 		rd->set_resource_name(p_state->sky_sampling_buffer, "RT Sky Sampling");
 	}
 
@@ -7211,14 +7219,14 @@ RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderD
 		{
 			uint32_t buf_size = RT_LIGHTS_MAX * sizeof(RT_LightData);
 			if (!p_state->light_buffer.is_valid()) {
-				p_state->light_buffer = RD::get_singleton()->storage_buffer_create(buf_size);
+				p_state->light_buffer = RD::get_singleton()->storage_buffer_create(buf_size, {}, 0, RD::BUFFER_CREATION_RAYTRACING_POOL_BIT);
 				RD::get_singleton()->set_resource_name(p_state->light_buffer, "RT Light Buffer");
 			}
 			RD::get_singleton()->buffer_update(p_state->light_buffer, 0, buf_size, rt_light_data.ptr());
 		}
 
 		if (!p_state->params_buffer.is_valid()) {
-			p_state->params_buffer = RD::get_singleton()->uniform_buffer_create(sizeof(rt_ubo));
+			p_state->params_buffer = RD::get_singleton()->uniform_buffer_create(sizeof(rt_ubo), {}, RD::BUFFER_CREATION_RAYTRACING_POOL_BIT);
 			RD::get_singleton()->set_resource_name(p_state->params_buffer, "RT Params Buffer");
 		}
 		RD::get_singleton()->buffer_update(p_state->params_buffer, 0, sizeof(rt_ubo), &rt_ubo);

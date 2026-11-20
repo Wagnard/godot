@@ -281,6 +281,10 @@ private:
 	// for GPU features that are supported in practice, such as ALLOW_UNORDERED_ACCESS.
 	Microsoft::WRL::ComPtr<D3D12MA::Pool> custom_upload_pool;
 	Microsoft::WRL::ComPtr<D3D12MA::Pool> custom_readback_pool;
+	// Acceleration structures, opacity micromaps, their build scratch and the buffers that live only while ray tracing runs
+	// (BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT, BUFFER_USAGE_RAYTRACING_POOL_BIT): heaps of their own, emptied and
+	// released when ray tracing stops, instead of holes in heaps shared with every other buffer.
+	Microsoft::WRL::ComPtr<D3D12MA::Pool> raytracing_pool;
 
 	/******************/
 	/**** RESOURCE ****/
