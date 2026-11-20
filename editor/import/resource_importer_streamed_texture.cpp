@@ -92,11 +92,20 @@ void ResourceImporterStreamedTexture::get_import_options(const String &p_path, L
 	r_options->push_back(ImportOption(PropertyInfo(Variant::INT, "roughness/mode", PROPERTY_HINT_ENUM, "Detect,Disabled,Red,Green,Blue,Alpha,Gray"), 0));
 	r_options->push_back(ImportOption(PropertyInfo(Variant::STRING, "roughness/src_normal", PROPERTY_HINT_FILE, "*.bmp,*.exr,*.jpeg,*.jpg,*.hdr,*.png,*.svg,*.tga,*.webp"), ""));
 
+	// As ResourceImporterTexture's options of the same names.
+	r_options->push_back(ImportOption(PropertyInfo(Variant::BOOL, "mipmaps/preserve_alpha_test_coverage", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_DEFAULT | PROPERTY_USAGE_UPDATE_ALL_IF_MODIFIED), false));
+	r_options->push_back(ImportOption(PropertyInfo(Variant::FLOAT, "mipmaps/alpha_test_threshold", PROPERTY_HINT_RANGE, "0.01,0.99,0.01"), 0.5));
+	r_options->push_back(ImportOption(PropertyInfo(Variant::BOOL, "process/fix_alpha_border"), true));
+	r_options->push_back(ImportOption(PropertyInfo(Variant::INT, "process/size_limit", PROPERTY_HINT_RANGE, "0,16383,1"), 0));
+
 	r_options->push_back(ImportOption(PropertyInfo(Variant::INT, "streaming/min_lod_override", PROPERTY_HINT_ENUM, "Settings,0,1,2,3,4,5,6,7,8,9,10,11,12,13"), 0));
 	r_options->push_back(ImportOption(PropertyInfo(Variant::INT, "streaming/max_lod_override", PROPERTY_HINT_ENUM, "Settings,0,1,2,3,4,5,6,7,8,9,10,11,12,13"), 0));
 }
 
 bool ResourceImporterStreamedTexture::get_option_visibility(const String &p_path, const String &p_option, const HashMap<StringName, Variant> &p_options) const {
+	if (p_option == "mipmaps/alpha_test_threshold") {
+		return p_options.has("mipmaps/preserve_alpha_test_coverage") && bool(p_options["mipmaps/preserve_alpha_test_coverage"]);
+	}
 	return true;
 }
 
@@ -151,8 +160,28 @@ Error ResourceImporterStreamedTexture::import(ResourceUID::ID p_source_id, const
 		}
 	}
 
+	// Size limit, alpha border and alpha test coverage, in ResourceImporterTexture's order (before the mipmaps).
+	const int size_limit = p_options.has("process/size_limit") ? int(p_options["process/size_limit"]) : 0;
+	if (err == OK && size_limit > 0 && (image->get_width() > size_limit || image->get_height() > size_limit)) {
+		if (image->get_width() >= image->get_height()) {
+			image->resize(size_limit, MAX(1, image->get_height() * size_limit / image->get_width()), Image::INTERPOLATE_CUBIC);
+		} else {
+			image->resize(MAX(1, image->get_width() * size_limit / image->get_height()), size_limit, Image::INTERPOLATE_CUBIC);
+		}
+		if (force_normal) {
+			image->normalize();
+		}
+	}
+	// Fully transparent texels take their opaque neighbors' color: the smaller mipmaps average them in, and kept black
+	// they outline cut-outs.
+	if (err == OK && (!p_options.has("process/fix_alpha_border") || bool(p_options["process/fix_alpha_border"]))) {
+		image->fix_alpha_edges();
+	}
+	const bool preserve_alpha_test_coverage = p_options.has("mipmaps/preserve_alpha_test_coverage") && bool(p_options["mipmaps/preserve_alpha_test_coverage"]);
+	const float alpha_test_threshold = p_options.has("mipmaps/alpha_test_threshold") ? float(p_options["mipmaps/alpha_test_threshold"]) : 0.5f;
+
 	if (!image->has_mipmaps() || force_normal) {
-		image->generate_mipmaps(force_normal);
+		image->generate_mipmaps(force_normal, preserve_alpha_test_coverage, alpha_test_threshold);
 	}
 
 	// Generate roughness mipmaps from normal texture.
