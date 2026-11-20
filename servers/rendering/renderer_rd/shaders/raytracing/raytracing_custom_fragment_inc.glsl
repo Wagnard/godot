@@ -288,6 +288,9 @@ vec4 custom_radiance = vec4(0.0);
 vec4 custom_irradiance = vec4(0.0);
 vec4 transmittance_color = vec4(0.0);
 float transmittance_depth = 0.0;
+// STREAMING_LOD: the mip level raster's texture streaming feedback records for the material (scene_forward_clustered.glsl:
+// 32.0 = past the coarsest), and the closest hits' too (below).
+float streaming_lod = 32.0;
 float transmittance_boost = 0.0;
 vec3 light_vertex = vertex;
 
@@ -297,3 +300,14 @@ vec3 light_vertex = vertex;
 if (rt_discarded) {
 	RT_CUSTOM_REMOVED_POINT
 }
+#if defined(TEXTURE_STREAMING) && defined(RT_STAGE_CLOSEST_HIT)
+// Texture streaming feedback, as raster's fragment shader writes it after the material's code: the level STREAMING_LOD
+// gives, otherwise the footprint of the UV vertex() wrote (its value at the neighboring pixels' points).
+if ((rt_geom.flags & FLAG_PROCEDURAL) == 0u) {
+#if defined(STREAMING_LOD_USED)
+	rt_streaming_feedback(rt_geom, streaming_footprint_sq_from_lod(streaming_lod));
+#elif defined(UV_USED) && RT_INTERP_POINTS > 1
+	rt_streaming_feedback(rt_geom, streaming_footprint_sq(rt_p1_uv - rt_p0_uv, rt_p2_uv - rt_p0_uv));
+#endif
+}
+#endif

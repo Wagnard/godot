@@ -912,6 +912,31 @@ layout(location = 0) rayPayloadInEXT PathPayload payload;
 layout(set = 1, binding = 0) uniform texture2D bindless_textures[];
 layout(set = 2, binding = 0) uniform texture2DArray bindless_texture_arrays[];
 
+#ifdef TEXTURE_STREAMING
+// rendering/textures/streaming/enabled: the closest hits report the UV footprint they sample textures at, as raster's
+// color passes do (scene_forward_clustered.glsl, binding 38): without it, a view the path tracer draws left every
+// streamed texture at its coarsest level. Same buffer, same encoding (atomicMax of ~floatBitsToUint(footprint²)), and
+// every closest hit writes (camera and bounce rays: a surface seen only in a mirror needs its texture too).
+#include "../scene_forward_streaming_inc.glsl"
+
+layout(set = 0, binding = 50, std430) buffer RTMaterialFeedback {
+	uint data[];
+}
+rt_material_feedback;
+
+void rt_streaming_feedback(GeometryData p_geom, float p_footprint_sq) {
+	if (p_geom.material_feedback == 0u) {
+		return;
+	}
+	const uint slot = p_geom.material_feedback - 1u;
+	const uint required = ~floatBitsToUint(p_footprint_sq);
+	// A plain read first: most hits repeat a value already stored, and atomics on a few hot slots serialize.
+	if (rt_material_feedback.data[slot] < required) {
+		atomicMax(rt_material_feedback.data[slot], required);
+	}
+}
+#endif
+
 #include "raytracing_samplers_inc.glsl"
 
 // clang-format off
@@ -1113,6 +1138,10 @@ void main() {
 	vec2 uv2 = fetch_uv(geom, i2, i2, i2, vec3(1.0, 0.0, 0.0));
 	vec2 uv_ddx = (uv0 * bary_ddx.x + uv1 * bary_ddx.y + uv2 * bary_ddx.z) * mat.uv1_scale;
 	vec2 uv_ddy = (uv0 * bary_ddy.x + uv1 * bary_ddy.y + uv2 * bary_ddy.z) * mat.uv1_scale;
+#ifdef TEXTURE_STREAMING
+	// BaseMaterial3D's UV after its vertex() (UV * uv1_scale + uv1_offset), whose derivatives raster's feedback takes.
+	rt_streaming_feedback(geom, streaming_footprint_sq(uv_ddx, uv_ddy));
+#endif
 
 	// Triplanar mapping, set up as BaseMaterial3D's vertex() does: object space unless world triplanar.
 	bool triplanar = (mat.flags & MAT_FLAG_UV1_TRIPLANAR) != 0u;

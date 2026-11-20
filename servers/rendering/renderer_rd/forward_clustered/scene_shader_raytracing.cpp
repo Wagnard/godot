@@ -42,6 +42,7 @@
 #include "core/os/thread.h"
 #include "core/string/string_builder.h"
 #include "core/version.h"
+#include "modules/modules_enabled.gen.h"
 #include "servers/rendering/renderer_rd/effects/nrd_denoiser.h"
 #include "servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.h"
 #include "servers/rendering/renderer_rd/forward_clustered/render_raytracing.h"
@@ -970,10 +971,12 @@ bool SceneShaderRaytracing::_preprocess_shader(RID p_material, bool p_is_procedu
 	actions.uniforms = &uniform_sink;
 
 	ShaderCompiler::GeneratedCode gen_code;
-	Error err = compiler.compile(RSE::SHADER_SPATIAL, code, &actions, String(), gen_code);
+	// The path names the shader in the compiler's error (otherwise "--Main Shader--") and in the warning.
+	const String shader_path = RendererRD::MaterialStorage::get_singleton()->material_get_shader_path_hint(p_material);
+	Error err = compiler.compile(RSE::SHADER_SPATIAL, code, &actions, shader_path, gen_code);
 	if (err != OK) {
-		WARN_PRINT(vformat("RT: Failed to preprocess %s shader; falling back to default material.",
-				p_is_procedural ? String("procedural") : String("custom")));
+		WARN_PRINT(vformat("RT: Failed to preprocess %s shader%s; falling back to default material.",
+				p_is_procedural ? String("procedural") : String("custom"), shader_path.is_empty() ? String() : " " + shader_path));
 		return false;
 	}
 
@@ -995,7 +998,8 @@ bool SceneShaderRaytracing::_preprocess_shader(RID p_material, bool p_is_procedu
 	for (const String &define : gen_code.defines) {
 		if (define.contains("SKIP_TRANSFORM_USED") || define.contains("VERTEX_WORLD_COORDS_USED") || define.contains("DO_SIDE_CHECK") ||
 				define.contains("SPECULAR_DISABLED") || define.contains("MODE_UNSHADED") || define.contains("ENABLE_INSTANCE_CUSTOM") ||
-				define.contains("CUSTOM0_USED") || define.contains("CUSTOM1_USED") || define.contains("CUSTOM2_USED") || define.contains("CUSTOM3_USED")) {
+				define.contains("CUSTOM0_USED") || define.contains("CUSTOM1_USED") || define.contains("CUSTOM2_USED") || define.contains("CUSTOM3_USED") ||
+				define.contains("#define UV_USED") || define.contains("STREAMING_LOD_USED")) {
 			r_entry.defines += define;
 		}
 	}
@@ -1556,6 +1560,11 @@ bool SceneShaderRaytracing::_build_variant_compile_context(uint32_t p_rt_flags, 
 		inject_define(raygen_source, "#define VISIBILITY_RANGE_DITHERED_FADE\n");
 		sources.write[RD::SHADER_STAGE_RAYGEN] = raygen_source[0];
 	}
+	// rendering/textures/streaming/enabled, as the rasterizer's scene shader takes it (read at startup): the closest hits
+	// write texture streaming feedback (binding 50). Disabled, the sources of every variant are those without it.
+	if (texture_streaming_feedback()) {
+		inject_define(sources, "#define TEXTURE_STREAMING\n");
+	}
 
 	// Procedural templates come from intersection stage; strip from base HG0 path.
 	String intersection_source_template;
@@ -1704,6 +1713,15 @@ void SceneShaderRaytracing::get_bake_programs(bool p_simple_shadows, bool p_ser,
 		sources.write[RD::SHADER_STAGE_COMPUTE] = source;
 		r_programs.push_back(_compute_bake_program("RT OMM bake", source, _binary_cache_key("RT OMM bake", sources)));
 	}
+}
+
+bool SceneShaderRaytracing::texture_streaming_feedback() {
+#ifdef MODULE_TEXTURE_STREAMING_ENABLED
+	static const bool enabled = GLOBAL_GET("rendering/textures/streaming/enabled");
+	return enabled;
+#else
+	return false;
+#endif
 }
 
 uint32_t SceneShaderRaytracing::nrd_direct_light_flag() {
@@ -2887,6 +2905,8 @@ void SceneShaderRaytracing::init(const String p_defines) {
 		actions.renames["CUSTOM2"] = "custom2_attrib";
 		actions.renames["CUSTOM3"] = "custom3_attrib";
 		actions.renames["LIGHT_VERTEX"] = "light_vertex";
+		// Texture streaming feedback (raster: scene_shader_forward_clustered.cpp): a local of the fragment templates.
+		actions.renames["STREAMING_LOD"] = "streaming_lod";
 		// The path tracer's built-ins (ShaderTypes): raster takes them as a camera ray's, the hit shaders from the ray that
 		// hit (raytracing_custom_globals_inc.glsl). SCENE_DEPTH is the opaque depth DEPTH_TEXTURE reads (_depth_buffer_reads()).
 		actions.renames["SCENE_DEPTH"] = "rt_depth_buffer_value()";
@@ -2920,6 +2940,12 @@ void SceneShaderRaytracing::init(const String p_defines) {
 		actions.renames["DIFFUSE_LIGHT"] = "diffuse_light";
 		actions.renames["SPECULAR_LIGHT"] = "specular_light";
 
+		if (texture_streaming_feedback()) {
+			// The closest hits' texture streaming feedback, under raster's conditions (raytracing_custom_fragment_inc.glsl).
+			// Only then: these defines would change every custom hit group's source, and so its cache key.
+			actions.usage_defines["UV"] = "#define UV_USED\n";
+			actions.usage_defines["STREAMING_LOD"] = "#define STREAMING_LOD_USED\n";
+		}
 		actions.usage_defines["NORMAL"] = "#define NORMAL_USED\n";
 		actions.usage_defines["TANGENT"] = "#define TANGENT_USED\n";
 		actions.usage_defines["BINORMAL"] = "@TANGENT";

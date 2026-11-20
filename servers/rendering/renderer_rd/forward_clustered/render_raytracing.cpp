@@ -49,6 +49,12 @@
 #include "servers/rendering/rendering_server_globals.h"
 #include "servers/rendering/storage/environment_storage.h"
 
+#include "modules/modules_enabled.gen.h"
+
+#ifdef MODULE_TEXTURE_STREAMING_ENABLED
+#include "modules/texture_streaming/texture_streaming.h"
+#endif
+
 using namespace RendererSceneRenderImplementation;
 
 // ---------------------------------------------------------------------------
@@ -4837,6 +4843,23 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 		const float fade_alpha = RenderForwardClustered::_instance_fade_alpha(p_instance, fade_camera_origin, true, dither_fade);
 		return dither_fade ? (RT_VISIBILITY_FADE_DITHERED | uint32_t(fade_alpha * 255.0)) : 0;
 	};
+	// rendering/textures/streaming/enabled: RT_GeometryData::material_feedback of each traced surface, its material
+	// registered with this frame's feedback buffer as raster's fill registers the ones it draws (_fill_instance_data()).
+	// The slot is the material's (stable); the registration is per frame, and the path tracer draws what raster skips.
+#ifdef MODULE_TEXTURE_STREAMING_ENABLED
+	const bool streaming_feedback = SceneShaderRaytracing::texture_streaming_feedback() && TextureStreaming::get_singleton() && TextureStreaming::get_singleton()->feedback_buffer_get_uniform_rid().is_valid();
+#endif
+	auto material_feedback = [&](const RenderForwardClustered::GeometryInstanceSurfaceDataCache *p_surf) -> uint32_t {
+#ifdef MODULE_TEXTURE_STREAMING_ENABLED
+		if (!streaming_feedback || !p_surf->material || p_surf->material->material_feedback_rid.is_null()) {
+			return 0;
+		}
+		const uint32_t slot = TextureStreaming::get_singleton()->feedback_buffer_material_index(p_surf->material->material_feedback_rid);
+		return slot == UINT32_MAX ? 0 : slot + 1;
+#else
+		return 0;
+#endif
+	};
 	// rendering/pathtracing/shadow_groups (RT_SHADOW_GROUPS): the instances that cast shadows on SELF_SHADOWING ones only.
 	const bool shadow_groups = p_rt_flags & SceneShaderRaytracing::RT_FLAG_SHADOW_GROUPS;
 	auto shadow_group_flags = [shadow_groups](const RenderGeometryInstanceBase *p_instance) -> uint32_t {
@@ -5513,6 +5536,7 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 			geometry_data.push_back(surf_data->geometry);
 			geometry_data[geometry_data.size() - 1].layer_mask = inst->layer_mask;
 			geometry_data[geometry_data.size() - 1].visibility_fade = visibility_fade(inst);
+			geometry_data[geometry_data.size() - 1].material_feedback = material_feedback(surf);
 			geometry_data[geometry_data.size() - 1].flags |= shadow_group_flags(inst);
 
 			if (billboard) {
@@ -5665,6 +5689,7 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 			geometry_data.push_back(merged_sd.geometry);
 			geometry_data[geometry_data.size() - 1].layer_mask = pending.mm_surf->owner->layer_mask;
 			geometry_data[geometry_data.size() - 1].visibility_fade = visibility_fade(pending.mm_surf->owner);
+			geometry_data[geometry_data.size() - 1].material_feedback = material_feedback(pending.mm_surf);
 			geometry_data[geometry_data.size() - 1].flags |= shadow_group_flags(pending.mm_surf->owner);
 			sbt_offsets.push_back(pending.mat_data->rt_sbt_offset);
 			material_data.push_back(pending.mat_data->data);
@@ -5726,6 +5751,7 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 			mm_geometry.layer_mask = pending.mm_surf->owner->layer_mask;
 			// The node's fade, for every instance the GPU writes from this record.
 			mm_geometry.visibility_fade = visibility_fade(pending.mm_surf->owner);
+			mm_geometry.material_feedback = material_feedback(pending.mm_surf);
 			mm_geometry.flags |= shadow_group_flags(pending.mm_surf->owner);
 			RT_MaterialData mm_material = pending.mat_data->data;
 			mm_material.instance_uniforms_ofs = uint32_t(pending.mm_surf->owner->shader_uniforms_offset);
@@ -5807,6 +5833,7 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 
 			RT_GeometryData mm_geometry = surf_data->geometry;
 			mm_geometry.visibility_fade = visibility_fade(pending.mm_surf->owner);
+			mm_geometry.material_feedback = material_feedback(pending.mm_surf);
 			const bool reads_multimesh = _set_multimesh_instance_data(mm_geometry, pending.mm_rid, pending.mm_gpu_buffer, UINT32_MAX);
 			if (reads_multimesh) {
 				multimesh_buffers_read_this_frame.push_back(pending.mm_gpu_buffer);
@@ -7275,6 +7302,18 @@ RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderD
 			u.append_id(RendererRD::MeshStorage::get_singleton()->get_default_rd_storage_buffer());
 		}
 		uniforms.push_back(u);
+	}
+
+	// Binding 50: texture streaming feedback (SceneShaderRaytracing::texture_streaming_feedback()), the buffer raster's passes
+	// write this frame (binding 38 of their render pass set; the module rotates it every frame).
+	if (SceneShaderRaytracing::texture_streaming_feedback()) {
+		RID feedback_buffer;
+#ifdef MODULE_TEXTURE_STREAMING_ENABLED
+		if (TextureStreaming::get_singleton()) {
+			feedback_buffer = TextureStreaming::get_singleton()->feedback_buffer_get_uniform_rid();
+		}
+#endif
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 50, feedback_buffer.is_valid() ? feedback_buffer : owner->scene_shader.default_material_feedback_buffer));
 	}
 
 	// Binding 42: Light grid (build_light_grid()).

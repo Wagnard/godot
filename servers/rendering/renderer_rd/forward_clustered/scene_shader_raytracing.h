@@ -721,6 +721,9 @@ public:
 	// RT_FLAG_NRD_DIRECT_LIGHT when the NRD variant takes it (rendering/pathtracing/nrd_direct_light_denoising, and an NRD
 	// install with its programs), else 0. Read every frame.
 	static uint32_t nrd_direct_light_flag();
+	// rendering/textures/streaming/enabled (read at startup, as the rasterizer's TEXTURE_STREAMING define): the closest hits
+	// write texture streaming feedback.
+	static bool texture_streaming_feedback();
 	static String get_binary_cache_file_name(const String &p_key, const String &p_api);
 	static Vector<uint8_t> make_binary_cache_file(const Vector<uint8_t> &p_binary);
 	// Null when the path tracer's shaders were never initialized (no Forward+ renderer).

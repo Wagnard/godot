@@ -145,7 +145,10 @@ struct alignas(16) RT_GeometryData {
 	// instance flags hold it) of an instance fading through its visibility range in a view that dithers such fades
 	// (RenderForwardClustered::_instance_fade_alpha()): the camera rays keep or drop it against a noise threshold.
 	uint32_t visibility_fade;
-	uint32_t multimesh_pad;
+	// rendering/textures/streaming/enabled: 1 + the material's slot in the texture streaming feedback buffer (RT set 0
+	// binding 50), which the closest hits write as raster's passes do (TextureStreaming::feedback_buffer_material_index(),
+	// registered every frame the geometry is traced); 0: none, the value of a zeroed RT_GeometryData.
+	uint32_t material_feedback;
 };
 static_assert(sizeof(RT_GeometryData) == 176, "RT_GeometryData must be 176 bytes for std430");
 

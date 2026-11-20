@@ -317,6 +317,7 @@ uint rt_omm_sample(vec3 p_bary, vec3 p_bary_dx, vec3 p_bary_dy) {
 	vec4 transmittance_color = vec4(0.0);
 	float transmittance_depth = 0.0;
 	float transmittance_boost = 0.0;
+	float streaming_lod = 32.0; // STREAMING_LOD (raytracing_custom_fragment_inc.glsl).
 	vec3 light_vertex = vertex;
 
 	{

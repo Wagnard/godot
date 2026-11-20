@@ -76,7 +76,8 @@ struct GeometryData {
 	// instance flags hold it) of an instance fading through its visibility range, which the camera rays keep or drop
 	// against a noise threshold (visibility_fade_drops(), raytracing_shade_inc.glsl).
 	uint visibility_fade;
-	uint multimesh_pad2;
+	// Texture streaming (TEXTURE_STREAMING): 1 + the material's slot in the feedback buffer (binding 50), 0: none.
+	uint material_feedback;
 };
 
 void get_aabb_compression_xforms(GeometryData geom, out mat4 aabb_xform, out mat4 inv_aabb_xform) {
