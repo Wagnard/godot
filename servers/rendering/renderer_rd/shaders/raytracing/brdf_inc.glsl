@@ -541,7 +541,8 @@ float3 evalPhong(const BrdfData data) {
 // Source: "Sampling Transformations Zoo" in Ray Tracing Gems by Shirley et al.
 float3 samplePhong(float3 Vlocal, float shininess, float2 u, OUT_PARAMETER(float) pdf) {
 	float cosTheta = pow(1.0f - u.x, 1.0f / (1.0f + shininess));
-	float sinTheta = sqrt(1.0f - cosTheta * cosTheta);
+	// max(): pow() is exp2(y * log2(x)) to a few ULP, so cosTheta can exceed 1 (see sampleGGXVNDF()).
+	float sinTheta = sqrt(max(0.0f, 1.0f - cosTheta * cosTheta));
 
 	float phi = TWO_PI * u.y;
 
@@ -831,7 +832,10 @@ float3 sampleGGXVNDF(float3 Ve, float2 alpha2D, float2 u) {
 	float t1 = r * cos(phi);
 	float t2 = r * sin(phi);
 	float s = 0.5f * (1.0f + Vh.z);
-	t2 = lerp(sqrt(1.0f - t1 * t1), t2, s);
+	// max(): t1 can exceed 1 on the GPU. Vulkan only bounds cos() to an absolute error of 2^-11 inside [-pi, pi] (phi
+	// reaches 2 pi) and sqrt() to two ULP ("Precision of GLSL.std.450 Instructions"); a NaN here would become the path's
+	// direction, then its radiance.
+	t2 = lerp(sqrt(max(0.0f, 1.0f - t1 * t1)), t2, s);
 
 	// Section 4.3: reprojection onto hemisphere
 	float3 Nh = t1 * T1 + t2 * T2 + sqrt(max(0.0f, 1.0f - t1 * t1 - t2 * t2)) * Vh;
@@ -876,7 +880,8 @@ float3 sampleBeckmannWalter(float3 Vlocal, float2 alpha2D, float2 u) {
 
 	// Calculate cosTheta and sinTheta needed for conversion to H vector
 	float cosTheta = rsqrt(1.0f + tanThetaSquared);
-	float sinTheta = sqrt(1.0f - cosTheta * cosTheta);
+	// max(): inversesqrt() is exact to two ULP only, so cosTheta can exceed 1 (see sampleGGXVNDF()).
+	float sinTheta = sqrt(max(0.0f, 1.0f - cosTheta * cosTheta));
 
 	// Convert sampled spherical coordinates to H vector
 	return normalize(float3(sinTheta * cos(phi), sinTheta * sin(phi), cosTheta));
