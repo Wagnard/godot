@@ -340,13 +340,16 @@ bool shade_and_bounce(inout PathState ps, HitRecord r, vec3 p_ray_origin, vec3 p
 		imageStore(dlss_rr_specular_albedo, pixel, vec4(clamp(specular_albedo, vec3(0.04), vec3(1.0)), 1.0)); // match UNORM8 like before - fixes some issues with garbling..
 
 		imageStore(dlss_rr_normal_roughness, pixel, vec4(N, roughness));
+		// Before the reorder points below and the later traces of the path (RT_PRIMARY_OUTPUT): the raygen reads these back.
+		rt_primary_outputs_barrier();
 
 #ifdef DLSS_RR_SPECULAR_MOTION_VECTORS
 		// Ray Reconstruction takes the specular motion vectors instead of the hit distance (dlss.cpp), which stays written
 		// for its debug view, from the same reflection ray.
 		float spec_hit_dist;
 		// The surface's own motion vector, which the closest hit wrote to the velocity in this sample's camera ray
-		// (write_primary_hit_velocity()), as the raygen reads its depth back for the depth guides (rt_depth_image).
+		// (write_primary_hit_velocity(), visible here through RT_PRIMARY_OUTPUT), as the raygen reads its depth back for
+		// the depth guides (rt_depth_image).
 		const vec2 surface_motion_vector = imageLoad(rt_velocity_image, pixel).xy;
 		const vec2 specular_motion_vector = rt_specular_motion_vector(r, roughness, p_ray_origin, p_ray_dir, hit_pos, surface_motion_vector, spec_hit_dist);
 		imageStore(dlss_rr_specular_motion_vectors, pixel, vec4(specular_motion_vector, 0.0, 0.0));
@@ -391,6 +394,9 @@ bool shade_and_bounce(inout PathState ps, HitRecord r, vec3 p_ray_origin, vec3 p
 #endif
 		}
 		imageStore(dlss_rr_specular_hit_dist, pixel, vec4(spec_hit_dist));
+#endif
+#ifdef DLSS_RR_ENABLED
+		rt_primary_outputs_barrier(); // The specular guides, written again by the front layer or a peeled layer (RT_PRIMARY_OUTPUT).
 #endif
 	}
 #endif

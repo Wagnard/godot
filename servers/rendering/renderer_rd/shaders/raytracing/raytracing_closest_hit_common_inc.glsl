@@ -164,6 +164,7 @@ void write_primary_hit_depth(vec3 hit_pos) {
 		vec4 clip_pos = scene_data_block.data.projection_matrix * vec4(view_pos, 1.0);
 		float ndc_depth = clip_pos.z / clip_pos.w;
 		imageStore(rt_depth_image, ivec2(gl_LaunchIDEXT.xy), vec4(ndc_depth));
+		rt_primary_outputs_barrier(); // The raygen reads it back (RT_PRIMARY_OUTPUT).
 	}
 }
 
@@ -250,6 +251,7 @@ void write_primary_hit_velocity(vec3 hit_pos) {
 	vec2 prev_uv = project_uv(prev_world_pos, prev_vp_unjittered);
 
 	imageStore(rt_velocity_image, ivec2(gl_LaunchIDEXT.xy), vec4(prev_uv - curr_uv, 0.0, 0.0));
+	rt_primary_outputs_barrier(); // The raygen reads it back (RT_PRIMARY_OUTPUT).
 }
 
 // ============================================================================

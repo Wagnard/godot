@@ -345,6 +345,7 @@ float peel_write_dominant_guides(HitRecord r, float p_alpha, vec3 p_origin, vec3
 	imageStore(dlss_rr_specular_hit_dist, pixel, vec4(spec_hit_dist));
 	// Its motion, with its depth (NVIDIA's dominant layer writes both, raytracing_closest_hit_common_inc.glsl:892-895).
 	imageStore(rt_velocity_image, pixel, vec4(project_uv(hit_pos, prev_vp_unjittered) - project_uv(hit_pos, curr_vp_unjittered), 0.0, 0.0));
+	rt_primary_outputs_barrier(); // Before the path's later traces (RT_PRIMARY_OUTPUT).
 	return peel_ndc_depth(hit_pos);
 }
 #endif // DLSS_RR_ENABLED
@@ -543,6 +544,7 @@ void main() {
 	// NVIDIA's without Environment.pathtracing_sky_shader_enabled.
 	if (peel_first_t > 0.0 && imageLoad(rt_depth_image, ivec2(pixel)).r == 0.0) {
 		imageStore(rt_depth_image, ivec2(pixel), vec4(peel_ndc_depth(origin.xyz + direction.xyz * peel_first_t)));
+		rt_primary_outputs_barrier(); // Read back below (RT_PRIMARY_OUTPUT).
 	}
 #endif
 
@@ -820,6 +822,7 @@ void main() {
 				imageStore(dlss_rr_specular_motion_vectors, pixel, vec4(prev_uv - curr_uv, 0.0, 0.0));
 #endif
 			}
+			rt_primary_outputs_barrier(); // The raygen reads them back or writes them again (RT_PRIMARY_OUTPUT).
 		}
 	}
 
@@ -857,6 +860,7 @@ void main() {
 #ifdef DLSS_RR_ENABLED
 			imageStore(dlss_rr_specular_hit_dist, pixel, vec4(-1.0));
 #endif
+			rt_primary_outputs_barrier(); // The raygen reads them back or writes them again (RT_PRIMARY_OUTPUT).
 		}
 	}
 #endif

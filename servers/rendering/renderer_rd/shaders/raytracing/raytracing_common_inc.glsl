@@ -66,30 +66,46 @@ vec2 project_uv(vec3 world_pos, mat4 vp) {
 	return clip.xy / clip.w * 0.5 + 0.5;
 }
 
+// The images of a pixel's primary surface that several stages write (the closest hit, the miss, the raygen) and the raygen
+// reads back, all across TraceRay and reorder points: `coherent` (DXIL globallycoherent), and every stage that writes
+// them follows its writes with rt_primary_outputs_barrier(), before its next TraceRay / reorder point. DXR, "Execution and
+// memory ordering": memory operations of a callee "can similarly be guaranteed to be visible to the caller [...] with
+// similar UAV declaration and writes followed by memory barrier in the writing shader", the UAV [globallycoherent]; DXR,
+// "Reorder points - memory coherence and visibility" (Shader Execution Reordering): across a reorder point, including "a
+// write performed before MaybeReorderThread or TraceRay and a subsequent read in the same shader" and "data written in the
+// closesthit shader and read in the raygeneration shader", a [globallycoherent] UAV whose writer issues a
+// DeviceMemoryBarrier "between the write and the reorder point" (the stronger form of [reordercoherent]). Vulkan: a
+// Coherent image with a device scope barrier covers the ShaderCallKHR scope. NVIDIA showed the writes without them;
+// nothing guaranteed it.
+#define RT_PRIMARY_OUTPUT coherent
+void rt_primary_outputs_barrier() {
+	memoryBarrierImage();
+}
+
 // The guides of the primary surfaces: DLSS Ray Reconstruction's, which NRD (NRD_ENABLED) also takes: its normal and
 // roughness, and the albedos the diffuse and specular light were divided by (raytracing_nrd_composite.glsl).
 #if defined(DLSS_RR_ENABLED) || defined(NRD_ENABLED)
-layout(set = 0, binding = 9, rgba16f) uniform image2D dlss_rr_diffuse_albedo;
-layout(set = 0, binding = 10, rgba16f) uniform image2D dlss_rr_specular_albedo;
-layout(set = 0, binding = 11, rgba16f) uniform image2D dlss_rr_normal_roughness;
+layout(set = 0, binding = 9, rgba16f) RT_PRIMARY_OUTPUT uniform image2D dlss_rr_diffuse_albedo;
+layout(set = 0, binding = 10, rgba16f) RT_PRIMARY_OUTPUT uniform image2D dlss_rr_specular_albedo;
+layout(set = 0, binding = 11, rgba16f) RT_PRIMARY_OUTPUT uniform image2D dlss_rr_normal_roughness;
 #endif
 
 #ifdef DLSS_RR_ENABLED
-layout(set = 0, binding = 12, r16f) uniform image2D dlss_rr_specular_hit_dist;
+layout(set = 0, binding = 12, r16f) RT_PRIMARY_OUTPUT uniform image2D dlss_rr_specular_hit_dist;
 // NDC depth for Ray Reconstruction (RenderRaytracing::dlss_rr_get_depth()), written by the raygen.
 layout(set = 0, binding = 39, r32f) uniform image2D dlss_rr_depth;
 #ifdef DLSS_RR_SPECULAR_MOTION_VECTORS
 // Ray Reconstruction's specular motion vectors (rendering/pathtracing/specular_motion_vectors), in rt_velocity_image's
 // convention: written by the raygen (rt_specular_motion_vector()) and, where the camera ray misses, by the miss shader.
-layout(set = 0, binding = 44, rg16f) uniform image2D dlss_rr_specular_motion_vectors;
+layout(set = 0, binding = 44, rg16f) RT_PRIMARY_OUTPUT uniform image2D dlss_rr_specular_motion_vectors;
 #endif
 #endif
 
 // Binding 14 is reserved for GlobalShaderUniformData (declared above).
 // Samplers occupy 16-27 (see raytracing_samplers_inc.glsl); velocity sits at
 // the first free slot past them so we do not collide with either.
-layout(set = 0, binding = 28, rg16f) uniform image2D rt_velocity_image;
-layout(set = 0, binding = 15, r32f) uniform image2D rt_depth_image;
+layout(set = 0, binding = 28, rg16f) RT_PRIMARY_OUTPUT uniform image2D rt_velocity_image;
+layout(set = 0, binding = 15, r32f) RT_PRIMARY_OUTPUT uniform image2D rt_depth_image;
 
 #endif // !RT_STAGE_ANY_HIT
 

@@ -35,11 +35,12 @@ else:
 # This fork's Mesa: Godot's (godotengine/godot-nir-static) with the patches its Direct3D 12 path tracing needs (ray
 # tracing stages, shader execution reordering, opacity micromaps, integer division by 0, ray tracing libraries without
 # unused resources or blocks without predecessors, atomics with side effects, non-uniform resource indices, resource
-# properties and function features as DXC writes them), built and released by the same CI from its `raytracing` branch.
+# properties and function features as DXC writes them, globally coherent UAVs in the runtime data), built and released by
+# the same CI from its `raytracing` branch.
 # The shader cache key does not include Mesa: a new version reaches cached shaders only with a new engine commit.
 # Check for latest version: https://github.com/Wagnard/godot-nir-static/releases/latest
 mesa_repository = "Wagnard/godot-nir-static"
-mesa_version = "25.3.1-3-wagnardsoft.7"
+mesa_version = "25.3.1-3-wagnardsoft.8"
 # WinPixEventRuntime
 # Check for latest version: https://www.nuget.org/api/v2/package/WinPixEventRuntime (check downloaded filename)
 pix_version = "1.0.240308001"
