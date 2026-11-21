@@ -447,12 +447,28 @@ public:
 };
 
 struct CSharpScriptBinding {
-	bool inited = false;
+	// Set last, once `type_name`, `gchandle` and `owner` are written (release), and tested first (acquire).
+	// The reference callback runs on whichever thread changes the owner's reference count, under the owner's
+	// instance binding mutex only, while another thread may still be setting the binding up under
+	// `language_bind_mutex` (`get_instance_binding_with_setup()`).
+	SafeFlag inited;
 	StringName type_name;
 	MonoGCHandleData gchandle;
-	Object *owner = nullptr;
+	Object *owner = nullptr; // Only valid once `inited` is set. The map element's key is the owner from creation.
 
 	CSharpScriptBinding() {}
+	CSharpScriptBinding(const CSharpScriptBinding &p_other) :
+			inited(p_other.inited.is_set()),
+			type_name(p_other.type_name),
+			gchandle(p_other.gchandle),
+			owner(p_other.owner) {}
+	CSharpScriptBinding &operator=(const CSharpScriptBinding &p_other) {
+		inited.set_to(p_other.inited.is_set());
+		type_name = p_other.type_name;
+		gchandle = p_other.gchandle;
+		owner = p_other.owner;
+		return *this;
+	}
 };
 
 class ManagedCallableMiddleman : public Object {

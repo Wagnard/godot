@@ -154,12 +154,12 @@ void CSharpLanguage::finalize() {
 
 		if (!script_binding.gchandle.is_released()) {
 			script_binding.gchandle.release();
-			script_binding.inited = false;
+			script_binding.inited.clear();
 		}
 
 		// Make sure we clear all the instance binding callbacks so they don't get called
-		// after finalizing the C# language.
-		script_binding.owner->free_instance_binding(this);
+		// after finalizing the C# language. The key: `owner` is only set once the binding is set up.
+		E.key->free_instance_binding(this);
 	}
 
 	if (gdmono) {
@@ -1113,7 +1113,7 @@ void CSharpLanguage::release_binding_gchandle_thread_safe(GCHandleIntPtr p_gchan
 		MutexLock lock(get_singleton()->script_gchandle_release_mutex);
 		if (!gchandle.is_released() && gchandle.get_intptr() == p_gchandle_to_free) {
 			gchandle.release();
-			r_script_binding.inited = false; // Here too, to be thread safe
+			r_script_binding.inited.clear(); // Here too, to be thread safe
 		}
 	}
 }
@@ -1166,10 +1166,12 @@ bool CSharpLanguage::setup_csharp_script_binding(CSharpScriptBinding &r_script_b
 
 	ERR_FAIL_NULL_V(strong_gchandle.value, false);
 
-	r_script_binding.inited = true;
 	r_script_binding.type_name = type_name;
 	r_script_binding.gchandle = MonoGCHandleData(strong_gchandle, gdmono::GCHandleType::STRONG_HANDLE);
 	r_script_binding.owner = p_object;
+	// Published last: another thread may change the owner's reference count meanwhile, and its reference callback
+	// reads the fields above once it sees `inited` (see CSharpScriptBinding).
+	r_script_binding.inited.set();
 
 	// Tie managed to unmanaged
 	RefCounted *rc = Object::cast_to<RefCounted>(p_object);
@@ -1228,14 +1230,14 @@ void CSharpLanguage::_instance_binding_free_callback(void *, void *, void *p_bin
 
 		CSharpScriptBinding &script_binding = data->value();
 
-		if (script_binding.inited) {
+		if (script_binding.inited.is_set()) {
 			// Set the native instance field to IntPtr.Zero, if not yet garbage collected.
 			// This is done to avoid trying to dispose the native instance from Dispose(bool).
 			GDMonoCache::managed_callbacks.ScriptManagerBridge_SetGodotObjectPtr(
 					script_binding.gchandle.get_intptr(), nullptr);
 
 			script_binding.gchandle.release();
-			script_binding.inited = false;
+			script_binding.inited.clear();
 		}
 
 		csharp_lang->script_bindings.erase(data);
@@ -1250,21 +1252,25 @@ GDExtensionBool CSharpLanguage::_instance_binding_reference_callback(void *p_tok
 
 	CRASH_COND(!p_binding);
 
-	CSharpScriptBinding &script_binding = ((RBMap<Object *, CSharpScriptBinding>::Element *)p_binding)->get();
+	RBMap<Object *, CSharpScriptBinding>::Element *binding_element = (RBMap<Object *, CSharpScriptBinding>::Element *)p_binding;
+	CSharpScriptBinding &script_binding = binding_element->get();
 
-	RefCounted *rc_owner = Object::cast_to<RefCounted>(script_binding.owner);
+	// The element's key, not `script_binding.owner`: the binding is created empty (`_instance_binding_create_callback()`)
+	// and set up afterwards, possibly while another thread references the owner (a resource the cache hands out
+	// to a loading thread). The key is the owner from the start, and this callback is only called by it.
+	RefCounted *rc_owner = Object::cast_to<RefCounted>(binding_element->key());
 
 #ifdef DEBUG_ENABLED
 	CRASH_COND(!rc_owner);
 #endif // DEBUG_ENABLED
 
-	MonoGCHandleData &gchandle = script_binding.gchandle;
-
 	int refcount = rc_owner->get_reference_count();
 
-	if (!script_binding.inited) {
+	if (!script_binding.inited.is_set()) {
 		return refcount == 0;
 	}
+
+	MonoGCHandleData &gchandle = script_binding.gchandle;
 
 	if (p_reference) {
 		// Refcount incremented
@@ -1334,10 +1340,10 @@ void *CSharpLanguage::get_instance_binding_with_setup(Object *p_object) {
 	if (binding) {
 		CSharpScriptBinding &script_binding = ((RBMap<Object *, CSharpScriptBinding>::Element *)binding)->value();
 
-		if (!script_binding.inited) {
+		if (!script_binding.inited.is_set()) {
 			MutexLock lock(CSharpLanguage::get_singleton()->get_language_bind_mutex());
 
-			if (!script_binding.inited) { // Another thread may have set it up
+			if (!script_binding.inited.is_set()) { // Another thread may have set it up
 				CSharpLanguage::get_singleton()->setup_csharp_script_binding(script_binding, p_object);
 			}
 		}
@@ -1395,10 +1401,10 @@ void CSharpLanguage::tie_native_managed_to_unmanaged(GCHandleIntPtr p_gchandle_i
 	void *binding = CSharpLanguage::get_singleton()->get_instance_binding(p_unmanaged);
 
 	CSharpScriptBinding &script_binding = ((RBMap<Object *, CSharpScriptBinding>::Element *)binding)->value();
-	script_binding.inited = true;
 	script_binding.type_name = *p_native_name;
 	script_binding.gchandle = gchandle;
 	script_binding.owner = p_unmanaged;
+	script_binding.inited.set(); // Last, as in setup_csharp_script_binding().
 }
 
 void CSharpLanguage::tie_user_managed_to_unmanaged(GCHandleIntPtr p_gchandle_intptr, Object *p_unmanaged, Ref<CSharpScript> *p_script, bool p_ref_counted) {
@@ -2156,7 +2162,7 @@ CSharpInstance::~CSharpInstance() {
 		void *data = CSharpLanguage::get_instance_binding_with_setup(owner);
 		CRASH_COND(data == nullptr);
 		CSharpScriptBinding &script_binding = ((RBMap<Object *, CSharpScriptBinding>::Element *)data)->get();
-		CRASH_COND(!script_binding.inited);
+		CRASH_COND(!script_binding.inited.is_set());
 
 #ifdef DEBUG_ENABLED
 		// The "instance binding" holds a reference so the refcount should be at least 2 before `scope_keep_owner_alive` goes out of scope
@@ -2575,12 +2581,12 @@ CSharpInstance *CSharpScript::_create_instance(const Variant **p_args, int p_arg
 		CRASH_COND(data == nullptr);
 
 		CSharpScriptBinding &script_binding = ((RBMap<Object *, CSharpScriptBinding>::Element *)data)->get();
-		if (script_binding.inited && !script_binding.gchandle.is_released()) {
+		if (script_binding.inited.is_set() && !script_binding.gchandle.is_released()) {
 			GDMonoCache::managed_callbacks.CSharpInstanceBridge_CallDispose(
 					script_binding.gchandle.get_intptr(), /* okIfNull */ true);
 
 			script_binding.gchandle.release(); // Just in case
-			script_binding.inited = false;
+			script_binding.inited.clear();
 		}
 	}
 
