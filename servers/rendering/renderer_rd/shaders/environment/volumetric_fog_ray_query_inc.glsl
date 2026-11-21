@@ -133,6 +133,9 @@ void fog_shadows_add_positional(inout FogShadowReservoir r_reservoir, vec3 p_lig
 // (lights_trace_shadow_transmittance()): 0 when an opaque or alpha tested surface blocks it, filtered by the transparent
 // shadow copies in between.
 vec3 fog_shadows_transmittance(vec3 p_origin, vec3 p_direction, float p_distance) {
+	if (!rt_ray_is_finite(p_origin, p_direction, p_distance)) {
+		return vec3(0.0); // An untraceable ray: blocked (rt_ray_is_finite(), raytracing_hit_inc.glsl).
+	}
 	vec3 transmittance = vec3(1.0);
 	rayQueryEXT shadow_rq;
 	rayQueryInitializeEXT(shadow_rq, tlas, FOG_RQ_SHADOW_RAY_FLAGS, FOG_RQ_SHADOW_MASK, p_origin, 0.001, p_direction, p_distance - 0.001);

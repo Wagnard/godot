@@ -129,6 +129,9 @@ vec3 rt_primary_previous_position(HitRecord r, vec3 p_ray_origin, vec3 p_ray_dir
 		return p_hit_pos;
 	}
 	const float margin = r.hit_t * 1e-3 + 1e-3;
+	if (!rt_ray_is_finite(p_ray_origin, p_ray_dir, r.hit_t + margin)) {
+		return p_hit_pos; // An untraceable ray (rt_ray_is_finite()): taken as still.
+	}
 	rayQueryEXT rq;
 	// Every candidate of the interval comes to the loop (no opaque shortcut), so the hit's own triangle is the one kept.
 	rayQueryInitializeEXT(rq, tlas, RT_RAY_FLAGS | gl_RayFlagsNoOpaqueEXT, RT_MASK_BOUNCE, p_ray_origin, max(r.hit_t - margin, 0.0), p_ray_dir, r.hit_t + margin);
@@ -163,6 +166,9 @@ vec2 rt_specular_motion_vector(HitRecord r, float p_roughness, vec3 p_ray_origin
 	const vec3 N = r.geometry_normal;
 	const vec3 spec_dir = reflect(-V, N);
 	const vec3 spec_origin = offset_ray_origin(p_hit_pos, N);
+	if (!rt_ray_is_finite(spec_origin, spec_dir, 10000.0)) {
+		return p_surface_motion_vector; // An untraceable ray (rt_ray_is_finite()): the surface's own motion, as a rough one.
+	}
 
 	rayQueryEXT spec_rq;
 	rayQueryInitializeEXT(spec_rq, tlas, RT_RAY_FLAGS, RT_MASK_BOUNCE, spec_origin, 0.001, spec_dir, 10000.0);
@@ -348,10 +354,10 @@ bool shade_and_bounce(inout PathState ps, HitRecord r, vec3 p_ray_origin, vec3 p
 #elif defined(DLSS_RR_ENABLED)
 		// Specular hit distance via inline ray query (only for smooth surfaces).
 		float spec_hit_dist = -1.0;
-		if (roughness < MAX_DENOISER_SPECULAR_HIT_THRESHOLD) {
-			vec3 spec_dir = reflect(-V, N);
-			vec3 spec_origin = offset_ray_origin(hit_pos, spec_dir);
-
+		vec3 spec_dir = reflect(-V, N);
+		vec3 spec_origin = offset_ray_origin(hit_pos, spec_dir);
+		// An untraceable ray (rt_ray_is_finite()): no reflection distance, as a rough surface.
+		if (roughness < MAX_DENOISER_SPECULAR_HIT_THRESHOLD && rt_ray_is_finite(spec_origin, spec_dir, 10000.0)) {
 			rayQueryEXT spec_rq;
 			rayQueryInitializeEXT(spec_rq, tlas, RT_RAY_FLAGS | gl_RayFlagsTerminateOnFirstHitEXT,
 					RT_MASK_BOUNCE, spec_origin, 0.001, spec_dir, 10000.0);
@@ -671,6 +677,9 @@ bool debug_reflection_view(int p_mode, inout PathState ps, HitRecord r, bool p_m
 /// (49a825dc52 raytracing_closest_hit_common_inc.glsl:319-327) compared the geometry index, which those copies change.
 bool debug_camera_sees(uint p_geometry_idx, uint p_primitive, vec3 p_origin, vec3 p_direction, float p_t) {
 	const uint64_t vertices = geometries[p_geometry_idx].vertex_address;
+	if (!rt_ray_is_finite(p_origin, p_direction, p_t + 0.01)) {
+		return false; // An untraceable ray (rt_ray_is_finite()).
+	}
 	rayQueryEXT rq;
 	rayQueryInitializeEXT(rq, tlas, gl_RayFlagsNoOpaqueEXT, RT_MASK_CAMERA | RT_MASK_SECONDARY, p_origin, max(p_t - 0.01, 0.0), p_direction, p_t + 0.01);
 	while (rayQueryProceedEXT(rq)) {
@@ -707,6 +716,9 @@ vec3 debug_directional_shadow_blocker(vec3 p_hit_pos, vec3 p_geometry_normal) {
 	}
 
 	const vec3 origin = offset_ray_origin(p_hit_pos, p_geometry_normal);
+	if (!rt_ray_is_finite(origin, to_sun, 10000.0)) {
+		return vec3(0.1); // An untraceable ray (rt_ray_is_finite()): as a surface facing away.
+	}
 	vec3 transmittance = vec3(1.0);
 	rayQueryEXT rq;
 	rayQueryInitializeEXT(rq, tlas, RT_SHADOW_RAY_FLAGS, RT_MASK_SHADOW, origin, 0.001, to_sun, 10000.0);
@@ -867,6 +879,11 @@ void visibility_fade_keep() {
 /// Traces the path's next ray and shades its hit. False when the path ends there (a miss, a debug view, or the shading
 /// ended it); else the ray to trace next. r_hit_t: the hit's distance.
 bool trace_path_ray(inout PathState ps, inout vec3 ray_origin, inout vec3 ray_dir, out float r_hit_t, bool p_camera_ray) {
+	if (!rt_ray_is_finite(ray_origin, ray_dir, 10000.0)) {
+		// An untraceable ray (rt_ray_is_finite(), a degenerate sample): the path ends here and brings nothing more.
+		r_hit_t = 0.0;
+		return false;
+	}
 	payload.packed_bounces_flags = ps.packed_bounces_flags;
 #ifdef RT_RAY_CONES
 	// The path's cone, for the closest hit (hit_barycentric_derivatives()). The raygen never reads it back: the closest
@@ -1022,6 +1039,10 @@ bool peel_trace_layer(vec3 p_origin, vec3 p_dir, float p_tmin, float p_tmax, out
 	payload.packed_bounces_flags = set_front_layer_ray(0u);
 	payload.hit_t = p_tmax;
 	r_alpha = 0.0;
+	if (!rt_ray_is_finite(p_origin, p_dir, p_tmax) || !rt_ray_is_finite(p_origin, p_dir, p_tmin)) {
+		r_layer = hit_unpack(payload); // An untraceable ray (rt_ray_is_finite()): no layer, as a miss.
+		return false;
+	}
 #ifdef USE_SER
 	// Whether the ray hit, and where, from the hit object, as trace_path_ray() reads them: NVIDIA's Vulkan driver gave the
 	// raygen back the payload fields it wrote before the call (PT-VK-SER-PAYLOAD-WA.md), and the layers flickered in and

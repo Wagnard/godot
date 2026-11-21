@@ -5,6 +5,19 @@
 
 #include "raytracing_data_inc.glsl"
 
+/// Whether a ray may be traced: DXR, "Ray extents": "No part of ray origin, direction, T range can be NaN"; Vulkan,
+/// VUID-RuntimeSpirv-OpTraceRayKHR-06355 / OpRayQueryInitializeKHR-06348 (origin and direction finite) and -06358 / -06351
+/// (no NaN in origin, direction, tmin, tmax). A NaN or Inf from a degenerate sample would otherwise reach the traversal,
+/// undefined behaviour. Tested on the exponent bits: the D3D12 shaders are fast-math, where a compiler may fold isnan() /
+/// isinf() of a computed value. Each caller decides what an untraceable ray means: a shadow ray is blocked, a path ends.
+/// Here because every shader that traces includes this file (the path tracer, the raster transparent pass' RT shadows, the
+/// volumetric fog's ray queries).
+bool rt_ray_is_finite(vec3 p_origin, vec3 p_direction, float p_tmax) {
+	const uvec4 exponents_a = floatBitsToUint(vec4(p_origin, p_tmax)) & uvec4(0x7F800000u);
+	const uvec3 exponents_b = floatBitsToUint(p_direction) & uvec3(0x7F800000u);
+	return all(notEqual(exponents_a, uvec4(0x7F800000u))) && all(notEqual(exponents_b, uvec3(0x7F800000u)));
+}
+
 // ============================================================================
 // VERTEX ATTRIBUTES
 // ============================================================================

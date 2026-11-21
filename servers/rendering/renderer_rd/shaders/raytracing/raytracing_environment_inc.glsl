@@ -188,6 +188,9 @@ uint rt_env_bounce_share(RTEnvSampling p_env, bool p_specular, vec3 p_n, vec3 p_
 // Nothing a camera or BRDF ray would hit is in the way: the same flags, mask and any-hit shaders (cut-outs), so a
 // direction is seen by both estimators alike.
 bool rt_environment_visible(vec3 p_origin, vec3 p_direction) {
+	if (!rt_ray_is_finite(p_origin, p_direction, 10000.0)) {
+		return false; // An untraceable ray: blocked (rt_ray_is_finite()).
+	}
 	const uint flags = RT_RAY_FLAGS | gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT;
 #if defined(USE_SER)
 	hitObjectEXT hit_object;

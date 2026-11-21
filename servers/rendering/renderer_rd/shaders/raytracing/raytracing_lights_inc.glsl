@@ -235,6 +235,9 @@ float lights_get_specular_multiplier(float specular_amount, float roughness) {
 // The light the shadow group casters let through toward p_light (ray_query_shadow_group_transmittance()), when the TLAS
 // holds some this frame.
 vec3 lights_trace_shadow_group(RTLightData p_light, vec3 p_origin, vec3 p_direction, float p_max_dist, bool p_self_shadowing_receiver) {
+	if (!rt_ray_is_finite(p_origin, p_direction, p_max_dist)) {
+		return vec3(0.0); // An untraceable ray: blocked (rt_ray_is_finite()).
+	}
 	if (!(p_max_dist > 0.002) || (uint(get_rt_param(RT_PARAM_FLAGS)) & RT_PARAM_FLAG_SHADOW_GROUPS) == 0u) {
 		return vec3(1.0);
 	}
@@ -254,6 +257,9 @@ vec3 lights_trace_shadow_group(RTLightData p_light, vec3 p_origin, vec3 p_direct
 /// Uses SkipClosestHitShader so only intersection, any_hit (alpha test) and miss are invoked.
 /// TerminateOnFirstHit causes early exit on first confirmed opaque hit.
 bool lights_trace_shadow_ray_pipeline(vec3 origin, vec3 direction, float max_dist, uint p_mask) {
+	if (!rt_ray_is_finite(origin, direction, max_dist)) {
+		return false; // An untraceable ray: blocked (rt_ray_is_finite()).
+	}
 #if defined(USE_SER)
 	hitObjectEXT hitObject;
 	hitObjectTraceRayEXT(hitObject, tlas,
@@ -278,6 +284,9 @@ bool lights_trace_shadow_ray_pipeline(vec3 origin, vec3 direction, float max_dis
 
 /// Returns true if light is visible.
 bool lights_trace_shadow_ray(vec3 origin, vec3 direction, float max_dist, inout uint rng_state) {
+	if (!rt_ray_is_finite(origin, direction, max_dist)) {
+		return false; // An untraceable ray: blocked (rt_ray_is_finite()).
+	}
 	// A light within 2 mm of the surface would give the ray an empty interval (tmax below tmin), which Vulkan leaves
 	// undefined: it is visible.
 	if (!(max_dist > 0.002)) {
@@ -324,6 +333,9 @@ bool lights_trace_shadow_ray(vec3 origin, vec3 direction, float max_dist, inout 
 // any-hit multiplies the transmittance the payload carries (shadow_transmittance_filter()) and lets the ray go on. The
 // copies are not forced opaque and their BLAS has NO_DUPLICATE_ANY_HIT_INVOCATION: each triangle filters it once.
 vec3 lights_trace_shadow_transmittance_pipeline(vec3 origin, vec3 direction, float max_dist, uint p_mask) {
+	if (!rt_ray_is_finite(origin, direction, max_dist)) {
+		return vec3(0.0); // An untraceable ray: blocked (rt_ray_is_finite()).
+	}
 	payload.packed_bounces_flags = set_shadow_ray(0u);
 	shadow_transmittance_store(payload, vec3(1.0));
 #if defined(USE_SER)
@@ -345,6 +357,9 @@ vec3 lights_trace_shadow_transmittance_pipeline(vec3 origin, vec3 direction, flo
 }
 
 vec3 lights_trace_shadow_transmittance(vec3 origin, vec3 direction, float max_dist, inout uint rng_state) {
+	if (!rt_ray_is_finite(origin, direction, max_dist)) {
+		return vec3(0.0); // An untraceable ray: blocked (rt_ray_is_finite()).
+	}
 	if (!(max_dist > 0.002)) {
 		return vec3(1.0);
 	}
@@ -782,6 +797,9 @@ uint nrd_sigma_sun_index() {
 // so the search runs to the nearest hit) and of the direct light signal's hit distance. Cut-outs through the alpha test;
 // procedural geometry is not found (its intersection code runs in its hit group only): 0, a hard edge.
 float nrd_sigma_occluder_distance(vec3 p_origin, vec3 p_direction, float p_max_dist) {
+	if (!rt_ray_is_finite(p_origin, p_direction, p_max_dist) || !(p_max_dist > 0.002)) {
+		return 0.0; // Untraceable or empty (tmin 0.001 must not exceed tmax): an occluder at the point.
+	}
 	rayQueryEXT rq;
 	rayQueryInitializeEXT(rq, tlas, RT_SHADOW_RAY_FLAGS, RT_MASK_SHADOW, p_origin, 0.001, p_direction, p_max_dist - 0.001);
 	while (rayQueryProceedEXT(rq)) {

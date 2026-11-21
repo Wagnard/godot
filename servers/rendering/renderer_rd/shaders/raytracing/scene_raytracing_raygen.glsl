@@ -208,6 +208,9 @@ void debug_transparency_layers(uvec2 p_pixel, vec3 p_origin, vec3 p_direction) {
 	float opaque_t = 10000.0;
 	vec3 ray_origin = p_origin;
 	for (uint i = 0u; i < 16u; i++) {
+		if (!rt_ray_is_finite(ray_origin, p_direction, 10000.0)) {
+			break; // An untraceable ray (rt_ray_is_finite()).
+		}
 		// As the camera ray of sample 0: its hit writes the primary depth, motion and guides.
 		payload.packed_bounces_flags = set_sample_zero(0u);
 		payload.hit_t = 0.0;
@@ -244,7 +247,7 @@ void debug_transparency_layers(uvec2 p_pixel, vec3 p_origin, vec3 p_direction) {
 		}
 	} else
 #endif
-	if (get_rt_param(RT_PARAM_FRONT_LAYER_COUNT) > 0.0) {
+	if (get_rt_param(RT_PARAM_FRONT_LAYER_COUNT) > 0.0 && rt_ray_is_finite(p_origin, p_direction, max(opaque_t, 0.001))) {
 		payload.packed_bounces_flags = set_front_layer_ray(0u);
 		payload.hit_t = opaque_t;
 		traceRayEXT(tlas, RT_RAY_FLAGS, RT_MASK_FRONT_LAYER, 0, 0, 0, p_origin, 0.001, p_direction, max(opaque_t, 0.001), 0);
@@ -319,10 +322,12 @@ float peel_write_dominant_guides(HitRecord r, float p_alpha, vec3 p_origin, vec3
 #else
 	// As shade_and_bounce()'s, procedural geometry left out.
 	float spec_hit_dist = -1.0;
-	if (r.roughness < MAX_DENOISER_SPECULAR_HIT_THRESHOLD) {
-		const vec3 spec_dir = reflect(-V, N);
+	const vec3 spec_dir = reflect(-V, N);
+	const vec3 spec_origin = offset_ray_origin(hit_pos, spec_dir);
+	// An untraceable ray (rt_ray_is_finite()): no reflection distance, as a rough surface.
+	if (r.roughness < MAX_DENOISER_SPECULAR_HIT_THRESHOLD && rt_ray_is_finite(spec_origin, spec_dir, 10000.0)) {
 		rayQueryEXT spec_rq;
-		rayQueryInitializeEXT(spec_rq, tlas, RT_RAY_FLAGS | gl_RayFlagsTerminateOnFirstHitEXT, RT_MASK_BOUNCE, offset_ray_origin(hit_pos, spec_dir), 0.001, spec_dir, 10000.0);
+		rayQueryInitializeEXT(spec_rq, tlas, RT_RAY_FLAGS | gl_RayFlagsTerminateOnFirstHitEXT, RT_MASK_BOUNCE, spec_origin, 0.001, spec_dir, 10000.0);
 		while (rayQueryProceedEXT(spec_rq)) {
 			if (rayQueryGetIntersectionTypeEXT(spec_rq, false) == gl_RayQueryCandidateIntersectionTriangleEXT &&
 					ray_query_alpha_test(
@@ -596,7 +601,7 @@ void main() {
 #endif
 	} else
 #endif
-	if (get_rt_param(RT_PARAM_FRONT_LAYER_COUNT) > 0.0) {
+	if (get_rt_param(RT_PARAM_FRONT_LAYER_COUNT) > 0.0 && rt_ray_is_finite(origin.xyz, direction.xyz, max(opaque_t, 0.001))) {
 		uint front_rng_state = init_rng(pixel, frame_index, samples_per_pixel);
 		payload.packed_bounces_flags = set_front_layer_ray(0u);
 		payload.hit_t = opaque_t; // Read by the hit shaders as DEPTH_TEXTURE (rt_depth_buffer_value()).

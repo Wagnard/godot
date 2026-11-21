@@ -56,6 +56,9 @@ vec4 ray_query_shadow_color(uint geometry_idx, uint primitive_id, vec2 candidate
 /// RAY_FLAG_FORCE_NON_OPAQUE) and decided here: cut-outs by ray_query_alpha_test(), as the simple shadows, the transparent
 /// shadow copies filter the light as in lights_trace_shadow_transmittance(), the others block it.
 vec3 ray_query_shadow_group_transmittance(vec3 p_origin, vec3 p_direction, float p_tmax, uint p_ray_flags, uint p_caster_mask, bool p_self_shadowing_receiver) {
+	if (!rt_ray_is_finite(p_origin, p_direction, p_tmax)) {
+		return vec3(0.0); // An untraceable ray: blocked (rt_ray_is_finite()).
+	}
 	vec3 transmittance = vec3(1.0);
 	rayQueryEXT group_rq;
 	rayQueryInitializeEXT(group_rq, tlas, p_ray_flags | gl_RayFlagsNoOpaqueEXT, RT_MASK_SHADOW_GROUP, p_origin, 0.001, p_direction, p_tmax);

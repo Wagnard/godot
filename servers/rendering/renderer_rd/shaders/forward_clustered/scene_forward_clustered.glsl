@@ -1175,6 +1175,9 @@ float rt_shadow_visibility(vec3 p_vertex, vec3 p_geo_normal, vec3 p_light_dir, f
 	vec3 world_origin = vec3(dot(row0, origin), dot(row1, origin), dot(row2, origin));
 	vec3 world_direction = normalize(vec3(dot(row0, direction), dot(row1, direction), dot(row2, direction)));
 	float t_max = p_max_dist - length(offset);
+	if (!rt_ray_is_finite(world_origin, world_direction, t_max)) {
+		return 0.0; // An untraceable ray: blocked (rt_ray_is_finite(), raytracing_hit_inc.glsl).
+	}
 	if (!(t_max > 0.002)) {
 		return 1.0;
 	}
