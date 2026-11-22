@@ -225,7 +225,7 @@ WorkerThreadPool::Task *WorkerThreadPool::_take_queued_group_task(Group *p_group
 
 void WorkerThreadPool::_thread_function(void *p_user) {
 	ThreadData *thread_data = (ThreadData *)p_user;
-	Thread::set_name(vformat("WorkerThread %d", thread_data->index));
+	Thread::set_name(vformat("%s %d", thread_data->pool->thread_name, thread_data->index));
 
 	while (true) {
 		Task *task_to_process = nullptr;
@@ -927,7 +927,7 @@ void WorkerThreadPool::init(int p_thread_count, float p_low_priority_task_ratio)
 
 	max_low_priority_threads = CLAMP(p_thread_count * p_low_priority_task_ratio, 1, p_thread_count - 1);
 
-	print_verbose(vformat("WorkerThreadPool: %d threads, %d max low-priority.", p_thread_count, max_low_priority_threads));
+	print_verbose(vformat("WorkerThreadPool (%s): %d threads, %d max low-priority.", thread_name, p_thread_count, max_low_priority_threads));
 
 #ifdef THREADS_ENABLED
 	// Reserve 5 threads in case we need separate threads for 1) 2D physics 2) 3D physics 3) rendering 4) GPU texture compression, 5) all other tasks.
@@ -1014,13 +1014,14 @@ void WorkerThreadPool::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_caller_group_id"), &WorkerThreadPool::get_caller_group_id);
 }
 
-WorkerThreadPool *WorkerThreadPool::get_named_pool(const StringName &p_name) {
+WorkerThreadPool *WorkerThreadPool::get_named_pool(const StringName &p_name, int p_thread_count, float p_low_priority_task_ratio) {
 	WorkerThreadPool **pool_ptr = named_pools.getptr(p_name);
 	if (pool_ptr) {
 		return *pool_ptr;
 	} else {
 		WorkerThreadPool *pool = memnew(WorkerThreadPool(false));
-		pool->init();
+		pool->thread_name = p_name;
+		pool->init(p_thread_count, p_low_priority_task_ratio);
 		named_pools[p_name] = pool;
 		return pool;
 	}

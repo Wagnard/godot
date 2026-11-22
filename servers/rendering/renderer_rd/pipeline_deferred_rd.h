@@ -30,6 +30,7 @@
 
 #pragma once
 
+#include "servers/rendering/rendering_compilation_pool.h"
 #include "servers/rendering/rendering_device.h"
 
 // Helper class for automatically deferring compilation of a pipeline to a background task.
@@ -66,12 +67,12 @@ protected:
 
 	void _start(const CreationParameters &c) {
 		free();
-		task = WorkerThreadPool::get_singleton()->add_template_task(this, &PipelineDeferredRD::_create, c, true, "PipelineCompilation");
+		task = RenderingCompilationPool::get()->add_template_task(this, &PipelineDeferredRD::_create, c, true, "PipelineCompilation");
 	}
 
 	void _wait() {
 		if (task != WorkerThreadPool::INVALID_TASK_ID) {
-			WorkerThreadPool::get_singleton()->wait_for_task_completion(task);
+			RenderingCompilationPool::get()->wait_for_task_completion(task);
 			task = WorkerThreadPool::INVALID_TASK_ID;
 		}
 	}

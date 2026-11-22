@@ -38,6 +38,7 @@
 #include "core/os/thread.h"
 #include "core/templates/fixed_vector.h"
 #include "drivers/vulkan/vulkan_hooks.h"
+#include "servers/rendering/rendering_compilation_pool.h"
 
 #include <thirdparty/misc/smolv.h>
 
@@ -7764,7 +7765,8 @@ VkResult RenderingDeviceDriverVulkan::_raytracing_pipeline_create_deferred(const
 	const uint64_t start_usec = OS::get_singleton()->get_ticks_usec();
 	PipelineCacheUse cache_use(pipelines_cache); // Never deferred with its lock: no other task runs under it.
 	VkDeferredOperationKHR operation = VK_NULL_HANDLE;
-	WorkerThreadPool *pool = WorkerThreadPool::get_singleton();
+	// The compilation pool leaves a quarter of the cores to the rest of the machine (RenderingCompilationPool).
+	WorkerThreadPool *pool = WorkerThreadPool::get_singleton() ? RenderingCompilationPool::get() : nullptr;
 	if (device_functions.CreateDeferredOperationKHR && pool && pool->get_thread_count() > 1) {
 		if (device_functions.CreateDeferredOperationKHR(vk_device, nullptr, &operation) != VK_SUCCESS) {
 			operation = VK_NULL_HANDLE;
@@ -8035,9 +8037,10 @@ RDD::RaytracingPipelineID RenderingDeviceDriverVulkan::raytracing_pipeline_add_h
 	build.stages = &stages;
 	build.hit_groups = p_hit_groups;
 	build.libraries.resize(p_hit_groups.size());
-	WorkerThreadPool *pool = WorkerThreadPool::get_singleton();
+	WorkerThreadPool *pool = WorkerThreadPool::get_singleton() ? RenderingCompilationPool::get() : nullptr;
 	if (p_hit_groups.size() > 1 && pool && pool->get_thread_count() > 1) {
-		WorkerThreadPool::GroupID group = pool->add_template_group_task(this, &RenderingDeviceDriverVulkan::_raytracing_hit_group_library_create, &build, p_hit_groups.size(), p_hit_groups.size(), true, SNAME("Vulkan raytracing library compile"));
+		const int library_tasks = MIN((int)p_hit_groups.size(), pool->get_thread_count());
+		WorkerThreadPool::GroupID group = pool->add_template_group_task(this, &RenderingDeviceDriverVulkan::_raytracing_hit_group_library_create, &build, p_hit_groups.size(), library_tasks, true, SNAME("Vulkan raytracing library compile"));
 		pool->wait_for_group_task_completion(group);
 	} else {
 		for (uint32_t i = 0; i < p_hit_groups.size(); i++) {

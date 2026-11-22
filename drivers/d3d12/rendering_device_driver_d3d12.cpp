@@ -40,6 +40,7 @@
 #include "drivers/d3d12/fsr_frame_generation_d3d12.h"
 #include "drivers/d3d12/rendering_context_driver_d3d12.h"
 #include "drivers/streamline/streamline.h"
+#include "servers/rendering/rendering_compilation_pool.h"
 
 #include <drivers/d3d12/godot_d3d12ma.h>
 #include <drivers/d3d12/godot_nir.h>
@@ -7368,8 +7369,11 @@ RDD::RaytracingPipelineID RenderingDeviceDriverD3D12::raytracing_pipeline_add_hi
 		build.collections.resize(p_hit_groups.size());
 		build.results.resize(p_hit_groups.size());
 		const uint64_t collections_begin = OS::get_singleton()->get_ticks_usec();
-		WorkerThreadPool::GroupID group = WorkerThreadPool::get_singleton()->add_template_group_task(this, &RenderingDeviceDriverD3D12::_raytracing_collection_create, &build, p_hit_groups.size(), p_hit_groups.size(), true, SNAME("D3D12 raytracing collection compile"));
-		WorkerThreadPool::get_singleton()->wait_for_group_task_completion(group);
+		// In the compilation pool, which leaves a quarter of the cores to the rest of the machine (RenderingCompilationPool).
+		WorkerThreadPool *pool = RenderingCompilationPool::get();
+		const int collection_tasks = MIN((int)p_hit_groups.size(), pool->get_thread_count());
+		WorkerThreadPool::GroupID group = pool->add_template_group_task(this, &RenderingDeviceDriverD3D12::_raytracing_collection_create, &build, p_hit_groups.size(), collection_tasks, true, SNAME("D3D12 raytracing collection compile"));
+		pool->wait_for_group_task_completion(group);
 		for (uint32_t i = 0; i < p_hit_groups.size(); i++) {
 			if (FAILED(build.results[i])) {
 				_report_device_removed("CreateStateObject (collection)");

@@ -39,6 +39,7 @@
 #include "core/os/os.h"
 #include "core/string/string_builder.h"
 #include "core/version.h"
+#include "servers/rendering/rendering_compilation_pool.h"
 #include "servers/rendering/rendering_server.h"
 #include "servers/rendering/shader_include_db.h"
 
@@ -712,7 +713,8 @@ bool ShaderRD::_load_from_cache(Version *p_version, int p_group) {
 	compile_data.version = p_version;
 	compile_data.group = p_group;
 
-	WorkerThreadPool::GroupID group_task = WorkerThreadPool::get_singleton()->add_template_group_task(this, &ShaderRD::_load_variant_from_cache, compile_data, variant_count, -1, true, "LoadVariantFromCache");
+	// Every group in group_compilation_tasks belongs to RenderingCompilationPool: it is waited for and queried there.
+	WorkerThreadPool::GroupID group_task = RenderingCompilationPool::get()->add_template_group_task(this, &ShaderRD::_load_variant_from_cache, compile_data, variant_count, -1, true, "LoadVariantFromCache");
 	p_version->group_compilation_tasks.write[p_group] = group_task;
 	p_version->group_loaded_from_cache.write[p_group] = true;
 
@@ -763,7 +765,7 @@ void ShaderRD::_compile_version_start(Version *p_version, int p_group) {
 	compile_data.version = p_version;
 	compile_data.group = p_group;
 
-	WorkerThreadPool::GroupID group_task = WorkerThreadPool::get_singleton()->add_template_group_task(this, &ShaderRD::_compile_variant, compile_data, group_to_variant_map[p_group].size(), -1, true, SNAME("ShaderCompilation"));
+	WorkerThreadPool::GroupID group_task = RenderingCompilationPool::get()->add_template_group_task(this, &ShaderRD::_compile_variant, compile_data, group_to_variant_map[p_group].size(), -1, true, SNAME("ShaderCompilation"));
 	p_version->group_compilation_tasks.write[p_group] = group_task;
 	p_version->group_loaded_from_cache.write[p_group] = false;
 }
@@ -773,7 +775,7 @@ void ShaderRD::_compile_version_end(Version *p_version, int p_group) {
 		return;
 	}
 	WorkerThreadPool::GroupID group_task = p_version->group_compilation_tasks[p_group];
-	WorkerThreadPool::get_singleton()->wait_for_group_task_completion(group_task);
+	RenderingCompilationPool::get()->wait_for_group_task_completion(group_task);
 	p_version->group_compilation_tasks.write[p_group] = 0;
 
 	bool all_valid = true;
@@ -939,7 +941,7 @@ bool ShaderRD::version_is_group_compiled(RID p_version, int p_group) {
 
 	const WorkerThreadPool::GroupID task = version->group_compilation_tasks[p_group];
 	if (task != 0) {
-		if (!WorkerThreadPool::get_singleton()->is_group_task_completed(task)) {
+		if (!RenderingCompilationPool::get()->is_group_task_completed(task)) {
 			return false;
 		}
 		_compile_version_end(version, p_group);

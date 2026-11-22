@@ -40,6 +40,7 @@
 #include "core/templates/rb_set.h"
 #include "core/templates/rid.h"
 #include "core/templates/vector.h"
+#include "servers/rendering/rendering_compilation_pool.h"
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_server_enums.h"
 
@@ -130,7 +131,7 @@ private:
 		if (p_key != nullptr) {
 			_compile_and_finish(*p_key, p_key_hash);
 		} else if (task_id_to_wait != WorkerThreadPool::INVALID_TASK_ID) {
-			WorkerThreadPool::get_singleton()->wait_for_task_completion(task_id_to_wait);
+			RenderingCompilationPool::get()->wait_for_task_completion(task_id_to_wait);
 		}
 	}
 
@@ -191,7 +192,7 @@ private:
 		}
 
 		for (WorkerThreadPool::TaskID task_id : tasks_to_wait) {
-			WorkerThreadPool::get_singleton()->wait_for_task_completion(task_id);
+			RenderingCompilationPool::get()->wait_for_task_completion(task_id);
 		}
 	}
 
@@ -243,9 +244,9 @@ public:
 		print_line("HASH:", p_key_hash, "SOURCE:", source_name);
 #endif
 
-		// Queue a background compilation task.
+		// Queue a background compilation task (its ID is the compilation pool's, as every task of compilation_tasks).
 		pipeline_hash_map_rd_compilations_in_flight.increment();
-		WorkerThreadPool::TaskID task_id = WorkerThreadPool::get_singleton()->add_template_task(this, &PipelineHashMapRD::_compile_task, p_key, p_high_priority, "PipelineCompilation");
+		WorkerThreadPool::TaskID task_id = RenderingCompilationPool::get()->add_template_task(this, &PipelineHashMapRD::_compile_task, p_key, p_high_priority, "PipelineCompilation");
 		compilation_tasks.insert(p_key_hash, task_id);
 	}
 

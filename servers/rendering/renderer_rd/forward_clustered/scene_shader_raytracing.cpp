@@ -42,16 +42,18 @@
 #include "core/os/thread.h"
 #include "core/string/string_builder.h"
 #include "core/version.h"
-#include "modules/modules_enabled.gen.h"
 #include "servers/rendering/renderer_rd/effects/nrd_denoiser.h"
 #include "servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.h"
 #include "servers/rendering/renderer_rd/forward_clustered/render_raytracing.h"
 #include "servers/rendering/renderer_rd/forward_clustered/rt_alpha_dependencies.h"
 #include "servers/rendering/renderer_rd/renderer_compositor_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
+#include "servers/rendering/rendering_compilation_pool.h"
 #include "servers/rendering/rendering_server.h"
 #include "servers/rendering/rendering_server_globals.h"
 #include "servers/rendering/storage/environment_storage.h"
+
+#include "modules/modules_enabled.gen.h"
 
 using namespace RendererSceneRenderImplementation;
 
@@ -1154,14 +1156,15 @@ void SceneShaderRaytracing::_start_program_build(LocalVector<DisplaceProgram> &r
 	build->name = p_name;
 	build->omm_bake = p_omm_bake;
 	build->slot = p_slot_index;
-	build->task = WorkerThreadPool::get_singleton()->add_native_task(&SceneShaderRaytracing::_program_build_worker, build, false, "RT program precompile");
+	// Every compilation task and group of this class belongs to RenderingCompilationPool, and is waited for there.
+	build->task = RenderingCompilationPool::get()->add_native_task(&SceneShaderRaytracing::_program_build_worker, build, false, "RT program precompile");
 	program.build = build;
 	program_builds.push_back(build);
 }
 
 void SceneShaderRaytracing::_finish_program_build(ProgramBuild *p_build) {
 	if (WorkerThreadPool::get_singleton()) {
-		WorkerThreadPool::get_singleton()->wait_for_task_completion(p_build->task);
+		RenderingCompilationPool::get()->wait_for_task_completion(p_build->task);
 	}
 	DisplaceProgram &program = (p_build->omm_bake ? omm_bake_programs : displace_programs)[p_build->slot];
 	program.build = nullptr;
@@ -2011,7 +2014,7 @@ SceneShaderRaytracing::PipelineBuildTask *SceneShaderRaytracing::_make_pipeline_
 			batch_size++;
 		}
 	} else {
-		batch_size = MIN(batch_size, (uint32_t)MAX(4, WorkerThreadPool::get_singleton()->get_thread_count()));
+		batch_size = MIN(batch_size, (uint32_t)MAX(4, RenderingCompilationPool::get()->get_thread_count()));
 	}
 	HashSet<uint32_t> batch;
 	for (uint32_t i = 0; i < batch_size; i++) {
@@ -2261,8 +2264,8 @@ void SceneShaderRaytracing::_build_pipeline_worker(PipelineBuildTask *p_task) {
 	// translation (Mesa's on D3D12, seconds per hit group) run in parallel as ShaderRD's variants do.
 	const LocalVector<uint32_t> to_compile(p_task->compile_indices);
 	if (!to_compile.is_empty()) {
-		WorkerThreadPool::GroupID group = WorkerThreadPool::get_singleton()->add_template_group_task(this, &SceneShaderRaytracing::_load_hit_group_from_cache, p_task, to_compile.size(), -1, true, SNAME("RT hit group cache"));
-		WorkerThreadPool::get_singleton()->wait_for_group_task_completion(group);
+		WorkerThreadPool::GroupID group = RenderingCompilationPool::get()->add_template_group_task(this, &SceneShaderRaytracing::_load_hit_group_from_cache, p_task, to_compile.size(), -1, true, SNAME("RT hit group cache"));
+		RenderingCompilationPool::get()->wait_for_group_task_completion(group);
 	}
 	p_task->compile_indices.clear();
 	for (uint32_t i : to_compile) {
@@ -2301,8 +2304,8 @@ void SceneShaderRaytracing::_build_pipeline_worker(PipelineBuildTask *p_task) {
 		}
 		if (!base_stages.is_empty()) {
 			const uint64_t hit_groups_begin = OS::get_singleton()->get_ticks_usec();
-			WorkerThreadPool::GroupID group = WorkerThreadPool::get_singleton()->add_template_group_task(this, &SceneShaderRaytracing::_compile_hit_group, p_task, p_task->compile_indices.size(), -1, true, SNAME("RT hit group compile"));
-			WorkerThreadPool::get_singleton()->wait_for_group_task_completion(group);
+			WorkerThreadPool::GroupID group = RenderingCompilationPool::get()->add_template_group_task(this, &SceneShaderRaytracing::_compile_hit_group, p_task, p_task->compile_indices.size(), -1, true, SNAME("RT hit group compile"));
+			RenderingCompilationPool::get()->wait_for_group_task_completion(group);
 			hit_groups_usec = OS::get_singleton()->get_ticks_usec() - hit_groups_begin;
 		}
 		if (OS::get_singleton()->is_stdout_verbose()) {
@@ -2586,7 +2589,7 @@ void SceneShaderRaytracing::_dispatch_next_locked() {
 	compile_lane.current = t;
 	// High priority: as a low priority task it waited behind the precached displacement and bake programs and the raster
 	// shaders' compiles (0.75 s in a zone of 42 new materials). It mostly waits for its own high priority group tasks.
-	t->worker_id = WorkerThreadPool::get_singleton()->add_native_task(
+	t->worker_id = RenderingCompilationPool::get()->add_native_task(
 			&SceneShaderRaytracing::_build_pipeline_worker_static, t, /*high_priority=*/true,
 			"RT Pipeline Build");
 }
@@ -2663,7 +2666,7 @@ uint32_t SceneShaderRaytracing::get_pending_hit_group_count() const {
 
 void SceneShaderRaytracing::drain_completed_compiles() {
 	for (uint32_t i = 0; i < program_builds.size();) {
-		if (WorkerThreadPool::get_singleton()->is_task_completed(program_builds[i]->task)) {
+		if (RenderingCompilationPool::get()->is_task_completed(program_builds[i]->task)) {
 			_finish_program_build(program_builds[i]); // Removes it.
 		} else {
 			i++;
@@ -2683,7 +2686,7 @@ void SceneShaderRaytracing::drain_completed_compiles() {
 			break;
 		}
 		if (finished->worker_id != WorkerThreadPool::INVALID_TASK_ID) {
-			WorkerThreadPool::get_singleton()->wait_for_task_completion(finished->worker_id);
+			RenderingCompilationPool::get()->wait_for_task_completion(finished->worker_id);
 		}
 		_finalize_pipeline_build(finished);
 		memdelete(finished);
@@ -2729,7 +2732,7 @@ void SceneShaderRaytracing::_join_lane_for_shutdown() {
 	if (current) {
 		current->abort_requested.set();
 		if (current->worker_id != WorkerThreadPool::INVALID_TASK_ID && WorkerThreadPool::get_singleton()) {
-			WorkerThreadPool::get_singleton()->wait_for_task_completion(current->worker_id);
+			RenderingCompilationPool::get()->wait_for_task_completion(current->worker_id);
 		}
 		// A build that finished before the abort was seen, never drained: its outputs are in no bundle.
 		_free_unused_build_outputs(current);

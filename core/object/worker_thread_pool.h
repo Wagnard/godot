@@ -165,6 +165,7 @@ private:
 			PagedAllocator<HashMapElement<GroupID, Group *>, false, GROUPS_PAGE_SIZE>>
 			groups;
 
+	String thread_name = "WorkerThread"; // Its threads are named "<thread_name> <index>"; a named pool's take its name.
 	uint32_t max_low_priority_threads = 0;
 	uint32_t low_priority_threads_used = 0;
 	uint32_t notify_index = 0; // For rotating across threads, no help distributing load.
@@ -280,8 +281,13 @@ public:
 #endif
 	}
 
+	// The number of threads that run low priority tasks at most.
+	_FORCE_INLINE_ int get_max_low_priority_thread_count() const { return max_low_priority_threads; }
+
 	// Note: Do not use this unless you know what you are doing, and it is absolutely necessary. Main thread pool (`get_singleton()`) should be preferred instead.
-	static WorkerThreadPool *get_named_pool(const StringName &p_name);
+	// The thread count and low priority ratio are those of init(), used by the call that creates the pool. Not thread safe:
+	// a caller that can race with another creates its pool once, behind a lock of its own.
+	static WorkerThreadPool *get_named_pool(const StringName &p_name, int p_thread_count = -1, float p_low_priority_task_ratio = 0.3);
 
 	static WorkerThreadPool *get_singleton() { return singleton; }
 	int get_thread_index() const;
