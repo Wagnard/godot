@@ -261,7 +261,9 @@ struct alignas(16) RT_LightData {
 	float projector_uv_y[4];
 	uint32_t projector_enabled;
 	uint32_t projector_texture; // Omni and spot: Light3D.light_projector in the bindless textures (sRGB), 0 for none.
-	uint32_t shadow_caster_mask; // Light3D.shadow_caster_mask: the layers whose instances cast its shadows (RT_SHADOW_GROUPS).
+	// Its shadow rays' instance inclusion mask: the low byte RT_INSTANCE_MASK_SHADOW and the shadow groups it casts the
+	// shadows of, the next byte the bits a SELF_SHADOWING receiver adds (RTShadowGroups::shadow_ray_masks(), RT_SHADOW_GROUPS).
+	uint32_t shadow_ray_masks;
 	uint32_t pad;
 };
 static_assert(sizeof(RT_LightData) == 128, "RT_LightData must be 128 bytes for std430");
@@ -328,11 +330,43 @@ enum : uint8_t {
 	// Build-time only: a transparent surface gets a copy for the shadow rays (rendering/pathtracing/transparent_shadows).
 	RT_INSTANCE_MASK_TRANSPARENT_SHADOW = 0x40u,
 	RT_INSTANCE_MASK_DOUBLE_SIDED_SHADOW = 0x80u, // Build-time only: the shadow rays need both faces, see build_tlas().
-	// In place of SHADOW, assigned after the build-time bits above are cleared (the same bit as DOUBLE_SIDED_SHADOW): a
-	// caster that shadows only some of the frame's lights or receivers (rendering/pathtracing/shadow_groups,
-	// Light3D.shadow_caster_mask, SHADOW_CASTING_SETTING_SELF_SHADOWING). The shadow rays meet these in a ray query that
-	// tests each candidate (RT_SHADOW_GROUPS): the 8-bit instance mask cannot hold a group per caster mask.
-	RT_INSTANCE_MASK_SHADOW_GROUP = 0x80u,
+	// In place of SHADOW, assigned after the build-time bits above are cleared (the same bits): the casters that shadow
+	// only some of the frame's lights or receivers (rendering/pathtracing/shadow_groups, Light3D.shadow_caster_mask,
+	// SHADOW_CASTING_SETTING_SELF_SHADOWING), one bit per group of them (RTShadowGroups). A light's shadow rays take the
+	// groups it casts the shadows of in their instance inclusion mask (RT_LightData::shadow_ray_masks): the hardware skips
+	// the others during traversal (DXR spec, TraceRay() InstanceInclusionMask; Vulkan, "Instance Culling").
+	RT_INSTANCE_MASK_SHADOW_GROUP_0 = 0x40u,
+	RT_INSTANCE_MASK_SHADOW_GROUP_1 = 0x80u,
+	RT_INSTANCE_MASK_SHADOW_GROUPS = RT_INSTANCE_MASK_SHADOW_GROUP_0 | RT_INSTANCE_MASK_SHADOW_GROUP_1,
+};
+
+// rendering/pathtracing/shadow_groups, as NVIDIA's RTShadowGroupTable (49a825dc52): each caster that only some of the frame's
+// shadowed lights take (its layers & their Light3D.shadow_caster_mask) gets a group bit of the TLAS mask instead of
+// RT_INSTANCE_MASK_SHADOW. Casters with the same "signature" (which of the frame's caster masks hold their layers) share a
+// group; past the free bits, signatures merge into the last group, which can only add shadows, never remove one. When the
+// frame has SELF_SHADOWING casters, one bit is theirs: only rays from SELF_SHADOWING receivers take it.
+struct RTShadowGroups {
+	static constexpr uint32_t MAX_CASTER_MASKS = 32; // A signature is a bit per caster mask.
+	static constexpr uint32_t MAX_GROUPS = 2; // The TLAS mask's free bits: RT_INSTANCE_MASK_SHADOW_GROUPS.
+
+	LocalVector<uint32_t> caster_masks; // The frame's distinct caster masks of the lights with path traced shadows.
+	uint32_t group_signatures[MAX_GROUPS] = {};
+	uint8_t group_bits[MAX_GROUPS] = {};
+	uint32_t group_count = 0;
+	uint32_t group_capacity = MAX_GROUPS; // One less when a bit is the SELF_SHADOWING casters'.
+	uint8_t self_shadow_bit = 0; // 0 when the frame has no SELF_SHADOWING caster.
+	uint32_t self_shadow_signature = 0;
+	bool used = false; // The TLAS holds group casters.
+
+	void reset();
+	uint32_t signature_for_layers(uint32_t p_layers) const;
+	// The group bit of casters with p_signature, made on first use.
+	uint8_t group_bit_for_signature(uint32_t p_signature);
+	// RT_LightData::shadow_ray_masks of a light with p_caster_mask: the low byte for every receiver, the next one added for
+	// a SELF_SHADOWING receiver.
+	uint32_t shadow_ray_masks(uint32_t p_caster_mask) const;
+	// Every group bit but the SELF_SHADOWING casters': what a ray toward a mix of lights takes (the volumetric fog).
+	uint8_t non_self_shadow_bits() const;
 };
 
 // The 20 render layers of VisualInstance3D.layers, which light cull and shadow caster masks select.
@@ -423,8 +457,7 @@ enum {
 	// Per TLAS instance, rendering/pathtracing/shadow_groups only (RT_SHADOW_GROUPS): an instance with
 	// SHADOW_CASTING_SETTING_SELF_SHADOWING. Its shadows fall only on such instances; it receives every shadow.
 	RT_GEOM_FLAG_SELF_SHADOWING = 1u << 11,
-	// Per TLAS instance, on RT_INSTANCE_MASK_SHADOW_GROUP casters only: not forced opaque, alpha tested in the ray query.
-	RT_GEOM_FLAG_SHADOW_GROUP_CUTOUT = 1u << 12,
+	// Bit 12: free (the shadow group ray query's cut-out flag, before the groups were instance mask bits).
 	// Per TLAS instance, on a peeled front layer surface only (RT_TRANSPARENCY_PEELING): render_mode reactive_mask_disabled.
 	// The raygen leaves it out of the reactive alpha it returns, as raster's transparent pass writes it no alpha
 	// (PipelineKey::no_reactive_alpha).
@@ -858,8 +891,9 @@ struct RTViewportState {
 	RID scene_uniform_set;
 	// The view's parameters of the volumetric fog's ray queries (RTFogShadows, rendering/pathtracing/volumetric_fog_shadows).
 	RID fog_shadows_params_buffer;
-	// rendering/pathtracing/shadow_groups: the last TLAS holds RT_INSTANCE_MASK_SHADOW_GROUP casters (RT_PARAM_FLAG_SHADOW_GROUPS).
-	bool shadow_groups_used = false;
+	// rendering/pathtracing/shadow_groups: the last TLAS's shadow groups, which give each light its shadow rays' mask.
+	RTShadowGroups shadow_groups;
+	String shadow_groups_description; // The last one printed (--verbose).
 
 	uint32_t frame_counter = 0;
 };
@@ -1396,7 +1430,8 @@ public:
 	void precache_hit_groups(const LocalVector<RID> &p_materials);
 	// A BaseMaterial3D's generated shader, traced by hit group 0 from its parameters (p_albedo: its "albedo").
 	static bool is_base_material(RID p_material, const Variant &p_albedo);
-	uint32_t gather_lights(const RenderDataRD *p_render_data, RT_LightData *r_light_data, uint32_t p_max_lights);
+	// p_shadow_groups: the last TLAS's, which give each light its shadow rays' mask (RT_LightData::shadow_ray_masks).
+	uint32_t gather_lights(const RenderDataRD *p_render_data, const RTShadowGroups &p_shadow_groups, RT_LightData *r_light_data, uint32_t p_max_lights);
 	// A hashed grid of the lights in world space for the choice of light at each hit; uploads it to p_state's buffer.
 	void build_light_grid(RTViewportState *p_state, const RT_LightData *p_lights, uint32_t p_count);
 	// The RD texture of the directional light projector gather_lights() found (binding 38), or invalid.

@@ -452,7 +452,9 @@ bool shade_and_bounce(inout PathState ps, HitRecord r, vec3 p_ray_origin, vec3 p
 			float direct_hit_t = direct_shadow_ray.w;
 			if (direct_hit_t < 0.0) {
 				const bool through = any(greaterThan(r.backlight, vec3(0.0))) && dot(r.geometry_normal, direct_shadow_ray.xyz) < 0.0;
-				direct_hit_t = nrd_sigma_occluder_distance(through ? hit_pos_back : hit_pos_offset, direct_shadow_ray.xyz, -direct_hit_t);
+				// The light the ray was traced toward is not known here: every shadow caster, a distance to the nearest of
+				// them (a guide of the denoiser, not the visibility).
+				direct_hit_t = nrd_sigma_occluder_distance(through ? hit_pos_back : hit_pos_offset, direct_shadow_ray.xyz, -direct_hit_t RT_SHADOW_MASK_ARG(RT_MASK_SHADOW | RT_MASK_SHADOW_GROUPS));
 			}
 			ps.nrd_direct_hit_t = direct_hit_t;
 #endif
@@ -727,7 +729,12 @@ vec3 debug_directional_shadow_blocker(vec3 p_hit_pos, vec3 p_geometry_normal) {
 	}
 	vec3 transmittance = vec3(1.0);
 	rayQueryEXT rq;
+#ifdef RT_SHADOW_GROUPS
+	// The sun's casters (rendering/pathtracing/shadow_groups), as seen from a receiver that is not SELF_SHADOWING.
+	rayQueryInitializeEXT(rq, tlas, RT_SHADOW_RAY_FLAGS, rt_light_shadow_mask(rt_lights[sun], false), origin, 0.001, to_sun, 10000.0);
+#else
 	rayQueryInitializeEXT(rq, tlas, RT_SHADOW_RAY_FLAGS, RT_MASK_SHADOW, origin, 0.001, to_sun, 10000.0);
+#endif
 	while (rayQueryProceedEXT(rq)) {
 		if (rayQueryGetIntersectionTypeEXT(rq, false) != gl_RayQueryCandidateIntersectionTriangleEXT) {
 			continue;

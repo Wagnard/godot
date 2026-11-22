@@ -6016,15 +6016,17 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 	}
 
 	// rendering/pathtracing/shadow_groups (RT_SHADOW_GROUPS): Light3D.shadow_caster_mask and SELF_SHADOWING, with the
-	// build-time bits above cleared. A caster whose layers are in the caster mask of every shadowed light of the frame
-	// keeps RT_INSTANCE_MASK_SHADOW, which the shadow rays meet as without the setting; one in none of them casts
-	// nothing, as raster culls its shadow casters by layers & shadow_caster_mask (RendererSceneCull::_light_instance_update_shadow()).
-	// One in some of them, and a SELF_SHADOWING one, moves to RT_INSTANCE_MASK_SHADOW_GROUP: the shadow rays meet those
-	// in a ray query that tests each against the light's caster mask and the receiver (lights_trace_shadow_group()).
-	// NVIDIA gives each distinct set of caster masks a bit of the TLAS mask (RTShadowGroupTable, 49a825dc52
-	// render_raytracing.h:954-1037, 6 bits), ours has one free bit. Procedural geometry keeps casting for every light:
-	// a ray query cannot run its intersection shader.
-	state->shadow_groups_used = false;
+	// build-time bits above cleared, through the TLAS instance mask as NVIDIA's RTShadowGroupTable (49a825dc52
+	// render_raytracing.h:954-1037) and as the vendors ask ("use instance masking and ray flags" rather than any-hit
+	// shaders, Intel Arc ray tracing developer guide; "Flag geometries or instances as opaque whenever possible", NVIDIA
+	// RTX best practices). A caster whose layers are in the caster mask of every shadowed light of the frame keeps
+	// RT_INSTANCE_MASK_SHADOW, which the shadow rays meet as without the setting; one in none of them casts nothing, as
+	// raster culls its shadow casters by layers & shadow_caster_mask (RendererSceneCull::_light_instance_update_shadow()).
+	// One in some of them gets the group bit of its signature, and a SELF_SHADOWING one the SELF_SHADOWING casters' bit
+	// (RTShadowGroups): a light's shadow rays take the bits of the groups it casts the shadows of (gather_lights()).
+	// Procedural geometry keeps casting for every light: the ray query shadows meet it apart (RT_MASK_PROCEDURAL_SHADOW).
+	RTShadowGroups &groups = state->shadow_groups;
+	groups.reset();
 	static bool caster_mask_warned = false;
 	if (shadow_groups || !caster_mask_warned) {
 		LocalVector<uint32_t> caster_masks;
@@ -6047,37 +6049,81 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 				caster_mask_warned = true;
 			}
 		} else if (!caster_masks.is_empty()) {
-			auto assign_shadow_group = [&](uint8_t &r_mask, RT_GeometryData &r_geometry, uint32_t p_instance_flags) {
-				if (!(r_mask & RT_INSTANCE_MASK_SHADOW) || (r_geometry.flags & RT_GEOM_FLAG_PROCEDURAL)) {
+			bool caster_masks_dropped = false;
+			for (const uint32_t caster_mask : caster_masks) {
+				if (groups.caster_masks.size() == RTShadowGroups::MAX_CASTER_MASKS) {
+					// Their lights' shadow rays take every group (RTShadowGroups::shadow_ray_masks()).
+					WARN_PRINT_ONCE(vformat("More than %d distinct Light3D.shadow_caster_mask in a frame: the path tracer casts the shadows of every shadow group for the lights past them.", RTShadowGroups::MAX_CASTER_MASKS));
+					caster_masks_dropped = true;
+					break;
+				}
+				groups.caster_masks.push_back(caster_mask);
+			}
+			const uint32_t every_light = groups.caster_masks.size() == 32 ? 0xFFFFFFFFu : (1u << groups.caster_masks.size()) - 1u;
+
+			// One group bit is the SELF_SHADOWING casters' when the frame has some.
+			auto is_self_shadowing_caster = [](uint8_t p_mask, const RT_GeometryData &p_geometry) {
+				return (p_mask & RT_INSTANCE_MASK_SHADOW) && !(p_geometry.flags & RT_GEOM_FLAG_PROCEDURAL) && (p_geometry.flags & RT_GEOM_FLAG_SELF_SHADOWING);
+			};
+			bool self_shadowing_casters = false;
+			for (uint32_t i = 0; i < instance_masks.size() && !self_shadowing_casters; i++) {
+				self_shadowing_casters = is_self_shadowing_caster(instance_masks[i], geometry_data[i]);
+			}
+			for (uint32_t i = 0; i < tlas_expand_jobs.size() && !self_shadowing_casters; i++) {
+				self_shadowing_casters = is_self_shadowing_caster(tlas_expand_jobs[i].mask, tlas_expand_geometry_templates[tlas_expand_jobs[i].data.template_index]);
+			}
+			if (self_shadowing_casters) {
+				groups.self_shadow_bit = RT_INSTANCE_MASK_SHADOW_GROUP_1;
+				groups.group_capacity = RTShadowGroups::MAX_GROUPS - 1;
+			}
+
+			auto assign_shadow_group = [&](uint8_t &r_mask, const RT_GeometryData &p_geometry) {
+				if (!(r_mask & RT_INSTANCE_MASK_SHADOW) || (p_geometry.flags & RT_GEOM_FLAG_PROCEDURAL)) {
 					return;
 				}
-				bool any_light = false;
-				bool every_light = true;
-				for (const uint32_t caster_mask : caster_masks) {
-					if (r_geometry.layer_mask & caster_mask) {
-						any_light = true;
-					} else {
-						every_light = false;
+				const uint32_t signature = groups.signature_for_layers(p_geometry.layer_mask);
+				if (p_geometry.flags & RT_GEOM_FLAG_SELF_SHADOWING) {
+					// Its shadows fall on SELF_SHADOWING receivers only, of the lights its layers are in the caster mask of
+					// (merged over the frame's SELF_SHADOWING casters).
+					r_mask &= ~RT_INSTANCE_MASK_SHADOW;
+					if (signature != 0) {
+						r_mask |= groups.self_shadow_bit;
+						groups.self_shadow_signature |= signature;
+						groups.used = true;
 					}
+					return;
 				}
-				if (every_light && !(r_geometry.flags & RT_GEOM_FLAG_SELF_SHADOWING)) {
+				if (signature == every_light && !caster_masks_dropped) {
 					return;
 				}
 				r_mask &= ~RT_INSTANCE_MASK_SHADOW;
-				if (any_light) {
-					r_mask |= RT_INSTANCE_MASK_SHADOW_GROUP;
-					if (!(p_instance_flags & RD::ACCELERATION_STRUCTURE_INSTANCE_FORCE_OPAQUE_BIT)) {
-						r_geometry.flags |= RT_GEOM_FLAG_SHADOW_GROUP_CUTOUT;
-					}
-					state->shadow_groups_used = true;
+				// In no registered caster mask: it casts nothing, unless a dropped light's could hold it (those take every group).
+				if (signature != 0 || caster_masks_dropped) {
+					r_mask |= groups.group_bit_for_signature(signature);
+					groups.used = true;
 				}
 			};
 			for (uint32_t i = 0; i < instance_masks.size(); i++) {
-				assign_shadow_group(instance_masks[i], geometry_data[i], instance_flags[i]);
+				assign_shadow_group(instance_masks[i], geometry_data[i]);
 			}
 			for (TlasExpandJob &job : tlas_expand_jobs) {
-				assign_shadow_group(job.mask, tlas_expand_geometry_templates[job.data.template_index], job.flags);
+				assign_shadow_group(job.mask, tlas_expand_geometry_templates[job.data.template_index]);
 			}
+		}
+	}
+	if (OS::get_singleton()->is_stdout_verbose()) {
+		// What the shadow groups became, when it changes (--verbose).
+		String description = vformat("%d caster masks, %d groups", groups.caster_masks.size(), groups.group_count);
+		for (uint32_t g = 0; g < groups.group_count; g++) {
+			description += vformat(" [bit 0x%x: signature 0x%x]", groups.group_bits[g], groups.group_signatures[g]);
+		}
+		if (groups.self_shadow_bit) {
+			description += vformat(", SELF_SHADOWING casters: bit 0x%x, signature 0x%x", groups.self_shadow_bit, groups.self_shadow_signature);
+		}
+		description += groups.used ? ", in use" : ", unused";
+		if (description != state->shadow_groups_description) {
+			state->shadow_groups_description = description;
+			print_verbose("RT: shadow groups: " + description + ".");
 		}
 	}
 	// The GPU's instances, records and motion transforms follow the CPU's.
@@ -6265,10 +6311,85 @@ void RenderRaytracing::_annotate_dynamic_geometry(const LocalVector<RID> &p_buil
 }
 
 // ---------------------------------------------------------------------------
+// Shadow groups (rendering/pathtracing/shadow_groups)
+// ---------------------------------------------------------------------------
+
+void RTShadowGroups::reset() {
+	caster_masks.clear();
+	for (uint32_t g = 0; g < MAX_GROUPS; g++) {
+		group_signatures[g] = 0;
+		group_bits[g] = 0;
+	}
+	group_count = 0;
+	group_capacity = MAX_GROUPS;
+	self_shadow_bit = 0;
+	self_shadow_signature = 0;
+	used = false;
+}
+
+uint32_t RTShadowGroups::signature_for_layers(uint32_t p_layers) const {
+	uint32_t signature = 0;
+	for (uint32_t i = 0; i < caster_masks.size(); i++) {
+		if (p_layers & caster_masks[i]) {
+			signature |= 1u << i;
+		}
+	}
+	return signature;
+}
+
+uint8_t RTShadowGroups::group_bit_for_signature(uint32_t p_signature) {
+	for (uint32_t g = 0; g < group_count; g++) {
+		if (group_signatures[g] == p_signature) {
+			return group_bits[g];
+		}
+	}
+	if (group_count < group_capacity) {
+		static constexpr uint8_t bits[MAX_GROUPS] = { RT_INSTANCE_MASK_SHADOW_GROUP_0, RT_INSTANCE_MASK_SHADOW_GROUP_1 };
+		group_signatures[group_count] = p_signature;
+		group_bits[group_count] = bits[group_count];
+		return group_bits[group_count++];
+	}
+	// Past the free bits: into the last group, whose lights become the union of both. A light then casts the shadows of
+	// casters it would not have (never fewer), as NVIDIA's table past its 6 groups.
+	WARN_PRINT_ONCE(vformat("More than %d sets of Light3D.shadow_caster_mask a shadow caster can be in: the path tracer merges them, some lights cast shadows the rasterizer does not (rendering/pathtracing/shadow_groups).", group_capacity));
+	group_signatures[group_count - 1] |= p_signature;
+	return group_bits[group_count - 1];
+}
+
+uint32_t RTShadowGroups::shadow_ray_masks(uint32_t p_caster_mask) const {
+	uint32_t masks = RT_INSTANCE_MASK_SHADOW;
+	if (!used) {
+		return masks;
+	}
+	const int64_t index = caster_masks.find(p_caster_mask & RT_LAYER_MASK_ALL);
+	if (index < 0) {
+		// A caster mask past RTShadowGroups::MAX_CASTER_MASKS: every group.
+		return masks | non_self_shadow_bits() | (uint32_t(self_shadow_bit) << 8);
+	}
+	for (uint32_t g = 0; g < group_count; g++) {
+		if (group_signatures[g] & (1u << uint32_t(index))) {
+			masks |= group_bits[g];
+		}
+	}
+	if (self_shadow_signature & (1u << uint32_t(index))) {
+		masks |= uint32_t(self_shadow_bit) << 8;
+	}
+	return masks;
+}
+
+uint8_t RTShadowGroups::non_self_shadow_bits() const {
+	uint8_t bits = 0;
+	for (uint32_t g = 0; g < group_count; g++) {
+		bits |= group_bits[g];
+	}
+	return bits;
+}
+
+// ---------------------------------------------------------------------------
 // Light gathering
 // ---------------------------------------------------------------------------
 
-uint32_t RenderRaytracing::gather_lights(const RenderDataRD *p_render_data, RT_LightData *r_light_data, uint32_t p_max_lights) {
+uint32_t RenderRaytracing::gather_lights(const RenderDataRD *p_render_data, const RTShadowGroups &p_shadow_groups, RT_LightData *r_light_data, uint32_t p_max_lights) {
 	uint32_t rt_light_count = 0;
 	rt_directional_projector = RID();
 
@@ -6403,7 +6524,7 @@ uint32_t RenderRaytracing::gather_lights(const RenderDataRD *p_render_data, RT_L
 		memset(ld.projector_uv_y, 0, sizeof(ld.projector_uv_y));
 		ld.projector_enabled = 0;
 		ld.projector_texture = 0;
-		ld.shadow_caster_mask = ls->light_get_shadow_caster_mask(base);
+		ld.shadow_ray_masks = p_shadow_groups.shadow_ray_masks(ls->light_get_shadow_caster_mask(base));
 		ld.pad = 0;
 		const RID projector = ls->light_get_projector(base);
 		if (projector.is_valid() && rt_directional_projector.is_null()) {
@@ -6493,7 +6614,7 @@ uint32_t RenderRaytracing::gather_lights(const RenderDataRD *p_render_data, RT_L
 		memset(ld.projector_uv_y, 0, sizeof(ld.projector_uv_y));
 		ld.projector_enabled = 0;
 		ld.projector_texture = 0;
-		ld.shadow_caster_mask = ls->light_get_shadow_caster_mask(base);
+		ld.shadow_ray_masks = p_shadow_groups.shadow_ray_masks(ls->light_get_shadow_caster_mask(base));
 		ld.pad = 0;
 		// The projector, in the light's own frame as raster's light_process_omni() / light_process_spot() map it
 		// (scene_forward_lights_inc.glsl, through shadow_matrix): a spot's in its shadow camera's perspective, an omni
@@ -7152,9 +7273,6 @@ RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderD
 		if (p_rt_flags & SceneShaderRaytracing::RT_FLAG_TRANSPARENCY_PEELING) {
 			rt_param_flags |= (get_transparency_peel_layers() & SceneShaderRaytracing::RT_PARAM_FLAG_PEEL_LAYERS_MASK) << SceneShaderRaytracing::RT_PARAM_FLAG_PEEL_LAYERS_SHIFT;
 		}
-		if (p_state->shadow_groups_used) {
-			rt_param_flags |= SceneShaderRaytracing::RT_PARAM_FLAG_SHADOW_GROUPS;
-		}
 		// rendering/pathtracing/nrd_direct_light_denoising: with NRD, the raygen variant that writes the light choice's diffuse
 		// light at the primary hits to a signal of its own (binding 49), denoised by NRD's second ReBLUR
 		// (SceneShaderRaytracing::nrd_direct_light_flag()).
@@ -7186,7 +7304,7 @@ RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderD
 		rt_light_data.resize(RT_LIGHTS_MAX);
 		memset(rt_light_data.ptr(), 0, RT_LIGHTS_MAX * sizeof(RT_LightData));
 
-		rt_light_count = gather_lights(p_render_data, rt_light_data.ptr(), RT_LIGHTS_MAX);
+		rt_light_count = gather_lights(p_render_data, p_state->shadow_groups, rt_light_data.ptr(), RT_LIGHTS_MAX);
 		build_light_grid(p_state, rt_light_data.ptr(), rt_light_count);
 
 		rt_ubo.params[SceneShaderRaytracing::RT_PARAM_LIGHT_COUNT] = float(rt_light_count);

@@ -64,7 +64,9 @@ private:
 	struct ParamsUBO {
 		float view_to_world[16];
 		uint32_t frame_index;
-		uint32_t shadow_groups; // RTViewportState::shadow_groups_used.
+		// The instance inclusion mask of its shadow rays: RT_INSTANCE_MASK_SHADOW and every shadow group but the
+		// SELF_SHADOWING casters' (RTShadowGroups::non_self_shadow_bits()): the reservoir mixes the lights.
+		uint32_t shadow_mask;
 		uint32_t pad[2];
 	};
 	static_assert(sizeof(ParamsUBO) == 80);

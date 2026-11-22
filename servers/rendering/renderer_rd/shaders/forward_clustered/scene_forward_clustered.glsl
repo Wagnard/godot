@@ -1158,8 +1158,11 @@ layout(location = 2) out vec2 motion_vector;
 
 #ifdef USE_RT_SHADOWS
 // The instance mask of the path tracer's shadow rays (RT_MASK_SHADOW), and their flags (RT_SHADOW_RAY_FLAGS): the faces
-// turned away from the light do not shadow, as raster's shadow pass culls them.
-#define RT_SHADOWS_MASK 0x02
+// turned away from the light do not shadow, as raster's shadow pass culls them. The casters of every shadow group of
+// rendering/pathtracing/shadow_groups too (RT_MASK_SHADOW_GROUPS, RTShadowGroups), whatever the light: this pass has
+// raster's lights, which carry no shadow group mask (as the volumetric fog, which mixes its lights). It can only add a
+// shadow a light's caster mask leaves out, never remove one; without groups the TLAS has no such bit.
+#define RT_SHADOWS_MASK (0x02 | 0xC0)
 #define RT_SHADOWS_RAY_FLAGS (gl_RayFlagsCullFrontFacingTrianglesEXT | gl_RayFlagsTerminateOnFirstHitEXT)
 
 // 1.0 when nothing the path tracer's shadow rays see lies within p_max_dist of the point towards the light, else 0.0.

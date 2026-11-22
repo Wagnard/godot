@@ -127,9 +127,9 @@ public:
 		// layer's transparent surfaces into the image (how many: RT_PARAM_FLAG_PEEL_LAYERS), which the raster transparent pass
 		// then leaves out; 0 keeps the other variants' code unchanged. A project setting too.
 		RT_FLAG_TRANSPARENCY_PEELING = (1 << 10),
-		// rendering/pathtracing/shadow_groups (RT_SHADOW_GROUPS): Light3D.shadow_caster_mask and SELF_SHADOWING; the shadow
-		// rays also meet the RT_INSTANCE_MASK_SHADOW_GROUP casters, in a ray query, when the frame has some
-		// (RT_PARAM_FLAG_SHADOW_GROUPS). A project setting too, on by default (raster follows both).
+		// rendering/pathtracing/shadow_groups (RT_SHADOW_GROUPS): Light3D.shadow_caster_mask and SELF_SHADOWING; each light's
+		// shadow rays take its instance inclusion mask (RT_LightData::shadow_ray_masks, RTShadowGroups) instead of
+		// RT_MASK_SHADOW. A project setting too, on by default (raster follows both).
 		RT_FLAG_SHADOW_GROUPS = (1 << 11),
 		// rendering/pathtracing/specular_energy_compensation (RT_SPECULAR_ENERGY_COMPENSATION): the specular lobe gets
 		// raster's multiple scattering energy compensation from its DFG LUT (binding 47). A project setting too, off by
@@ -184,8 +184,7 @@ public:
 	static constexpr uint32_t RT_PARAM_FLAG_RUSSIAN_ROULETTE = 1u << 1; // rendering/pathtracing/russian_roulette.
 	// rendering/pathtracing/decals Singular Only, else Skip After Diffuse: read in the RT_FLAG_DECAL_MODE variant only.
 	static constexpr uint32_t RT_PARAM_FLAG_DECALS_SINGULAR_ONLY = 1u << 2;
-	// The TLAS holds RT_INSTANCE_MASK_SHADOW_GROUP casters: read in the RT_FLAG_SHADOW_GROUPS variant only.
-	static constexpr uint32_t RT_PARAM_FLAG_SHADOW_GROUPS = 1u << 3;
+	// Bit 3: free (the shadow groups' ray query switch, before they were instance mask bits).
 	// Bits 4-7: the light buffer index + 1 of the sun whose shadow NRD's SIGMA denoises (0: none), read in the
 	// RT_FLAG_NRD_ENABLED variant only (RenderRaytracing::update_uniform_set()).
 	static constexpr uint32_t RT_PARAM_FLAG_NRD_SUN_SHIFT = 4;

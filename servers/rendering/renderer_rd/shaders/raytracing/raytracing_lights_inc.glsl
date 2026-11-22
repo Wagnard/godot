@@ -36,7 +36,9 @@ struct RTLightData {
 	uint projector_enabled;
 	uint projector_texture; // Omni and spot: the projector in bindless_textures (sRGB view), 0 for none.
 #ifdef RT_SHADOW_GROUPS
-	uint shadow_caster_mask; // Light3D.shadow_caster_mask: the layers whose casters shadow this light.
+	// Its shadow rays' instance inclusion mask (RTShadowGroups::shadow_ray_masks()): the low byte for every receiver, the
+	// next byte added for a SELF_SHADOWING one (rt_light_shadow_mask()).
+	uint shadow_ray_masks;
 #else
 	uint pad1;
 #endif
@@ -232,21 +234,26 @@ float lights_get_specular_multiplier(float specular_amount, float roughness) {
 #define RT_SHADOW_RECEIVER_ARG , p_self_shadowing_receiver
 #define RT_SHADOW_RECEIVER_OF(m_geometry_idx) , ((geometries[m_geometry_idx].flags & FLAG_SELF_SHADOWING) != 0u)
 
-// The light the shadow group casters let through toward p_light (ray_query_shadow_group_transmittance()), when the TLAS
-// holds some this frame.
-vec3 lights_trace_shadow_group(RTLightData p_light, vec3 p_origin, vec3 p_direction, float p_max_dist, bool p_self_shadowing_receiver) {
-	if (!rt_ray_is_finite(p_origin, p_direction, p_max_dist)) {
-		return vec3(0.0); // An untraceable ray: blocked (rt_ray_is_finite()).
-	}
-	if (!(p_max_dist > 0.002) || (uint(get_rt_param(RT_PARAM_FLAGS)) & RT_PARAM_FLAG_SHADOW_GROUPS) == 0u) {
-		return vec3(1.0);
-	}
-	return ray_query_shadow_group_transmittance(p_origin, p_direction, p_max_dist - 0.001, RT_SHADOW_RAY_FLAGS | gl_RayFlagsTerminateOnFirstHitEXT, p_light.shadow_caster_mask, p_self_shadowing_receiver);
+// The instance inclusion mask of p_light's shadow rays from a receiver that is SELF_SHADOWING or not: RT_MASK_SHADOW and
+// the shadow groups whose casters it takes (RenderRaytracing::gather_lights()). The traversal skips the other casters
+// (DXR spec, TraceRay() InstanceInclusionMask; Vulkan, "Instance Culling").
+uint rt_light_shadow_mask(RTLightData p_light, bool p_self_shadowing_receiver) {
+	return (p_light.shadow_ray_masks & 0xFFu) | (p_self_shadowing_receiver ? ((p_light.shadow_ray_masks >> 8u) & 0xFFu) : 0u);
 }
+// Inside a function with RT_SHADOW_RECEIVER_PARAM.
+#define RT_LIGHT_SHADOW_MASK(m_light) rt_light_shadow_mask(m_light, p_self_shadowing_receiver)
+// The shadow ray functions take that mask in this variant only, so that the others' code is unchanged.
+#define RT_SHADOW_MASK_PARAM , uint p_shadow_mask
+#define RT_SHADOW_MASK_ARG(m_mask) , m_mask
+#define RT_SHADOW_MASK p_shadow_mask
 #else
 #define RT_SHADOW_RECEIVER_PARAM
 #define RT_SHADOW_RECEIVER_ARG
 #define RT_SHADOW_RECEIVER_OF(m_geometry_idx)
+#define RT_LIGHT_SHADOW_MASK(m_light) RT_MASK_SHADOW
+#define RT_SHADOW_MASK_PARAM
+#define RT_SHADOW_MASK_ARG(m_mask)
+#define RT_SHADOW_MASK RT_MASK_SHADOW
 #endif
 
 // ============================================================================
@@ -283,7 +290,7 @@ bool lights_trace_shadow_ray_pipeline(vec3 origin, vec3 direction, float max_dis
 }
 
 /// Returns true if light is visible.
-bool lights_trace_shadow_ray(vec3 origin, vec3 direction, float max_dist, inout uint rng_state) {
+bool lights_trace_shadow_ray(vec3 origin, vec3 direction, float max_dist, inout uint rng_state RT_SHADOW_MASK_PARAM) {
 	if (!rt_ray_is_finite(origin, direction, max_dist)) {
 		return false; // An untraceable ray: blocked (rt_ray_is_finite()).
 	}
@@ -297,7 +304,7 @@ bool lights_trace_shadow_ray(vec3 origin, vec3 direction, float max_dist, inout 
 	rayQueryEXT shadow_rq;
 	rayQueryInitializeEXT(shadow_rq, tlas,
 			RT_SHADOW_RAY_FLAGS | gl_RayFlagsTerminateOnFirstHitEXT,
-			RT_MASK_SHADOW, origin, 0.001, direction, max_dist - 0.001);
+			RT_SHADOW_MASK, origin, 0.001, direction, max_dist - 0.001);
 
 	while (rayQueryProceedEXT(shadow_rq)) {
 		if (rayQueryGetIntersectionTypeEXT(shadow_rq, false) == gl_RayQueryCandidateIntersectionTriangleEXT) {
@@ -323,7 +330,7 @@ bool lights_trace_shadow_ray(vec3 origin, vec3 direction, float max_dist, inout 
 	}
 	return true;
 #else
-	return lights_trace_shadow_ray_pipeline(origin, direction, max_dist, RT_MASK_SHADOW);
+	return lights_trace_shadow_ray_pipeline(origin, direction, max_dist, RT_SHADOW_MASK);
 #endif
 }
 
@@ -356,7 +363,7 @@ vec3 lights_trace_shadow_transmittance_pipeline(vec3 origin, vec3 direction, flo
 #endif
 }
 
-vec3 lights_trace_shadow_transmittance(vec3 origin, vec3 direction, float max_dist, inout uint rng_state) {
+vec3 lights_trace_shadow_transmittance(vec3 origin, vec3 direction, float max_dist, inout uint rng_state RT_SHADOW_MASK_PARAM) {
 	if (!rt_ray_is_finite(origin, direction, max_dist)) {
 		return vec3(0.0); // An untraceable ray: blocked (rt_ray_is_finite()).
 	}
@@ -369,7 +376,7 @@ vec3 lights_trace_shadow_transmittance(vec3 origin, vec3 direction, float max_di
 	rayQueryEXT shadow_rq;
 	rayQueryInitializeEXT(shadow_rq, tlas,
 			RT_SHADOW_RAY_FLAGS | gl_RayFlagsTerminateOnFirstHitEXT,
-			RT_MASK_SHADOW, origin, 0.001, direction, max_dist - 0.001);
+			RT_SHADOW_MASK, origin, 0.001, direction, max_dist - 0.001);
 
 	while (rayQueryProceedEXT(shadow_rq)) {
 		if (rayQueryGetIntersectionTypeEXT(shadow_rq, false) == gl_RayQueryCandidateIntersectionTriangleEXT) {
@@ -395,7 +402,7 @@ vec3 lights_trace_shadow_transmittance(vec3 origin, vec3 direction, float max_di
 	}
 	return transmittance;
 #else
-	return lights_trace_shadow_transmittance_pipeline(origin, direction, max_dist, RT_MASK_SHADOW);
+	return lights_trace_shadow_transmittance_pipeline(origin, direction, max_dist, RT_SHADOW_MASK);
 #endif
 }
 #endif
@@ -414,15 +421,7 @@ vec3 lights_shadow_visibility(RTLightData p_light, vec3 p_origin, vec3 p_directi
 	if (p_light.shadow_opacity <= 0.0) {
 		return vec3(1.0);
 	}
-#ifdef RT_SHADOW_GROUPS
-	vec3 transmittance = lights_trace_shadow_transmittance(p_origin, p_direction, p_max_dist, rng_state);
-	if (any(greaterThan(transmittance, vec3(0.0)))) {
-		transmittance *= lights_trace_shadow_group(p_light, p_origin, p_direction, p_max_dist, p_self_shadowing_receiver);
-	}
-	return mix(vec3(1.0), transmittance, p_light.shadow_opacity);
-#else
-	return mix(vec3(1.0), lights_trace_shadow_transmittance(p_origin, p_direction, p_max_dist, rng_state), p_light.shadow_opacity);
-#endif
+	return mix(vec3(1.0), lights_trace_shadow_transmittance(p_origin, p_direction, p_max_dist, rng_state RT_SHADOW_MASK_ARG(RT_LIGHT_SHADOW_MASK(p_light))), p_light.shadow_opacity);
 }
 #else
 #define RT_SHADOW_VISIBILITY float
@@ -433,13 +432,7 @@ float lights_shadow_visibility(RTLightData p_light, vec3 p_origin, vec3 p_direct
 	if (p_light.shadow_opacity <= 0.0) {
 		return 1.0;
 	}
-#ifdef RT_SHADOW_GROUPS
-	const bool visible = lights_trace_shadow_ray(p_origin, p_direction, p_max_dist, rng_state) &&
-			lights_trace_shadow_group(p_light, p_origin, p_direction, p_max_dist, p_self_shadowing_receiver).x > 0.0;
-	return visible ? 1.0 : 1.0 - p_light.shadow_opacity;
-#else
-	return lights_trace_shadow_ray(p_origin, p_direction, p_max_dist, rng_state) ? 1.0 : 1.0 - p_light.shadow_opacity;
-#endif
+	return lights_trace_shadow_ray(p_origin, p_direction, p_max_dist, rng_state RT_SHADOW_MASK_ARG(RT_LIGHT_SHADOW_MASK(p_light))) ? 1.0 : 1.0 - p_light.shadow_opacity;
 }
 #endif
 
@@ -796,12 +789,12 @@ uint nrd_sigma_sun_index() {
 // to occluder (SIGMA)": cast from the point toward the light, and "ACCEPT_FIRST_HIT_AND_END_SEARCH ray flag can't be used",
 // so the search runs to the nearest hit) and of the direct light signal's hit distance. Cut-outs through the alpha test;
 // procedural geometry is not found (its intersection code runs in its hit group only): 0, a hard edge.
-float nrd_sigma_occluder_distance(vec3 p_origin, vec3 p_direction, float p_max_dist) {
+float nrd_sigma_occluder_distance(vec3 p_origin, vec3 p_direction, float p_max_dist RT_SHADOW_MASK_PARAM) {
 	if (!rt_ray_is_finite(p_origin, p_direction, p_max_dist) || !(p_max_dist > 0.002)) {
 		return 0.0; // Untraceable or empty (tmin 0.001 must not exceed tmax): an occluder at the point.
 	}
 	rayQueryEXT rq;
-	rayQueryInitializeEXT(rq, tlas, RT_SHADOW_RAY_FLAGS, RT_MASK_SHADOW, p_origin, 0.001, p_direction, p_max_dist - 0.001);
+	rayQueryInitializeEXT(rq, tlas, RT_SHADOW_RAY_FLAGS, RT_SHADOW_MASK, p_origin, 0.001, p_direction, p_max_dist - 0.001);
 	while (rayQueryProceedEXT(rq)) {
 		if (rayQueryGetIntersectionTypeEXT(rq, false) == gl_RayQueryCandidateIntersectionTriangleEXT &&
 				ray_query_alpha_test(rayQueryGetIntersectionInstanceCustomIndexEXT(rq, false), rayQueryGetIntersectionPrimitiveIndexEXT(rq, false), rayQueryGetIntersectionBarycentricsEXT(rq, false))) {
@@ -865,24 +858,16 @@ vec3 lights_evaluate_sigma_sun(
 	bool through = has_backlight && dot(geometry_normal, L) < 0.0;
 	const vec3 origin = through ? hit_pos_back : hit_pos;
 #ifdef RT_TRANSPARENT_SHADOWS
-	vec3 transmittance = lights_trace_shadow_transmittance(origin, L, ls.max_distance, rng_state);
-#ifdef RT_SHADOW_GROUPS
-	if (any(greaterThan(transmittance, vec3(0.0)))) {
-		transmittance *= lights_trace_shadow_group(light, origin, L, ls.max_distance, p_self_shadowing_receiver);
-	}
-#endif
+	vec3 transmittance = lights_trace_shadow_transmittance(origin, L, ls.max_distance, rng_state RT_SHADOW_MASK_ARG(RT_LIGHT_SHADOW_MASK(light)));
 #else
-	bool visible = lights_trace_shadow_ray(origin, L, ls.max_distance, rng_state);
-#ifdef RT_SHADOW_GROUPS
-	visible = visible && lights_trace_shadow_group(light, origin, L, ls.max_distance, p_self_shadowing_receiver).x > 0.0;
-#endif
+	bool visible = lights_trace_shadow_ray(origin, L, ls.max_distance, rng_state RT_SHADOW_MASK_ARG(RT_LIGHT_SHADOW_MASK(light)));
 	const vec3 transmittance = vec3(visible ? 1.0 : 0.0);
 #endif
 
 	const float opacity = light.shadow_opacity;
 	if (all(lessThanEqual(transmittance, vec3(0.0)))) {
 		r_shadowable = light_value * opacity;
-		r_occluder_t = light.radius > 0.0 ? nrd_sigma_occluder_distance(origin, L, ls.max_distance) : 1.0;
+		r_occluder_t = light.radius > 0.0 ? nrd_sigma_occluder_distance(origin, L, ls.max_distance RT_SHADOW_MASK_ARG(RT_LIGHT_SHADOW_MASK(light))) : 1.0;
 	} else {
 		r_shadowable = light_value * opacity * transmittance;
 		r_occluder_t = NRD_MISS_HIT_T;

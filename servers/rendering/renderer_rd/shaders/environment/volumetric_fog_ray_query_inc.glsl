@@ -9,10 +9,6 @@
 #define RT_NO_HIT_BUILTINS
 // The transparent shadow copies' flag and filter (only set on geometry when the project setting is on).
 #define RT_TRANSPARENT_SHADOWS
-// The shadow group casters of rendering/pathtracing/shadow_groups (FogRayQueryParams.shadow_groups), in the TLAS mask's
-// RT_MASK_SHADOW_GROUP (raytracing_common_inc.glsl).
-#define RT_SHADOW_GROUPS
-#define RT_MASK_SHADOW_GROUP 0x80
 
 // clang-format off
 #include "../raytracing/raytracing_inc.glsl"
@@ -34,7 +30,10 @@ layout(set = 1, binding = 3) uniform sampler SAMPLER_LINEAR_WITH_MIPMAPS_REPEAT;
 layout(set = 1, binding = 4, std140) uniform FogRayQueryParams {
 	mat4 view_to_world;
 	uint frame_index;
-	uint shadow_groups; // 1: the TLAS holds RT_MASK_SHADOW_GROUP casters (RTViewportState::shadow_groups_used).
+	// The shadow rays' instance inclusion mask: RT_MASK_SHADOW and the shadow groups of rendering/pathtracing/shadow_groups but
+	// the SELF_SHADOWING casters' (RTFogShadows::ParamsUBO::shadow_mask): the reservoir mixes the lights, as NVIDIA's fog
+	// shadows (49a825dc52 render_raytracing_fog_shadows.cpp:116).
+	uint shadow_mask;
 	uint pad1;
 	uint pad2;
 }
@@ -50,8 +49,8 @@ layout(constant_id = 0) const uint FOG_RQ_POSITIONAL_SHADOW_RAYS = 2u;
 #define FOG_RQ_MAX_POSITIONAL_SHADOW_RAYS 4
 // As the path tracer's directional shadow rays.
 #define FOG_RQ_DIRECTIONAL_DISTANCE 10000.0
-// The path tracer's shadow rays (RT_MASK_SHADOW, RT_SHADOW_RAY_FLAGS): the faces turned away from the light do not shadow.
-#define FOG_RQ_SHADOW_MASK 0x02
+// The path tracer's shadow rays (their mask: FogRayQueryParams.shadow_mask; RT_SHADOW_RAY_FLAGS): the faces turned away
+// from the light do not shadow.
 #define FOG_RQ_SHADOW_RAY_FLAGS (gl_RayFlagsCullFrontFacingTrianglesEXT | gl_RayFlagsTerminateOnFirstHitEXT)
 
 struct FogShadowSlot {
@@ -138,7 +137,7 @@ vec3 fog_shadows_transmittance(vec3 p_origin, vec3 p_direction, float p_distance
 	}
 	vec3 transmittance = vec3(1.0);
 	rayQueryEXT shadow_rq;
-	rayQueryInitializeEXT(shadow_rq, tlas, FOG_RQ_SHADOW_RAY_FLAGS, FOG_RQ_SHADOW_MASK, p_origin, 0.001, p_direction, p_distance - 0.001);
+	rayQueryInitializeEXT(shadow_rq, tlas, FOG_RQ_SHADOW_RAY_FLAGS, fog_ray_query.shadow_mask, p_origin, 0.001, p_direction, p_distance - 0.001);
 
 	while (rayQueryProceedEXT(shadow_rq)) {
 		if (rayQueryGetIntersectionTypeEXT(shadow_rq, false) == gl_RayQueryCandidateIntersectionTriangleEXT) {
@@ -158,11 +157,6 @@ vec3 fog_shadows_transmittance(vec3 p_origin, vec3 p_direction, float p_distance
 
 	if (rayQueryGetIntersectionTypeEXT(shadow_rq, true) != gl_RayQueryCommittedIntersectionNoneEXT) {
 		return vec3(0.0);
-	}
-	// The shadow group casters but SELF_SHADOWING ones, whatever the light's shadow_caster_mask: the reservoir mixes the
-	// lights, as NVIDIA's fog shadows (49a825dc52 render_raytracing_fog_shadows.cpp:116).
-	if (fog_ray_query.shadow_groups != 0u) {
-		transmittance *= ray_query_shadow_group_transmittance(p_origin, p_direction, p_distance - 0.001, FOG_RQ_SHADOW_RAY_FLAGS, 0xFFFFFFFFu, false);
 	}
 	return transmittance;
 }
