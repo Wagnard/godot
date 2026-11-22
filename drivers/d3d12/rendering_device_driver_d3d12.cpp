@@ -7198,6 +7198,22 @@ RDD::RaytracingPipelineID RenderingDeviceDriverD3D12::raytracing_pipeline_create
 		shader_identifiers[i] = state_object_properties->GetShaderIdentifier(shader_identifier_names[i]);
 	}
 
+	// The system gives this pipeline its default stack size; the per type maxima are kept for the additions to it.
+	RaytracingPipelineInfo::StackSizes stack_sizes;
+	if (config.allows_additions) {
+		uint32_t group_index = 0;
+		for (uint32_t i = 0; i < p_raygen_shader_indices.size(); i++) {
+			ERR_FAIL_COND_V(!_raytracing_stack_size_add(state_object_properties.Get(), group_names[group_index++], stack_sizes.raygen), RaytracingPipelineID());
+		}
+		for (uint32_t i = 0; i < p_miss_shader_indices.size(); i++) {
+			ERR_FAIL_COND_V(!_raytracing_stack_size_add(state_object_properties.Get(), group_names[group_index++], stack_sizes.miss), RaytracingPipelineID());
+		}
+		for (uint32_t i = 0; i < p_hit_groups.size(); i++) {
+			ERR_FAIL_COND_V(!_raytracing_stack_sizes_add_hit_group(state_object_properties.Get(), group_names[group_index++], p_hit_groups[i], stack_sizes), RaytracingPipelineID());
+		}
+		print_verbose(vformat("D3D12: raytracing pipeline stack size %d bytes (DXR default over its shaders: %d).", state_object_properties->GetPipelineStackSize(), _raytracing_pipeline_stack_size(stack_sizes, p_max_trace_recursion_depth)));
+	}
+
 	// Bookkeep.
 	RaytracingPipelineInfo *raytracing_pipeline_info = VersatileResource::allocate<RaytracingPipelineInfo>(resources_allocator);
 	raytracing_pipeline_info->pso = std::move(state_object);
@@ -7208,8 +7224,39 @@ RDD::RaytracingPipelineID RenderingDeviceDriverD3D12::raytracing_pipeline_create
 	raytracing_pipeline_info->max_attribute_size = config.max_attribute_size;
 	raytracing_pipeline_info->max_recursion_depth = config.max_recursion_depth;
 	raytracing_pipeline_info->group_names = std::move(group_names);
+	raytracing_pipeline_info->stack_sizes = stack_sizes;
 
 	return RaytracingPipelineID(raytracing_pipeline_info);
+}
+
+bool RenderingDeviceDriverD3D12::_raytracing_stack_size_add(ID3D12StateObjectProperties *p_properties, const String &p_export, uint64_t &r_max) {
+	const UINT64 size = p_properties->GetShaderStackSize((LPCWSTR)p_export.utf16().ptr());
+	// 0xffffffff: the shader is unknown or not fully resolved in the state object (DXR spec, GetShaderStackSize).
+	ERR_FAIL_COND_V_MSG(size == 0xffffffff, false, "GetShaderStackSize failed for " + p_export + ".");
+	r_max = MAX(r_max, (uint64_t)size);
+	return true;
+}
+
+bool RenderingDeviceDriverD3D12::_raytracing_stack_sizes_add_hit_group(ID3D12StateObjectProperties *p_properties, const String &p_hit_group_export, const HitGroup &p_hit_group, RaytracingPipelineInfo::StackSizes &r_sizes) {
+	// A hit group's shaders are queried one by one, as "hitGroupName::shaderType" (DXR spec, GetShaderStackSize).
+	if (p_hit_group.closest_hit_shader_index != UINT32_MAX && !_raytracing_stack_size_add(p_properties, p_hit_group_export + "::closesthit", r_sizes.closest_hit)) {
+		return false;
+	}
+	if (p_hit_group.any_hit_shader_index != UINT32_MAX && !_raytracing_stack_size_add(p_properties, p_hit_group_export + "::anyhit", r_sizes.any_hit)) {
+		return false;
+	}
+	if (p_hit_group.intersection_shader_index != UINT32_MAX && !_raytracing_stack_size_add(p_properties, p_hit_group_export + "::intersection", r_sizes.intersection)) {
+		return false;
+	}
+	return true;
+}
+
+uint64_t RenderingDeviceDriverD3D12::_raytracing_pipeline_stack_size(const RaytracingPipelineInfo::StackSizes &p_sizes, uint32_t p_max_recursion_depth) {
+	// DXR spec, "Default pipeline stack size", without callable shaders (this driver creates none):
+	// RGSMax + max(CHSMax, MSMax, ISMax + AHSMax) * min(1, depth) + max(CHSMax, MSMax) * max(depth - 1, 0).
+	const uint64_t closest_hit_or_miss = MAX(p_sizes.closest_hit, p_sizes.miss);
+	const uint64_t first_level = MAX(closest_hit_or_miss, p_sizes.intersection + p_sizes.any_hit);
+	return p_sizes.raygen + first_level * MIN(p_max_recursion_depth, 1u) + closest_hit_or_miss * (p_max_recursion_depth > 1 ? p_max_recursion_depth - 1 : 0);
 }
 
 bool RenderingDeviceDriverD3D12::raytracing_pipeline_can_add_hit_groups(RaytracingPipelineID p_pipeline) {
@@ -7378,6 +7425,21 @@ RDD::RaytracingPipelineID RenderingDeviceDriverD3D12::raytracing_pipeline_add_hi
 		ERR_FAIL_NULL_V_MSG(shader_identifiers[i], RaytracingPipelineID(), "AddToStateObject: no identifier for " + group_names[i] + ".");
 	}
 
+	// The grown state object starts with its parent's pipeline stack size (DXR spec, AddToStateObject), computed by the
+	// system from the parent's shaders only. An added hit group that needs more stack than that would overflow it, and
+	// exceeding the stack size removes the device (DXR spec, "Pipeline stack limit behavior"): set it again to the default
+	// over every shader of the grown pipeline, before any command list uses it. Never smaller than the inherited size.
+	RaytracingPipelineInfo::StackSizes stack_sizes = base->stack_sizes;
+	for (uint32_t i = 0; i < p_hit_groups.size(); i++) {
+		ERR_FAIL_COND_V(!_raytracing_stack_sizes_add_hit_group(state_object_properties.Get(), _raytracing_hit_group_export_name(generation, i), p_hit_groups[i], stack_sizes), RaytracingPipelineID());
+	}
+	const uint64_t inherited_stack_size = state_object_properties->GetPipelineStackSize();
+	const uint64_t required_stack_size = _raytracing_pipeline_stack_size(stack_sizes, base->max_recursion_depth);
+	if (required_stack_size > inherited_stack_size) {
+		state_object_properties->SetPipelineStackSize(required_stack_size);
+	}
+	print_verbose(vformat("D3D12: raytracing pipeline stack size: inherited %d bytes, the added hit groups need %d (%s).", inherited_stack_size, required_stack_size, required_stack_size > inherited_stack_size ? "grown" : "kept"));
+
 	RaytracingPipelineInfo *raytracing_pipeline_info = VersatileResource::allocate<RaytracingPipelineInfo>(resources_allocator);
 	raytracing_pipeline_info->pso = std::move(state_object);
 	raytracing_pipeline_info->layout_defining_shader_info = base->layout_defining_shader_info;
@@ -7388,6 +7450,7 @@ RDD::RaytracingPipelineID RenderingDeviceDriverD3D12::raytracing_pipeline_add_hi
 	raytracing_pipeline_info->max_attribute_size = base->max_attribute_size;
 	raytracing_pipeline_info->max_recursion_depth = base->max_recursion_depth;
 	raytracing_pipeline_info->group_names = std::move(group_names);
+	raytracing_pipeline_info->stack_sizes = stack_sizes;
 	return RaytracingPipelineID(raytracing_pipeline_info);
 }
 

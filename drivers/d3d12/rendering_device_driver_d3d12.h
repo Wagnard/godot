@@ -1026,7 +1026,22 @@ private:
 		uint32_t max_attribute_size = 0;
 		uint32_t max_recursion_depth = 0;
 		TightLocalVector<String> group_names; // Each group's export, in group order.
+
+		// The largest stack each shader type needs (GetShaderStackSize) among the pipeline's shaders. A state object made by
+		// AddToStateObject starts with its parent's pipeline stack size (DXR spec, AddToStateObject), which covers only the
+		// parent's shaders: an addition sets it again from these (DXR spec, "Default pipeline stack size").
+		struct StackSizes {
+			uint64_t raygen = 0;
+			uint64_t miss = 0;
+			uint64_t closest_hit = 0;
+			uint64_t any_hit = 0;
+			uint64_t intersection = 0;
+		} stack_sizes;
 	};
+
+	static bool _raytracing_stack_size_add(ID3D12StateObjectProperties *p_properties, const String &p_export, uint64_t &r_max);
+	static bool _raytracing_stack_sizes_add_hit_group(ID3D12StateObjectProperties *p_properties, const String &p_hit_group_export, const HitGroup &p_hit_group, RaytracingPipelineInfo::StackSizes &r_sizes);
+	static uint64_t _raytracing_pipeline_stack_size(const RaytracingPipelineInfo::StackSizes &p_sizes, uint32_t p_max_recursion_depth);
 
 	// The ray tracing pipeline's config, shader config and global root signature subobjects, the same in a pipeline and in
 	// what is added to it (DXR spec, AddToStateObject).
