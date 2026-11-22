@@ -35,6 +35,7 @@
 #include "core/config/engine.h"
 #include "core/os/os.h"
 
+#include <avrt.h>
 #include <functiondiscoverykeys.h>
 #include <wrl/client.h>
 
@@ -738,6 +739,18 @@ void AudioDriverWASAPI::write_sample(WORD format_tag, int bits_per_sample, BYTE 
 
 void AudioDriverWASAPI::thread_func(void *p_udata) {
 	CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+	Thread::set_name("WASAPI audio");
+
+	// The thread that feeds the audio client is registered with the Multimedia Class Scheduler Service, as Microsoft
+	// asks of audio processing threads: it then runs above every normal priority thread of the system, and a load that
+	// keeps every core busy (shader and pipeline compilation, which a game's process class makes "above normal") no
+	// longer delays it past the end of the device buffer. "Audio" is the task WASAPI itself assigns to stream periods of
+	// 10 ms or more (Exclusive-Mode Streams), which shared mode always uses.
+	DWORD mmcss_task_index = 0;
+	HANDLE mmcss_task = AvSetMmThreadCharacteristicsW(L"Audio", &mmcss_task_index);
+	if (!mmcss_task) {
+		print_verbose(vformat("WASAPI: the audio thread could not join the MMCSS \"Audio\" task (error %d).", (int64_t)GetLastError()));
+	}
 
 	AudioDriverWASAPI *ad = static_cast<AudioDriverWASAPI *>(p_udata);
 	uint32_t avail_frames = 0;
@@ -975,6 +988,9 @@ void AudioDriverWASAPI::thread_func(void *p_udata) {
 		if (written_frames == 0 && read_frames == 0) {
 			OS::get_singleton()->delay_usec(1000);
 		}
+	}
+	if (mmcss_task) {
+		AvRevertMmThreadCharacteristics(mmcss_task);
 	}
 	CoUninitialize();
 }
