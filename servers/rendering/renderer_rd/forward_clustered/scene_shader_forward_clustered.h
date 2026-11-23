@@ -317,6 +317,9 @@ public:
 		// render_mode reactive_mask_disabled: in the transparent pass, this surface's alpha stays out of the temporal
 		// upscaler's reactive mask (PipelineKey::no_reactive_alpha).
 		bool reactive_mask_disabled = false;
+		// render_mode rr_transparency_layer_disabled: path traced with DLSS-RR, this unshaded transparent surface is drawn
+		// into the color RR denoises, not into RR's transparency layer (RenderForwardClustered::_rr_transparency_layer_shader()).
+		bool rr_transparency_layer_disabled = false;
 		// render_mode pathtracing_rasterized: path traced, the raster transparent pass draws this surface over the traced
 		// image (lit there, so with no path tracing noise); the camera rays leave it out, the other rays keep it.
 		bool pathtracing_rasterized = false;

@@ -81,6 +81,7 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	unshaded = false;
 	front_layer_reflection_disabled = false;
 	reactive_mask_disabled = false;
+	rr_transparency_layer_disabled = false;
 	pathtracing_rasterized = false;
 	fog_disabled = false;
 	uses_vertex = false;
@@ -146,6 +147,7 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	actions.render_mode_flags["unshaded"] = &unshaded;
 	actions.render_mode_flags["front_layer_reflection_disabled"] = &front_layer_reflection_disabled;
 	actions.render_mode_flags["reactive_mask_disabled"] = &reactive_mask_disabled;
+	actions.render_mode_flags["rr_transparency_layer_disabled"] = &rr_transparency_layer_disabled;
 	actions.render_mode_flags["pathtracing_rasterized"] = &pathtracing_rasterized;
 	actions.render_mode_flags["fog_disabled"] = &fog_disabled;
 	actions.render_mode_flags["wireframe"] = &wireframe;

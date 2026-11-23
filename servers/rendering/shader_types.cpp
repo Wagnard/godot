@@ -329,6 +329,12 @@ ShaderTypes::ShaderTypes() {
 		// window) it only leaves the surface aliased and, path traced, noisy. The material's author chooses, as with the
 		// per material reactive control of AMD's FSR plugin for Unreal.
 		shader_modes[RSE::SHADER_SPATIAL].modes.push_back({ PNAME("reactive_mask_disabled") });
+		// Path tracing with DLSS Ray Reconstruction: an unshaded transparent surface stays in the color RR denoises and
+		// accumulates, instead of its transparency layer, whose content RR only upscales (DLSS-RR Integration Guide
+		// 3.4.10). The layer suits soft effects RR took for noise (halos, sparkles); a sharp shape (a selection ring)
+		// kept its render resolution's jagged edges there. The material's author chooses, as Unreal's per material
+		// translucency pass does.
+		shader_modes[RSE::SHADER_SPATIAL].modes.push_back({ PNAME("rr_transparency_layer_disabled") });
 		// Path tracing: drawn by the raster pass over the traced image instead of by the camera rays, which leave it out
 		// (shadows, reflections and bounces still trace it). For flat cards such as sprites: a thin surface lit by a
 		// one-sample path was noise the denoiser blurred away.

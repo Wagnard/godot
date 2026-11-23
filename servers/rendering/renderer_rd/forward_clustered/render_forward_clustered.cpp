@@ -7226,7 +7226,9 @@ bool RenderForwardClustered::_rr_transparency_layer_shader(const SceneShaderForw
 	// Not a pathtracing_rasterized surface (a sprite): RR moves the layer by the motion vectors under it, which the layer
 	// does not write, so a card standing in front of a farther background smeared as the camera moved. Drawn into the
 	// color, the card is noise free there too.
-	if (!p_shader || !p_shader->unshaded || p_pt_rasterized || p_shader->uses_screen_texture || p_shader->uses_depth_texture || p_shader->uses_normal_texture) {
+	// render_mode rr_transparency_layer_disabled: the author keeps a sharp shape (a selection ring) in the color RR
+	// accumulates; in the layer, which RR only upscales, it kept the render resolution's jagged edges.
+	if (!p_shader || !p_shader->unshaded || p_shader->rr_transparency_layer_disabled || p_pt_rasterized || p_shader->uses_screen_texture || p_shader->uses_depth_texture || p_shader->uses_normal_texture) {
 		return false;
 	}
 	return p_shader->blend_mode == RendererRD::MaterialStorage::ShaderData::BLEND_MODE_MIX || p_shader->blend_mode == RendererRD::MaterialStorage::ShaderData::BLEND_MODE_PREMULTIPLIED_ALPHA ||
