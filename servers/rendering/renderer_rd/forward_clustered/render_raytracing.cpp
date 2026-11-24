@@ -6015,6 +6015,24 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 		tlas_expand_jobs.push_back(shadow_job);
 	}
 
+#ifdef DEBUG_ENABLED
+	// The build-time bits share 0x40 / 0x80 with the shadow groups assigned below: an instance or expand job added after
+	// the loops above that clear them would keep one, and its shadow rays would meet it as a member of a shadow group.
+	{
+		uint32_t leftover_bits = 0;
+		for (const uint8_t mask : instance_masks) {
+			leftover_bits |= mask;
+		}
+		for (const TlasExpandJob &job : tlas_expand_jobs) {
+			leftover_bits |= job.mask;
+		}
+		leftover_bits &= RT_INSTANCE_MASK_TRANSPARENT_SHADOW | RT_INSTANCE_MASK_DOUBLE_SIDED_SHADOW;
+		if (unlikely(leftover_bits != 0)) {
+			ERR_PRINT_ONCE(vformat("Path tracing: TLAS instance mask build-time bit(s) 0x%x left before the shadow groups are assigned (an instance was added to build_tlas() after the loops that clear them).", leftover_bits));
+		}
+	}
+#endif
+
 	// rendering/pathtracing/shadow_groups (RT_SHADOW_GROUPS): Light3D.shadow_caster_mask and SELF_SHADOWING, with the
 	// build-time bits above cleared, through the TLAS instance mask as NVIDIA's RTShadowGroupTable (49a825dc52
 	// render_raytracing.h:954-1037) and as the vendors ask ("use instance masking and ray flags" rather than any-hit
