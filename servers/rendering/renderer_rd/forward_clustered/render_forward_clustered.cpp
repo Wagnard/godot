@@ -582,6 +582,7 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 			pipeline_specialization.use_light_projector = element_info.uses_projector;
 			pipeline_specialization.use_directional_soft_shadows = p_params->use_directional_soft_shadow;
 			pipeline_specialization.use_lightmap_specular = element_info.uses_lightmap_specular;
+			pipeline_specialization.transparent_motion_vectors_pass = p_params->motion_vectors_only;
 		}
 
 		pipeline_key.color_pass_flags = 0;
@@ -651,7 +652,9 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 		pipeline_key.framebuffer_format_id = framebuffer_format;
 		pipeline_key.wireframe = p_params->force_wireframe;
 		pipeline_key.rr_transparency_layer = p_params->rr_transparency_layer;
-		pipeline_key.no_reactive_alpha = p_params->no_reactive_alpha && (p_params->no_reactive_alpha_all || shader->reactive_mask_disabled);
+		// render_mode transparent_motion_vectors: a surface whose motion vectors are drawn stays out of the reactive mask too.
+		pipeline_key.no_reactive_alpha = p_params->no_reactive_alpha && (p_params->no_reactive_alpha_all || shader->reactive_mask_disabled || shader->transparent_motion_vectors);
+		pipeline_key.motion_vectors_only = p_params->motion_vectors_only;
 		pipeline_key.ubershader = 0;
 
 		bool emulate_point_size = shader->uses_point_size && scene_shader.emulate_point_size;
@@ -925,6 +928,59 @@ void RenderForwardClustered::_render_list_with_draw_list(RenderListParameters *p
 		}
 	}
 	RD::get_singleton()->draw_list_end();
+}
+
+void RenderForwardClustered::_render_transparent_motion_vectors(const RenderListParameters &p_params, uint32_t p_from, uint32_t p_to, const Ref<RenderBufferDataForwardClustered> &p_rb_data, const Rect2 &p_region) {
+	GeometryInstanceSurfaceDataCache *const *elements = p_params.elements;
+	uint32_t from = p_from;
+	while (from < p_to && !elements[from]->shader->transparent_motion_vectors) {
+		from++;
+	}
+	if (from == p_to) {
+		// No material of this list has the render mode: no draw list, nothing compiled.
+		return;
+	}
+
+	RENDER_TIMESTAMP("Render Transparent Motion Vectors");
+	RD::get_singleton()->draw_command_begin_label("Render Transparent Motion Vectors");
+
+	// The transparent pass' parameters, writing only the motion vectors. That pass already wrote the color's alpha and
+	// the texture streaming feedback.
+	RenderListParameters params = p_params;
+	params.motion_vectors_only = true;
+	params.no_reactive_alpha = false;
+	params.no_reactive_alpha_all = false;
+	params.rr_transparency_layer = false;
+	params.use_material_feedback = false;
+	// Color, velocity and depth (the velocity buffer of the view's MSAA, resolved after the transparent passes).
+	const RID framebuffer = p_rb_data->get_color_pass_fb(params.color_pass_flags);
+	const RD::FramebufferFormatID fb_format = RD::get_singleton()->framebuffer_get_format(framebuffer);
+	params.framebuffer_format = fb_format;
+
+	RD::DrawListID draw_list = RD::get_singleton()->draw_list_begin(framebuffer, RD::DRAW_DEFAULT_ALL, Vector<Color>(), 0.0f, 0u, p_region);
+	if (params.buffer_dependencies != nullptr) {
+		for (const RID &buffer : *params.buffer_dependencies) {
+			RD::get_singleton()->draw_list_add_buffer_dependency(draw_list, buffer);
+		}
+	}
+	// In the transparent list's order (back to front), so that the nearest surface's motion is the one left where
+	// several cover a pixel without writing depth. Each run of such elements keeps its place in the list: their instance
+	// data is the transparent pass' (base_index = element index + element_offset). Equal elements merged into one
+	// instanced draw (RenderElementInfo::repeat) share their material, so a run never splits them.
+	while (from < p_to) {
+		uint32_t to = from + 1;
+		while (to < p_to && elements[to]->shader->transparent_motion_vectors) {
+			to++;
+		}
+		_render_list(draw_list, fb_format, &params, from, to);
+		from = to;
+		while (from < p_to && !elements[from]->shader->transparent_motion_vectors) {
+			from++;
+		}
+	}
+	RD::get_singleton()->draw_list_end();
+
+	RD::get_singleton()->draw_command_end_label();
 }
 
 uint32_t RenderForwardClustered::_render_list_get_split_count(const RenderListParameters *p_params) {
@@ -3953,6 +4009,14 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		// materials with render_mode reactive_mask_disabled stay out of it.
 		render_list_params.no_reactive_alpha = using_motion_pass && scale_type != SCALE_3D_DLSS;
 		_render_list_with_draw_list(&render_list_params, alpha_framebuffer, RD::DRAW_DEFAULT_ALL, Vector<Color>(), 0.0f, 0u, p_render_data->render_region);
+
+		if (rb_data.is_valid() && (color_pass_flags & COLOR_PASS_FLAG_MOTION_VECTORS)) {
+			// render_mode transparent_motion_vectors: those materials' motion vectors over what the opaque passes wrote, as
+			// Unity HDRP's transparent motion vectors and Unreal's translucent velocity pass do.
+			RenderListParameters motion_params = render_list_params;
+			motion_params.color_pass_flags = transparent_color_pass_flags | COLOR_PASS_FLAG_MOTION_VECTORS;
+			_render_transparent_motion_vectors(motion_params, 0, render_list[RENDER_LIST_ALPHA].elements.size(), rb_data, p_render_data->render_region);
+		}
 	}
 
 	RD::get_singleton()->draw_command_end_label();
@@ -7228,7 +7292,9 @@ bool RenderForwardClustered::_rr_transparency_layer_shader(const SceneShaderForw
 	// color, the card is noise free there too.
 	// render_mode rr_transparency_layer_disabled: the author keeps a sharp shape (a selection ring) in the color RR
 	// accumulates; in the layer, which RR only upscales, it kept the render resolution's jagged edges.
-	if (!p_shader || !p_shader->unshaded || p_shader->rr_transparency_layer_disabled || p_pt_rasterized || p_shader->uses_screen_texture || p_shader->uses_depth_texture || p_shader->uses_normal_texture) {
+	// render_mode transparent_motion_vectors: the surface writes its own motion vectors, as the cards do, so RR can
+	// accumulate it in the color like an opaque surface (the layer is for what has no motion vectors of its own).
+	if (!p_shader || !p_shader->unshaded || p_shader->rr_transparency_layer_disabled || p_shader->transparent_motion_vectors || p_pt_rasterized || p_shader->uses_screen_texture || p_shader->uses_depth_texture || p_shader->uses_normal_texture) {
 		return false;
 	}
 	return p_shader->blend_mode == RendererRD::MaterialStorage::ShaderData::BLEND_MODE_MIX || p_shader->blend_mode == RendererRD::MaterialStorage::ShaderData::BLEND_MODE_PREMULTIPLIED_ALPHA ||
@@ -7297,12 +7363,26 @@ void RenderForwardClustered::_mesh_compile_pipelines_for_surface(const SurfacePi
 				pipeline_key.framebuffer_format_id = _get_color_framebuffer_format_for_pipeline(buffers_color_format, buffers_can_be_storage, RD::TextureSamples(p_global.texture_samples), false, false, view_count);
 				_mesh_compile_pipeline_for_surface(p_surface.shader, p_surface.mesh_surface, true, p_surface.instanced, p_source, pipeline_key, r_pipeline_pairs);
 
-				if (alpha && p_global.use_no_reactive_alpha && p_surface.shader->reactive_mask_disabled) {
+				// render_mode transparent_motion_vectors keeps a surface out of the reactive mask too.
+				const bool no_reactive_alpha = p_global.use_no_reactive_alpha && (p_surface.shader->reactive_mask_disabled || p_surface.shader->transparent_motion_vectors);
+				// render_mode transparent_motion_vectors: its pass after the transparent pass, in a view with motion vectors
+				// (RenderForwardClustered::_render_transparent_motion_vectors()).
+				const bool transparent_motion_vectors = alpha && p_global.use_motion_vectors && p_surface.shader->transparent_motion_vectors;
+
+				if (alpha && no_reactive_alpha) {
 					// The transparent pass under an upscaler that reads the color's alpha as its reactive mask: a material with
 					// render_mode reactive_mask_disabled writes no alpha (RenderListParameters::no_reactive_alpha).
 					SceneShaderForwardClustered::ShaderData::PipelineKey no_reactive_key = pipeline_key;
 					no_reactive_key.no_reactive_alpha = true;
 					_mesh_compile_pipeline_for_surface(p_surface.shader, p_surface.mesh_surface, true, p_surface.instanced, p_source, no_reactive_key, r_pipeline_pairs);
+				}
+
+				if (transparent_motion_vectors) {
+					SceneShaderForwardClustered::ShaderData::PipelineKey motion_key = pipeline_key;
+					motion_key.color_pass_flags |= SceneShaderForwardClustered::PIPELINE_COLOR_PASS_FLAG_MOTION_VECTORS;
+					motion_key.motion_vectors_only = true;
+					motion_key.framebuffer_format_id = _get_color_framebuffer_format_for_pipeline(buffers_color_format, buffers_can_be_storage, RD::TextureSamples(p_global.texture_samples), false, true, view_count);
+					_mesh_compile_pipeline_for_surface(p_surface.shader, p_surface.mesh_surface, true, p_surface.instanced, p_source, motion_key, r_pipeline_pairs);
 				}
 
 				if (alpha && !multiview && p_global.use_rt_shadows && scene_shader.is_rt_shadows_shader_group_enabled()) {
@@ -7311,7 +7391,16 @@ void RenderForwardClustered::_mesh_compile_pipelines_for_surface(const SurfacePi
 					rt_shadows_key.color_pass_flags |= SceneShaderForwardClustered::PIPELINE_COLOR_PASS_FLAG_RT_SHADOWS;
 					_mesh_compile_pipeline_for_surface(p_surface.shader, p_surface.mesh_surface, true, p_surface.instanced, p_source, rt_shadows_key, r_pipeline_pairs);
 
-					if (p_global.use_no_reactive_alpha && p_surface.shader->reactive_mask_disabled) {
+					if (transparent_motion_vectors) {
+						// The path tracer's transparent motion vector pass: its transparent pass' flags (as its rasterized cards).
+						SceneShaderForwardClustered::ShaderData::PipelineKey motion_key = rt_shadows_key;
+						motion_key.color_pass_flags |= SceneShaderForwardClustered::PIPELINE_COLOR_PASS_FLAG_MOTION_VECTORS;
+						motion_key.motion_vectors_only = true;
+						motion_key.framebuffer_format_id = _get_color_framebuffer_format_for_pipeline(buffers_color_format, buffers_can_be_storage, RD::TextureSamples(p_global.texture_samples), false, true, 1);
+						_mesh_compile_pipeline_for_surface(p_surface.shader, p_surface.mesh_surface, true, p_surface.instanced, p_source, motion_key, r_pipeline_pairs);
+					}
+
+					if (no_reactive_alpha) {
 						rt_shadows_key.no_reactive_alpha = true;
 						_mesh_compile_pipeline_for_surface(p_surface.shader, p_surface.mesh_surface, true, p_surface.instanced, p_source, rt_shadows_key, r_pipeline_pairs);
 					}

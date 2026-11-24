@@ -82,6 +82,7 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	front_layer_reflection_disabled = false;
 	reactive_mask_disabled = false;
 	rr_transparency_layer_disabled = false;
+	transparent_motion_vectors = false;
 	pathtracing_rasterized = false;
 	fog_disabled = false;
 	uses_vertex = false;
@@ -148,6 +149,7 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	actions.render_mode_flags["front_layer_reflection_disabled"] = &front_layer_reflection_disabled;
 	actions.render_mode_flags["reactive_mask_disabled"] = &reactive_mask_disabled;
 	actions.render_mode_flags["rr_transparency_layer_disabled"] = &rr_transparency_layer_disabled;
+	actions.render_mode_flags["transparent_motion_vectors"] = &transparent_motion_vectors;
 	actions.render_mode_flags["pathtracing_rasterized"] = &pathtracing_rasterized;
 	actions.render_mode_flags["fog_disabled"] = &fog_disabled;
 	actions.render_mode_flags["wireframe"] = &wireframe;
@@ -691,6 +693,26 @@ void SceneShaderForwardClustered::ShaderData::_create_pipeline(PipelineKey p_pip
 			if (depth_draw == DEPTH_DRAW_OPAQUE) {
 				depth_stencil_state.enable_depth_write = false; //alpha does not draw depth
 			}
+
+			if (p_pipeline_key.motion_vectors_only) {
+				// The transparent motion vector pass (render_mode transparent_motion_vectors), after the transparent pass that
+				// drew this surface's color, depth and stencil: the same depth and stencil tests, writing only the motion
+				// vectors (attachment 2), which replace those of what is behind. The fragments too transparent to own the
+				// pixel's motion are discarded by the shader (sc_transparent_motion_vectors_pass()).
+				RD::PipelineColorBlendState::Attachment no_color_write;
+				no_color_write.write_r = false;
+				no_color_write.write_g = false;
+				no_color_write.write_b = false;
+				no_color_write.write_a = false;
+				blend_state.attachments = { no_color_write, RD::PipelineColorBlendState::Attachment(), RD::PipelineColorBlendState::Attachment() };
+				multisample_state.enable_alpha_to_coverage = false;
+				multisample_state.enable_alpha_to_one = false;
+				depth_stencil_state.enable_depth_write = false;
+				depth_stencil_state.front_op.pass = RD::STENCIL_OP_KEEP;
+				depth_stencil_state.front_op.depth_fail = RD::STENCIL_OP_KEEP;
+				depth_stencil_state.front_op.write_mask = 0;
+				depth_stencil_state.back_op = depth_stencil_state.front_op;
+			}
 		} else {
 			blend_state = blend_state_color_opaque;
 
@@ -1181,6 +1203,9 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 		actions.render_mode_defines["cull_disabled"] = "#define DO_SIDE_CHECK\n";
 		actions.render_mode_defines["particle_trails"] = "#define USE_PARTICLE_TRAILS\n";
 		actions.render_mode_defines["depth_prepass_alpha"] = "#define USE_OPAQUE_PREPASS\n";
+		// Its motion vector variant discards in the transparent motion vector pass what is too transparent to own the
+		// pixel's motion (sc_transparent_motion_vectors_pass()): only the shaders with the render mode change.
+		actions.render_mode_defines["transparent_motion_vectors"] = "#define TRANSPARENT_MOTION_VECTORS\n";
 		actions.render_mode_defines["billboard"] = "#define BILLBOARD_ENABLED\n";
 		actions.render_mode_defines["billboard_y"] = "#define BILLBOARD_FIXED_Y\n";
 		actions.render_mode_defines["billboard_particles"] = "#define BILLBOARD_PARTICLES\n";

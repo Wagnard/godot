@@ -335,6 +335,13 @@ ShaderTypes::ShaderTypes() {
 		// kept its render resolution's jagged edges there. The material's author chooses, as Unreal's per material
 		// translucency pass does.
 		shader_modes[RSE::SHADER_SPATIAL].modes.push_back({ PNAME("rr_transparency_layer_disabled") });
+		// A transparent surface that writes its object's motion vectors over those of what is behind it, as an opaque one
+		// does, in a small pass after the transparent pass (Forward+ only), and stays out of the reactive mask: a temporal
+		// upscaler or TAA then follows it as it moves. For marks that follow moving objects (selection rings, health
+		// bars); not for surfaces one sees through to something else moving. Off by default, per material, as Unity
+		// HDRP's "Transparent Writes Motion Vectors" and Unreal's translucent "Output Velocity" (which also skips the
+		// pixels below an opacity threshold).
+		shader_modes[RSE::SHADER_SPATIAL].modes.push_back({ PNAME("transparent_motion_vectors") });
 		// Path tracing: drawn by the raster pass over the traced image instead of by the camera rays, which leave it out
 		// (shadows, reflections and bounces still trace it). For flat cards such as sprites: a thin surface lit by a
 		// one-sample path was noise the denoiser blurred away.

@@ -183,6 +183,14 @@ bool sc_disable_alpha_antialiasing() {
 }
 #endif
 
+#ifdef TRANSPARENT_MOTION_VECTORS
+// render_mode transparent_motion_vectors: the draw is the transparent motion vector pass, which writes only the motion
+// vectors (ShaderSpecialization::transparent_motion_vectors_pass, bit 17).
+bool sc_transparent_motion_vectors_pass() {
+	return ((sc_packed_1() >> 17) & 1U) != 0;
+}
+#endif
+
 float sc_luminance_multiplier() {
 	// Not used in clustered renderer but we share some code with the mobile renderer that requires this.
 	return 1.0;

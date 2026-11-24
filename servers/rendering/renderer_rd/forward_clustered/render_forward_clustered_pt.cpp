@@ -961,6 +961,18 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 					_warn_non_finite_layer(p_render_data, report, lit_count, alpha_count);
 				}
 			}
+
+			if (color_pass_flags & COLOR_PASS_FLAG_MOTION_VECTORS) {
+				// render_mode transparent_motion_vectors: as raster's pass, over the velocity buffer the path tracer and the
+				// rasterized cards wrote, with the transparent pass' flags (the cards' own: they write theirs already, and
+				// are left out). Whether the camera rays peeled such a surface or this pass drew it, its motion is the same.
+				// RR's transparency layer takes no such surface (_rr_transparency_layer_shader()).
+				const uint32_t motion_color_pass_flags = transparent_color_pass_flags | uint32_t(COLOR_PASS_FLAG_MOTION_VECTORS);
+				RenderListParameters motion_params(render_list[RENDER_LIST_ALPHA].elements.ptr(), render_list[RENDER_LIST_ALPHA].element_info.ptr(), alpha_count, reverse_cull, PASS_MODE_COLOR, motion_color_pass_flags, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, 0, base_specialization);
+				motion_params.rt_shadow_texture_uniform_set = rt_shadow_texture_set;
+				motion_params.buffer_dependencies = rt_shadow_buffer_dependencies;
+				_render_transparent_motion_vectors(motion_params, rasterized_count, alpha_count, rb_data, p_render_data->render_region);
+			}
 		}
 
 		RD::get_singleton()->draw_command_end_label();

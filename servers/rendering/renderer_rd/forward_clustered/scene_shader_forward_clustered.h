@@ -158,6 +158,7 @@ public:
 				uint32_t volumetric_fog_sampling : 2; // RSE::EnvironmentVolumetricFogSampling.
 				uint32_t use_dither_fade : 1; // The draw's instance fade is a dithered discard (rendering/visibility_range/dithered_fade).
 				uint32_t disable_alpha_antialiasing : 1; // The draw's alpha scissor / alpha hash material is drawn without its alpha antialiasing (rendering/anti_aliasing/quality/material_alpha_antialiasing).
+				uint32_t transparent_motion_vectors_pass : 1; // Bit 17: the transparent motion vector pass (render_mode transparent_motion_vectors; read only by shaders with it).
 			};
 		};
 
@@ -249,11 +250,15 @@ public:
 			// A surface with render_mode reactive_mask_disabled in the transparent pass, under an upscaler that reads the
 			// color's alpha as its reactive mask: it writes no alpha (RenderListParameters::no_reactive_alpha).
 			uint32_t no_reactive_alpha = false;
+			// The transparent motion vector pass (render_mode transparent_motion_vectors): only the motion vectors are
+			// written, the color and the depth are left as the transparent pass drew them.
+			uint32_t motion_vectors_only = false;
 
 			uint32_t hash() const {
 				uint32_t h = hash_murmur3_one_64(vertex_format_id);
 				h = hash_murmur3_one_32(rr_transparency_layer, h);
 				h = hash_murmur3_one_32(no_reactive_alpha, h);
+				h = hash_murmur3_one_32(motion_vectors_only, h);
 				h = hash_murmur3_one_32(framebuffer_format_id, h);
 				h = hash_murmur3_one_32(cull_mode, h);
 				h = hash_murmur3_one_32(front_face, h);
@@ -320,6 +325,9 @@ public:
 		// render_mode rr_transparency_layer_disabled: path traced with DLSS-RR, this unshaded transparent surface is drawn
 		// into the color RR denoises, not into RR's transparency layer (RenderForwardClustered::_rr_transparency_layer_shader()).
 		bool rr_transparency_layer_disabled = false;
+		// render_mode transparent_motion_vectors: in a view with motion vectors, this transparent surface writes its own in
+		// a pass after the transparent pass (PipelineKey::motion_vectors_only) and stays out of the reactive mask.
+		bool transparent_motion_vectors = false;
 		// render_mode pathtracing_rasterized: path traced, the raster transparent pass draws this surface over the traced
 		// image (lit there, so with no path tracing noise); the camera rays leave it out, the other rays keep it.
 		bool pathtracing_rasterized = false;

@@ -3463,6 +3463,14 @@ void fragment_shader(in SceneData scene_data) {
 
 #endif //MODE_RENDER_DEPTH
 #ifdef MOTION_VECTORS
+#ifdef TRANSPARENT_MOTION_VECTORS
+	// The transparent motion vector pass: a fragment owns the pixel's motion only where the surface covers enough of
+	// it. Where it hardly shows (the clear part of a ring's quad), the motion of what is behind stays. One third, the
+	// default opacity threshold of Unreal's translucent "Output Velocity" (OpacityMaskClipValue).
+	if (sc_transparent_motion_vectors_pass() && alpha < (1.0 / 3.0)) {
+		discard;
+	}
+#endif
 	vec2 position_clip = (screen_position.xy / screen_position.w) - scene_data.taa_jitter;
 	vec2 prev_position_clip = (prev_screen_position.xy / prev_screen_position.w) - scene_data_block.prev_data.taa_jitter;
 
