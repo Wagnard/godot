@@ -328,6 +328,10 @@ public:
 		// render_mode transparent_motion_vectors: in a view with motion vectors, this transparent surface writes its own in
 		// a pass after the transparent pass (PipelineKey::motion_vectors_only) and stays out of the reactive mask.
 		bool transparent_motion_vectors = false;
+		// render_mode draw_after_upscaler, where it applies (an unshaded surface without depth test, set_code()): in a view
+		// with a temporal resolve, drawn after it at the resolve's resolution instead of in the transparent pass
+		// (RenderForwardClustered::_render_after_temporal_resolve()).
+		bool draw_after_upscaler = false;
 		// render_mode pathtracing_rasterized: path traced, the raster transparent pass draws this surface over the traced
 		// image (lit there, so with no path tracing noise); the camera rays leave it out, the other rays keep it.
 		bool pathtracing_rasterized = false;

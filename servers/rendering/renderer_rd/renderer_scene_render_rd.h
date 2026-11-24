@@ -115,6 +115,10 @@ protected:
 	void _render_buffers_ensure_depth_texture(const RenderDataRD *p_render_data);
 	void _render_buffers_copy_depth_texture(const RenderDataRD *p_render_data, bool p_use_msaa = false);
 	void _render_buffers_post_process_and_tonemap(const RenderDataRD *p_render_data, bool p_use_msaa = false);
+	// Called by _render_buffers_post_process_and_tonemap() after the temporal resolve (TAA or a temporal upscaler) and
+	// the depth of field, before the auto exposure, glow and tonemap, with the HDR color they read, at its size
+	// (output resolution under an upscaler). Forward+ draws the surfaces of render_mode draw_after_upscaler there.
+	virtual void _render_after_temporal_resolve(const RenderDataRD *p_render_data, RID p_color_texture, const Size2i &p_color_size) {}
 	void _post_process_subpass(RID p_source_texture, RID p_framebuffer, const RenderDataRD *p_render_data);
 	void _disable_clear_request(const RenderDataRD *p_render_data);
 

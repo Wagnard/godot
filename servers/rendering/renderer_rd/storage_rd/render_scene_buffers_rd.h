@@ -380,6 +380,8 @@ public:
 	}
 
 	static uint32_t get_color_usage_bits(bool p_resolve, bool p_msaa, bool p_storage);
+	// The upscaled color's (ensure_upscaled()): Forward+ compiles the pipelines drawn into it ahead of time.
+	static uint32_t get_upscaled_usage_bits(bool p_storage);
 	static RD::DataFormat get_depth_format(bool p_resolve, bool p_msaa, bool p_storage);
 	static RSE::ViewportMSAA get_nearest_supported_msaa(RSE::ViewportMSAA p_msaa, RD::DataFormat p_format, uint32_t p_usage_bits);
 	static RSE::ViewportMSAA get_nearest_supported_msaa_3d(RSE::ViewportMSAA p_msaa, bool p_storage);

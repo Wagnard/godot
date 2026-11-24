@@ -487,6 +487,11 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 			continue;
 		}
 
+		if (p_params->exclude_after_upscaler && surf->shader->draw_after_upscaler) {
+			// render_mode draw_after_upscaler: drawn after the temporal resolve (_render_after_temporal_resolve()).
+			continue;
+		}
+
 		if (surf->owner->instance_count == 0) {
 			continue;
 		}
@@ -977,6 +982,94 @@ void RenderForwardClustered::_render_transparent_motion_vectors(const RenderList
 		while (from < p_to && !elements[from]->shader->transparent_motion_vectors) {
 			from++;
 		}
+	}
+	RD::get_singleton()->draw_list_end();
+
+	RD::get_singleton()->draw_command_end_label();
+}
+
+bool RenderForwardClustered::_prepare_after_temporal_resolve(const RenderDataRD *p_render_data, bool p_temporal_resolve, uint32_t p_from) {
+	after_temporal_resolve.pending = false;
+	Ref<RenderSceneBuffersRD> rb = p_render_data->render_buffers;
+	if (!p_temporal_resolve || rb.is_null() || !rb->has_custom_data(RB_SCOPE_FORWARD_CLUSTERED) || rb->get_view_count() != 1 || p_render_data->reflection_probe.is_valid()) {
+		return false;
+	}
+	const LocalVector<GeometryInstanceSurfaceDataCache *> &elements = render_list[RENDER_LIST_ALPHA].elements;
+	bool found = false;
+	for (uint32_t i = p_from; i < elements.size(); i++) {
+		if (elements[i]->shader->draw_after_upscaler) {
+			found = true;
+			break;
+		}
+	}
+	if (!found) {
+		return false;
+	}
+
+	// The color the post process reads after the resolve (_render_buffers_post_process_and_tonemap()): the upscaled one
+	// under a temporal upscaler, the internal one under TAA.
+	const RSE::ViewportScaling3DMode scale_mode = rb->get_scaling_3d_mode();
+	const bool upscaled = rb->has_upscaled_texture() && (scale_mode == RSE::VIEWPORT_SCALING_3D_MODE_FSR2 || scale_mode == RSE::VIEWPORT_SCALING_3D_MODE_METALFX_TEMPORAL || scale_mode == RSE::VIEWPORT_SCALING_3D_MODE_DLSS || scale_mode == RSE::VIEWPORT_SCALING_3D_MODE_FSR3);
+	after_temporal_resolve.size = upscaled ? rb->get_target_size() : rb->get_internal_size();
+
+	// The resolved image has no jitter: neither may what is drawn over it, or it would shake by a fraction of an internal
+	// pixel every frame. Its screen and viewport sizes are the resolve's.
+	RenderSceneDataRD *scene_data = p_render_data->scene_data;
+	const Vector2 jitter = scene_data->taa_jitter;
+	scene_data->taa_jitter = Vector2();
+	after_temporal_resolve.uniform_buffer_index = _setup_environment(p_render_data, false, after_temporal_resolve.size, after_temporal_resolve.size, Color(), false, false);
+	scene_data->taa_jitter = jitter;
+
+	after_temporal_resolve.render_buffers = rb.ptr();
+	after_temporal_resolve.from = p_from;
+	after_temporal_resolve.pending = true;
+	return true;
+}
+
+void RenderForwardClustered::_render_after_temporal_resolve(const RenderDataRD *p_render_data, RID p_color_texture, const Size2i &p_color_size) {
+	if (!after_temporal_resolve.pending || after_temporal_resolve.render_buffers != p_render_data->render_buffers.ptr()) {
+		return;
+	}
+	after_temporal_resolve.pending = false;
+
+	RENDER_TIMESTAMP("Render After Temporal Resolve");
+	RD::get_singleton()->draw_command_begin_label("Render After Temporal Resolve");
+
+	RenderListParameters params = after_temporal_resolve.params;
+	params.color_pass_flags = COLOR_PASS_FLAG_TRANSPARENT;
+	params.exclude_after_upscaler = false;
+	params.motion_vectors_only = false;
+	params.no_reactive_alpha = false;
+	params.no_reactive_alpha_all = false;
+	params.rr_transparency_layer = false;
+	params.rt_shadow_texture_uniform_set = RID();
+	params.buffer_dependencies = nullptr;
+	// Unshaded, no screen texture: no radiance or shadows to read. The samplers without the upscaler's mipmap bias: the
+	// textures are sampled at the output resolution.
+	params.render_pass_uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_ALPHA, p_render_data, false, RID(), RendererRD::MaterialStorage::get_singleton()->samplers_rd_get_default(), after_temporal_resolve.uniform_buffer_index);
+
+	// The resolved HDR color alone: no depth exists at its resolution (these surfaces are drawn without depth test).
+	const RID framebuffer = FramebufferCacheRD::get_singleton()->get_cache(p_color_texture);
+	const RD::FramebufferFormatID fb_format = RD::get_singleton()->framebuffer_get_format(framebuffer);
+	params.framebuffer_format = fb_format;
+
+	GeometryInstanceSurfaceDataCache *const *elements = params.elements;
+	const uint32_t count = render_list[RENDER_LIST_ALPHA].elements.size();
+	RD::DrawListID draw_list = RD::get_singleton()->draw_list_begin(framebuffer, RD::DRAW_DEFAULT_ALL, Vector<Color>(), 0.0f, 0u, Rect2(Vector2(), p_color_size));
+	// Runs of such surfaces, in the transparent list's order (back to front), with the transparent pass' instance data.
+	uint32_t from = after_temporal_resolve.from;
+	while (from < count) {
+		while (from < count && !elements[from]->shader->draw_after_upscaler) {
+			from++;
+		}
+		uint32_t to = from;
+		while (to < count && elements[to]->shader->draw_after_upscaler) {
+			to++;
+		}
+		if (to > from) {
+			_render_list(draw_list, fb_format, &params, from, to);
+		}
+		from = to;
 	}
 	RD::get_singleton()->draw_list_end();
 
@@ -3385,6 +3478,15 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		// The transparent pass' pipelines writing no alpha (render_list_params.no_reactive_alpha below), compiled ahead.
 		global_pipeline_data_required.use_no_reactive_alpha = true;
 	}
+	if (rb_data.is_valid() && rb->get_view_count() == 1) {
+		// render_mode draw_after_upscaler: its pipelines into the resolved color, compiled ahead (before the lists are
+		// filled, which compiles what the requirements ask for).
+		if (using_upscaling) {
+			global_pipeline_data_required.use_after_upscaler = true;
+		} else if (rb->get_use_taa()) {
+			global_pipeline_data_required.use_after_taa = true;
+		}
+	}
 
 	if (is_reflection_probe) {
 		uint32_t resolution = light_storage->reflection_probe_instance_get_resolution(p_render_data->reflection_probe);
@@ -3994,6 +4096,10 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 
 	RD::get_singleton()->draw_command_begin_label("Render 3D Transparent Pass");
 
+	// render_mode draw_after_upscaler: such surfaces are drawn after the temporal resolve instead (before the transparent
+	// pass' own scene data, see _prepare_after_temporal_resolve()).
+	const bool after_temporal_resolve_surfaces = _prepare_after_temporal_resolve(p_render_data, rb_data.is_valid() && (using_upscaling || using_taa), 0);
+
 	uint32_t transparent_pass_uniform_buffer_index = _setup_environment(p_render_data, is_reflection_probe, screen_size, screen_size, p_default_bg_color, false);
 
 	rp_uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_ALPHA, p_render_data, is_multiview, radiance_texture, samplers, transparent_pass_uniform_buffer_index, true);
@@ -4008,6 +4114,10 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		// The color's alpha is the reactive mask of every temporal upscaler but DLSS (apply_alpha_multiplier above): the
 		// materials with render_mode reactive_mask_disabled stay out of it.
 		render_list_params.no_reactive_alpha = using_motion_pass && scale_type != SCALE_3D_DLSS;
+		render_list_params.exclude_after_upscaler = after_temporal_resolve_surfaces;
+		if (after_temporal_resolve_surfaces) {
+			after_temporal_resolve.params = render_list_params;
+		}
 		_render_list_with_draw_list(&render_list_params, alpha_framebuffer, RD::DRAW_DEFAULT_ALL, Vector<Color>(), 0.0f, 0u, p_render_data->render_region);
 
 		if (rb_data.is_valid() && (color_pass_flags & COLOR_PASS_FLAG_MOTION_VECTORS)) {
@@ -7134,6 +7244,20 @@ static RD::FramebufferFormatID _get_color_framebuffer_format_for_pipeline(RD::Da
 	return RD::get_singleton()->framebuffer_format_create_multipass(attachments, passes, p_view_count);
 }
 
+// The resolved color alone, as FramebufferCacheRD makes it for _render_after_temporal_resolve(): the upscaled color
+// (RenderSceneBuffersRD::ensure_upscaled()) after a temporal upscaler, the internal one after TAA (a resolve target with
+// MSAA).
+static RD::FramebufferFormatID _get_after_temporal_resolve_framebuffer_format_for_pipeline(RD::DataFormat p_color_format, bool p_can_be_storage, bool p_upscaled, bool p_msaa) {
+	RD::AttachmentFormat attachment;
+	attachment.format = p_color_format;
+	attachment.samples = RD::TEXTURE_SAMPLES_1;
+	attachment.usage_flags = p_upscaled ? RenderSceneBuffersRD::get_upscaled_usage_bits(p_can_be_storage) : RenderSceneBuffersRD::get_color_usage_bits(p_msaa, false, p_can_be_storage);
+	thread_local Vector<RD::AttachmentFormat> attachments;
+	attachments.clear();
+	attachments.push_back(attachment);
+	return RD::get_singleton()->framebuffer_format_create(attachments);
+}
+
 static RD::FramebufferFormatID _get_reflection_probe_color_framebuffer_format_for_pipeline(bool p_storage) {
 	RD::AttachmentFormat attachment;
 	thread_local Vector<RD::AttachmentFormat> attachments;
@@ -7294,7 +7418,9 @@ bool RenderForwardClustered::_rr_transparency_layer_shader(const SceneShaderForw
 	// accumulates; in the layer, which RR only upscales, it kept the render resolution's jagged edges.
 	// render_mode transparent_motion_vectors: the surface writes its own motion vectors, as the cards do, so RR can
 	// accumulate it in the color like an opaque surface (the layer is for what has no motion vectors of its own).
-	if (!p_shader || !p_shader->unshaded || p_shader->rr_transparency_layer_disabled || p_shader->transparent_motion_vectors || p_pt_rasterized || p_shader->uses_screen_texture || p_shader->uses_depth_texture || p_shader->uses_normal_texture) {
+	// render_mode draw_after_upscaler: drawn after RR, over its output (a path traced view always has its temporal resolve
+	// when RR runs).
+	if (!p_shader || !p_shader->unshaded || p_shader->rr_transparency_layer_disabled || p_shader->transparent_motion_vectors || p_shader->draw_after_upscaler || p_pt_rasterized || p_shader->uses_screen_texture || p_shader->uses_depth_texture || p_shader->uses_normal_texture) {
 		return false;
 	}
 	return p_shader->blend_mode == RendererRD::MaterialStorage::ShaderData::BLEND_MODE_MIX || p_shader->blend_mode == RendererRD::MaterialStorage::ShaderData::BLEND_MODE_PREMULTIPLIED_ALPHA ||
@@ -7383,6 +7509,20 @@ void RenderForwardClustered::_mesh_compile_pipelines_for_surface(const SurfacePi
 					motion_key.motion_vectors_only = true;
 					motion_key.framebuffer_format_id = _get_color_framebuffer_format_for_pipeline(buffers_color_format, buffers_can_be_storage, RD::TextureSamples(p_global.texture_samples), false, true, view_count);
 					_mesh_compile_pipeline_for_surface(p_surface.shader, p_surface.mesh_surface, true, p_surface.instanced, p_source, motion_key, r_pipeline_pairs);
+				}
+
+				if (alpha && !multiview && p_surface.shader->draw_after_upscaler && (p_global.use_after_upscaler || p_global.use_after_taa)) {
+					// render_mode draw_after_upscaler: the transparent pass' pipeline into the resolved color alone
+					// (_render_after_temporal_resolve()), raster and path traced views alike.
+					SceneShaderForwardClustered::ShaderData::PipelineKey after_key = pipeline_key;
+					if (p_global.use_after_upscaler) {
+						after_key.framebuffer_format_id = _get_after_temporal_resolve_framebuffer_format_for_pipeline(buffers_color_format, buffers_can_be_storage, true, false);
+						_mesh_compile_pipeline_for_surface(p_surface.shader, p_surface.mesh_surface, true, p_surface.instanced, p_source, after_key, r_pipeline_pairs);
+					}
+					if (p_global.use_after_taa) {
+						after_key.framebuffer_format_id = _get_after_temporal_resolve_framebuffer_format_for_pipeline(buffers_color_format, buffers_can_be_storage, false, p_global.texture_samples > RD::TEXTURE_SAMPLES_1);
+						_mesh_compile_pipeline_for_surface(p_surface.shader, p_surface.mesh_surface, true, p_surface.instanced, p_source, after_key, r_pipeline_pairs);
+					}
 				}
 
 				if (alpha && !multiview && p_global.use_rt_shadows && scene_shader.is_rt_shadows_shader_group_enabled()) {

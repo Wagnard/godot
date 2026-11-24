@@ -173,6 +173,14 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 	if (using_upscaling && scale_type != SCALE_3D_DLSS) {
 		global_pipeline_data_required.use_no_reactive_alpha = true;
 	}
+	if (rb->get_view_count() == 1) {
+		// render_mode draw_after_upscaler: as raster's.
+		if (using_upscaling) {
+			global_pipeline_data_required.use_after_upscaler = true;
+		} else if (using_taa) {
+			global_pipeline_data_required.use_after_taa = true;
+		}
+	}
 
 	// Free GPU resources for the screen-space effects the path tracer replaces.
 	rb->clear_context(RB_SCOPE_SSIL);
@@ -690,6 +698,11 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 	// _setup_environment() (the scene data's flag) and by the transparent pass' sets, until the last of them is made.
 	front_layer_reflection = (raytracing && raytracing->get_front_layer_instance_count() > 0) ? raytracing->rt_get_front_layer_texture(rb.ptr()) : RID();
 
+	// render_mode draw_after_upscaler: as raster, such surfaces are drawn after the temporal resolve (after DLSS-RR, or NRD
+	// and the upscaler). Never traced (unshaded, no depth test: rt_never_traced()), they are among the transparent list's
+	// lit surfaces, never the cards (pathtracing_rasterized) nor RR's layer (_rr_transparency_layer_shader()).
+	const bool after_temporal_resolve_surfaces = _prepare_after_temporal_resolve(p_render_data, rb_data.is_valid() && (using_upscaling || using_taa), rasterized_count);
+
 	const uint32_t transparent_pass_uniform_buffer_index = _setup_environment(p_render_data, false, screen_size, screen_size, p_default_bg_color, false);
 
 	RID rt_shadow_texture_set;
@@ -848,6 +861,11 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 			// that matters more: a transparent surface's traced reflection is one path per pixel, which only the
 			// upscaler's history averages (PT-UPSCALER-REACTIVE-ALPHA-FIXES.md).
 			render_list_params.no_reactive_alpha = using_upscaling && scale_type != SCALE_3D_DLSS;
+			render_list_params.exclude_after_upscaler = after_temporal_resolve_surfaces;
+			if (after_temporal_resolve_surfaces) {
+				// The whole transparent list, as its instance data was filled; drawn from the first lit surface on.
+				after_temporal_resolve.params = RenderListParameters(render_list[RENDER_LIST_ALPHA].elements.ptr(), render_list[RENDER_LIST_ALPHA].element_info.ptr(), alpha_count, reverse_cull, PASS_MODE_COLOR, COLOR_PASS_FLAG_TRANSPARENT, rb_data.is_null(), p_render_data->directional_light_soft_shadows, RID(), get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, 0, base_specialization, true);
+			}
 			if (rasterized_count > 0) {
 				// DLSS-RR's guides where the cards are: the path tracer wrote those of what is behind them, and RR took a card
 				// for that background's lighting. Their material pass (as SDFGI's: albedo, view normal, roughness, metallic,
@@ -914,6 +932,7 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 				RenderListParameters unpeeled_params(render_list[RENDER_LIST_ALPHA].elements.ptr() + from, render_list[RENDER_LIST_ALPHA].element_info.ptr() + from, to - from, reverse_cull, PASS_MODE_COLOR, transparent_color_pass_flags, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, from, base_specialization, true);
 				unpeeled_params.rt_shadow_texture_uniform_set = rt_shadow_texture_set;
 				unpeeled_params.no_reactive_alpha = render_list_params.no_reactive_alpha;
+				unpeeled_params.exclude_after_upscaler = after_temporal_resolve_surfaces;
 				unpeeled_params.buffer_dependencies = render_list_params.buffer_dependencies;
 				_render_list_with_draw_list(&unpeeled_params, alpha_framebuffer, RD::DRAW_DEFAULT_ALL, Vector<Color>(), 0.0f, 0u, p_render_data->render_region);
 				from = to;
@@ -939,6 +958,7 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 				layer_params.buffer_dependencies = render_list_params.buffer_dependencies;
 				// Pipelines of their own, where additive blending writes no alpha (PipelineKey::rr_transparency_layer).
 				layer_params.rr_transparency_layer = true;
+				layer_params.exclude_after_upscaler = after_temporal_resolve_surfaces;
 				const Vector<Color> transparent_black = { Color(0, 0, 0, 0) };
 				_render_list_with_draw_list(&layer_params, layer_framebuffer, RD::DRAW_CLEAR_COLOR_0, transparent_black, 0.0f, 0u, p_render_data->render_region);
 
@@ -971,6 +991,7 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 				RenderListParameters motion_params(render_list[RENDER_LIST_ALPHA].elements.ptr(), render_list[RENDER_LIST_ALPHA].element_info.ptr(), alpha_count, reverse_cull, PASS_MODE_COLOR, motion_color_pass_flags, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, 0, base_specialization);
 				motion_params.rt_shadow_texture_uniform_set = rt_shadow_texture_set;
 				motion_params.buffer_dependencies = rt_shadow_buffer_dependencies;
+				motion_params.exclude_after_upscaler = after_temporal_resolve_surfaces;
 				_render_transparent_motion_vectors(motion_params, rasterized_count, alpha_count, rb_data, p_render_data->render_region);
 			}
 		}

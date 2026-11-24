@@ -305,6 +305,9 @@ protected:
 		// The transparent motion vector pass (_render_transparent_motion_vectors()): every surface writes only its motion
 		// vectors (PipelineKey::motion_vectors_only).
 		bool motion_vectors_only = false;
+		// A view with a temporal resolve: the surfaces of render_mode draw_after_upscaler are left out of this pass, drawn
+		// after the resolve instead (_render_after_temporal_resolve()).
+		bool exclude_after_upscaler = false;
 		Vector2 uv_offset;
 		float lod_distance_multiplier = 0.0;
 		float screen_mesh_lod_threshold = 0.0;
@@ -795,6 +798,24 @@ protected:
 	// flags (color, velocity and depth). Draws nothing, and begins no draw list, when no such element is there.
 	void _render_transparent_motion_vectors(const RenderListParameters &p_params, uint32_t p_from, uint32_t p_to, const Ref<RenderBufferDataForwardClustered> &p_rb_data, const Rect2 &p_region);
 
+	// render_mode draw_after_upscaler (SceneShaderForwardClustered::ShaderData::draw_after_upscaler). A single view with a
+	// temporal resolve whose transparent list has such surfaces leaves them out of its transparent passes
+	// (RenderListParameters::exclude_after_upscaler) and draws them in _render_after_temporal_resolve(), called by its
+	// post process: unjittered, at the resolved color's resolution, in the transparent list's order.
+	struct AfterTemporalResolve {
+		bool pending = false;
+		const RenderSceneBuffersRD *render_buffers = nullptr; // The view it was prepared for.
+		uint32_t uniform_buffer_index = 0; // Its scene data: no jitter, the resolve's resolution.
+		Size2i size;
+		uint32_t from = 0; // Elements of the transparent list before this one are not looked at (the path tracer's cards).
+		RenderListParameters params; // The transparent pass' (its flags without motion vectors or ray traced shadows).
+	} after_temporal_resolve;
+	// Whether this view draws the draw_after_upscaler surfaces of its transparent list [p_from, end) after its temporal
+	// resolve; if so, sets up its scene data. Called before the transparent pass' own _setup_environment(), so that the
+	// scene data's uniform buffer stays the transparent pass' for the compositor effects that read it.
+	bool _prepare_after_temporal_resolve(const RenderDataRD *p_render_data, bool p_temporal_resolve, uint32_t p_from);
+	virtual void _render_after_temporal_resolve(const RenderDataRD *p_render_data, RID p_color_texture, const Size2i &p_color_size) override;
+
 	void _fill_instance_data(RenderListType p_render_list, int *p_render_info = nullptr, uint32_t p_offset = 0, int32_t p_max_elements = -1, bool p_update_buffer = true);
 	void _fill_render_list(RenderListType p_render_list, const RenderDataRD *p_render_data, PassMode p_pass_mode, bool p_using_sdfgi = false, bool p_using_opaque_gi = false, bool p_using_motion_pass = false, bool p_append = false, bool p_alpha_only = false);
 
@@ -1244,6 +1265,10 @@ protected:
 				uint32_t use_pt_rr_guides : 1;
 				// DLSS-RR's transparency layer (SurfacePipelineData::pt_rr_transparency_layer).
 				uint32_t use_pt_rr_transparency_layer : 1;
+				// The surfaces of render_mode draw_after_upscaler drawn after a temporal upscaler (into the upscaled color)
+				// or after TAA (into the internal color): _render_after_temporal_resolve().
+				uint32_t use_after_upscaler : 1;
+				uint32_t use_after_taa : 1;
 			};
 		};
 	};

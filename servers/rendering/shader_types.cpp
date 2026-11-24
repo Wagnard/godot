@@ -342,6 +342,12 @@ ShaderTypes::ShaderTypes() {
 		// HDRP's "Transparent Writes Motion Vectors" and Unreal's translucent "Output Velocity" (which also skips the
 		// pixels below an opacity threshold).
 		shader_modes[RSE::SHADER_SPATIAL].modes.push_back({ PNAME("transparent_motion_vectors") });
+		// An unshaded surface drawn without depth test (a selection ring, a health bar, an icon over a unit) drawn after
+		// the temporal resolve (TAA, FSR2, FSR 3.1, DLSS, and path traced after the denoiser), at the output resolution,
+		// before glow and tonemap (Forward+ only): it never enters the upscaler's history, so it cannot flicker, trail or
+		// linger once removed. As Unreal's "After Motion Blur" translucency and Unity HDRP's "After Post-process" pass:
+		// no temporal antialiasing touches it (the material antialiases its own edges), and no depth test is possible.
+		shader_modes[RSE::SHADER_SPATIAL].modes.push_back({ PNAME("draw_after_upscaler") });
 		// Path tracing: drawn by the raster pass over the traced image instead of by the camera rays, which leave it out
 		// (shadows, reflections and bounces still trace it). For flat cards such as sprites: a thin surface lit by a
 		// one-sample path was noise the denoiser blurred away.

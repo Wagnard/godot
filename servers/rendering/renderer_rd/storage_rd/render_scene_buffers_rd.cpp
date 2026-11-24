@@ -833,6 +833,10 @@ RID RenderSceneBuffersRD::get_velocity_depth_buffer() {
 	return velocity_depth;
 }
 
+uint32_t RenderSceneBuffersRD::get_upscaled_usage_bits(bool p_storage) {
+	return upscaled_usage_bits(p_storage);
+}
+
 uint32_t RenderSceneBuffersRD::get_color_usage_bits(bool p_resolve, bool p_msaa, bool p_storage) {
 	DEV_ASSERT((!p_resolve && !p_msaa) || (p_resolve != p_msaa));
 

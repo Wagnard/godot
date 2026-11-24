@@ -604,6 +604,10 @@ void RendererSceneRenderRD::_render_buffers_post_process_and_tonemap(const Rende
 		RD::get_singleton()->draw_command_end_label();
 	}
 
+	if (rb->get_view_count() == 1) {
+		_render_after_temporal_resolve(p_render_data, color_texture, color_size);
+	}
+
 	float auto_exposure_scale = 1.0;
 
 	if (can_use_effects && RSG::camera_attributes->camera_attributes_uses_auto_exposure(p_render_data->camera_attributes)) {

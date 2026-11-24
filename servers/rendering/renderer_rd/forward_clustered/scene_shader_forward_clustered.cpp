@@ -83,6 +83,8 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	reactive_mask_disabled = false;
 	rr_transparency_layer_disabled = false;
 	transparent_motion_vectors = false;
+	draw_after_upscaler = false;
+	bool draw_after_upscaler_requested = false;
 	pathtracing_rasterized = false;
 	fog_disabled = false;
 	uses_vertex = false;
@@ -150,6 +152,7 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	actions.render_mode_flags["reactive_mask_disabled"] = &reactive_mask_disabled;
 	actions.render_mode_flags["rr_transparency_layer_disabled"] = &rr_transparency_layer_disabled;
 	actions.render_mode_flags["transparent_motion_vectors"] = &transparent_motion_vectors;
+	actions.render_mode_flags["draw_after_upscaler"] = &draw_after_upscaler_requested;
 	actions.render_mode_flags["pathtracing_rasterized"] = &pathtracing_rasterized;
 	actions.render_mode_flags["fog_disabled"] = &fog_disabled;
 	actions.render_mode_flags["wireframe"] = &wireframe;
@@ -308,6 +311,15 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	}
 
 	uses_blend_alpha = blend_mode_uses_blend_alpha(BlendMode(blend_mode));
+
+	// render_mode draw_after_upscaler. After the temporal resolve there is no depth buffer at its resolution (the scene's
+	// is the internal one), nor lights, GI or screen copies at that resolution: only an unshaded surface drawn without
+	// depth test can be drawn there (as Unity HDRP's "After Post-process" pass, whose depth test is not reliable for
+	// that reason, and Unreal's "After Motion Blur" translucency).
+	draw_after_upscaler = draw_after_upscaler_requested && unshaded && depth_test == DEPTH_TEST_DISABLED && !stencil_enabled && !uses_screen_texture && !uses_depth_texture && !uses_normal_texture && blend_mode != BLEND_MODE_OIT && !pathtracing_rasterized;
+	if (draw_after_upscaler_requested && !draw_after_upscaler) {
+		WARN_PRINT(vformat("Shader %s: render_mode draw_after_upscaler applies only to an unshaded material with depth_test_disabled, without stencil, blend_oit, pathtracing_rasterized or screen, depth or normal-roughness textures. It is drawn as without it.", path.is_empty() ? String("<inline>") : path));
+	}
 }
 
 void SceneShaderForwardClustered::ShaderData::set_code_rt(const String &p_code_rt) {
