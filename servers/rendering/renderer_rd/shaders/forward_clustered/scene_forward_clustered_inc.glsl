@@ -168,7 +168,9 @@ uint sc_volumetric_fog_sampling() {
 // The draw's instance is fading through its visibility range and stays in the opaque passes: the fade is a dithered
 // discard, not an alpha.
 bool sc_use_dither_fade() {
-	return ((sc_packed_1() >> 13) & 1U) != 0;
+	// Bit 15 of ShaderSpecialization::packed_1 (scene_shader_forward_clustered.h): bits 13-14 are the volumetric fog
+	// sampling mode.
+	return ((sc_packed_1() >> 15) & 1U) != 0;
 }
 #endif
 
@@ -176,7 +178,8 @@ bool sc_use_dither_fade() {
 // The draw's alpha scissor or alpha hash material is drawn by the opaque passes of this view, without its alpha
 // antialiasing.
 bool sc_disable_alpha_antialiasing() {
-	return ((sc_packed_1() >> 14) & 1U) != 0;
+	// Bit 16 of ShaderSpecialization::packed_1 (scene_shader_forward_clustered.h).
+	return ((sc_packed_1() >> 16) & 1U) != 0;
 }
 #endif
 
