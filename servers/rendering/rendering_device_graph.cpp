@@ -3760,13 +3760,17 @@ void RenderingDeviceGraph::end(bool p_reorder_commands, bool p_full_barriers, RD
 					const bool has_pinned_slices = parallel_claimable_slices.size() < parallel_slices.size();
 					const uint32_t worker_count = MIN(parallel_claimable_slices.size(), has_pinned_slices ? parallel_slice_count : parallel_slice_count - 1);
 					// At shutdown (finalize_display() replays the last frames after exit_languages_threads()) a posted
-					// group would wait for WorkerThreadPool::finish() and this thread with it: it records every slice.
-					const bool use_workers = worker_count > 0 && WorkerThreadPool::get_singleton()->is_accepting_tasks();
+					// group would wait for WorkerThreadPool::finish() and this thread with it: the try_ post refuses
+					// then (decided under the pool's lock, so the switch cannot come between a test and the post), and
+					// this thread claims and records every slice.
 					if (parallel_stats) {
 						parallel_launch_usec = OS::get_singleton()->get_ticks_usec();
 					}
-					if (use_workers) {
-						parallel_groups.push_back(WorkerThreadPool::get_singleton()->add_template_group_task(this, &RenderingDeviceGraph::_run_parallel_slice_task, parallel_generation, worker_count, worker_count, true, "RenderingDeviceGraph parallel recording"));
+					if (worker_count > 0) {
+						const WorkerThreadPool::GroupID group = WorkerThreadPool::get_singleton()->try_add_template_group_task(this, &RenderingDeviceGraph::_run_parallel_slice_task, parallel_generation, worker_count, worker_count, true, "RenderingDeviceGraph parallel recording");
+						if (group != WorkerThreadPool::INVALID_TASK_ID) {
+							parallel_groups.push_back(group);
+						}
 					}
 
 					const uint64_t calling_begin_usec = parallel_stats ? OS::get_singleton()->get_ticks_usec() : 0;

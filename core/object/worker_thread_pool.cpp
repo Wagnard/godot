@@ -384,8 +384,19 @@ WorkerThreadPool::TaskID WorkerThreadPool::add_native_task(void (*p_func)(void *
 	return _add_task(Callable(), p_func, p_userdata, nullptr, p_high_priority, p_description);
 }
 
-WorkerThreadPool::TaskID WorkerThreadPool::_add_task(const Callable &p_callable, void (*p_func)(void *), void *p_userdata, BaseTemplateUserdata *p_template_userdata, bool p_high_priority, const String &p_description, bool p_pump_task) {
+WorkerThreadPool::TaskID WorkerThreadPool::try_add_native_task(void (*p_func)(void *), void *p_userdata, bool p_high_priority, const String &p_description) {
+	return _add_task(Callable(), p_func, p_userdata, nullptr, p_high_priority, p_description, false, true);
+}
+
+WorkerThreadPool::TaskID WorkerThreadPool::_add_task(const Callable &p_callable, void (*p_func)(void *), void *p_userdata, BaseTemplateUserdata *p_template_userdata, bool p_high_priority, const String &p_description, bool p_pump_task, bool p_only_if_accepting) {
 	MutexLock<BinaryMutex> lock(task_mutex);
+
+	if (p_only_if_accepting && !_is_accepting_tasks_locked()) {
+		if (p_template_userdata) {
+			memdelete(p_template_userdata);
+		}
+		return INVALID_TASK_ID;
+	}
 
 	// Get a free task
 	Task *task = task_allocator.alloc();
@@ -430,9 +441,13 @@ WorkerThreadPool::TaskID WorkerThreadPool::add_task_bind(const Callable &p_actio
 	return _add_task(p_action, nullptr, nullptr, nullptr, p_high_priority, p_description, false);
 }
 
+bool WorkerThreadPool::_is_accepting_tasks_locked() const {
+	return threads.is_empty() || runlevel == RUNLEVEL_NORMAL;
+}
+
 bool WorkerThreadPool::is_accepting_tasks() const {
 	MutexLock task_lock(task_mutex);
-	return threads.is_empty() || runlevel == RUNLEVEL_NORMAL;
+	return _is_accepting_tasks_locked();
 }
 
 bool WorkerThreadPool::is_task_completed(TaskID p_task_id) const {
@@ -721,13 +736,20 @@ void WorkerThreadPool::notify_yield_over(TaskID p_task_id) {
 	td.cond_var.notify_one();
 }
 
-WorkerThreadPool::GroupID WorkerThreadPool::_add_group_task(const Callable &p_callable, void (*p_func)(void *, uint32_t), void *p_userdata, BaseTemplateUserdata *p_template_userdata, int p_elements, int p_tasks, bool p_high_priority, const String &p_description) {
+WorkerThreadPool::GroupID WorkerThreadPool::_add_group_task(const Callable &p_callable, void (*p_func)(void *, uint32_t), void *p_userdata, BaseTemplateUserdata *p_template_userdata, int p_elements, int p_tasks, bool p_high_priority, const String &p_description, bool p_only_if_accepting) {
 	ERR_FAIL_COND_V(p_elements < 0, INVALID_TASK_ID);
 	if (p_tasks < 0) {
 		p_tasks = MAX(1u, threads.size());
 	}
 
 	MutexLock<BinaryMutex> lock(task_mutex);
+
+	if (p_only_if_accepting && !_is_accepting_tasks_locked()) {
+		if (p_template_userdata) {
+			memdelete(p_template_userdata);
+		}
+		return INVALID_TASK_ID;
+	}
 
 	Group *group = group_allocator.alloc();
 	GroupID id = last_task++;

@@ -197,8 +197,11 @@ private:
 	static thread_local UnlockableLocks unlockable_locks[MAX_UNLOCKABLE_LOCKS];
 #endif
 
-	TaskID _add_task(const Callable &p_callable, void (*p_func)(void *), void *p_userdata, BaseTemplateUserdata *p_template_userdata, bool p_high_priority, const String &p_description, bool p_pump_task = false);
-	GroupID _add_group_task(const Callable &p_callable, void (*p_func)(void *, uint32_t), void *p_userdata, BaseTemplateUserdata *p_template_userdata, int p_elements, int p_tasks, bool p_high_priority, const String &p_description);
+	// p_only_if_accepting: refuse (INVALID_TASK_ID) instead of waiting when the pool no longer accepts tasks, decided under
+	// task_mutex together with the post (see is_accepting_tasks()).
+	TaskID _add_task(const Callable &p_callable, void (*p_func)(void *), void *p_userdata, BaseTemplateUserdata *p_template_userdata, bool p_high_priority, const String &p_description, bool p_pump_task = false, bool p_only_if_accepting = false);
+	GroupID _add_group_task(const Callable &p_callable, void (*p_func)(void *, uint32_t), void *p_userdata, BaseTemplateUserdata *p_template_userdata, int p_elements, int p_tasks, bool p_high_priority, const String &p_description, bool p_only_if_accepting = false);
+	bool _is_accepting_tasks_locked() const;
 
 	template <typename C, typename M, typename U>
 	struct TaskUserData : public BaseTemplateUserdata {
@@ -246,6 +249,9 @@ public:
 		return _add_task(Callable(), nullptr, nullptr, ud, p_high_priority, p_description);
 	}
 	TaskID add_native_task(void (*p_func)(void *), void *p_userdata, bool p_high_priority = false, const String &p_description = String());
+	// Like add_native_task(), but returns INVALID_TASK_ID without posting when the pool no longer accepts tasks
+	// (is_accepting_tasks()), atomically: for code that may run while the engine quits and must never block there.
+	TaskID try_add_native_task(void (*p_func)(void *), void *p_userdata, bool p_high_priority = false, const String &p_description = String());
 	TaskID add_task(const Callable &p_action, bool p_high_priority = false, const String &p_description = String(), bool p_pump_task = false);
 	TaskID add_task_bind(const Callable &p_action, bool p_high_priority = false, const String &p_description = String());
 
@@ -264,6 +270,17 @@ public:
 		ud->userdata = p_userdata;
 		return _add_group_task(Callable(), nullptr, nullptr, ud, p_elements, p_tasks, p_high_priority, p_description);
 	}
+	// Like add_template_group_task(), but returns INVALID_TASK_ID without posting when the pool no longer accepts tasks
+	// (see try_add_native_task()).
+	template <typename C, typename M, typename U>
+	GroupID try_add_template_group_task(C *p_instance, M p_method, U p_userdata, int p_elements, int p_tasks = -1, bool p_high_priority = false, const String &p_description = String()) {
+		typedef GroupUserData<C, M, U> GroupUD;
+		GroupUD *ud = memnew(GroupUD);
+		ud->instance = p_instance;
+		ud->method = p_method;
+		ud->userdata = p_userdata;
+		return _add_group_task(Callable(), nullptr, nullptr, ud, p_elements, p_tasks, p_high_priority, p_description, true);
+	}
 	GroupID add_native_group_task(void (*p_func)(void *, uint32_t), void *p_userdata, int p_elements, int p_tasks = -1, bool p_high_priority = false, const String &p_description = String());
 	GroupID add_group_task(const Callable &p_action, int p_elements, int p_tasks = -1, bool p_high_priority = false, const String &p_description = String());
 	uint32_t get_group_processed_element_count(GroupID p_group) const;
@@ -271,6 +288,8 @@ public:
 	void wait_for_group_task_completion(GroupID p_group);
 	// False from exit_languages_threads() on: a task posted then waits for finish(), which a caller waiting for it on
 	// the main thread never reaches. Code that can run during shutdown does its work on the calling thread instead.
+	// A test followed by a post can race with the switch: such code posts with try_add_native_task() /
+	// try_add_template_group_task(), which decide under the same lock as the post.
 	bool is_accepting_tasks() const;
 
 	_FORCE_INLINE_ int get_thread_count() const {

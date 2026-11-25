@@ -10601,6 +10601,7 @@ void RenderingDevice::update_pipeline_cache(bool p_closing) {
 		// and pipelines are still created then by the compilation pool (RenderingCompilationPool), under _thread_safe_.
 		// Posting the save from here blocked every other compilation on _thread_safe_, the render thread on them and the
 		// main thread on the render thread (RDG-QUIT-DEADLOCK-FIXES.md's rule). finalize() saves the cache (p_closing).
+		// This test only skips the size query early; the post below is what cannot block (try_add_native_task()).
 		return;
 	}
 
@@ -10621,6 +10622,7 @@ void RenderingDevice::update_pipeline_cache(bool p_closing) {
 		return;
 	}
 
+	const size_t previous_pipelines_cache_size = pipeline_cache_size;
 	{
 		size_t new_pipelines_cache_size = driver->pipeline_cache_query_size();
 		ERR_FAIL_COND(!new_pipelines_cache_size);
@@ -10651,7 +10653,12 @@ void RenderingDevice::update_pipeline_cache(bool p_closing) {
 	if (p_closing) {
 		_save_pipeline_cache(this);
 	} else {
-		pipeline_cache_save_task = WorkerThreadPool::get_singleton()->add_native_task(&_save_pipeline_cache, this, false, "PipelineCacheSave");
+		// The pool may have stopped accepting tasks since the test above: refused, the save is left to finalize(), which
+		// must then still see the size difference.
+		pipeline_cache_save_task = WorkerThreadPool::get_singleton()->try_add_native_task(&_save_pipeline_cache, this, false, "PipelineCacheSave");
+		if (pipeline_cache_save_task == WorkerThreadPool::INVALID_TASK_ID) {
+			pipeline_cache_size = previous_pipelines_cache_size;
+		}
 	}
 }
 
