@@ -1157,7 +1157,10 @@ void SceneShaderRaytracing::_start_program_build(LocalVector<DisplaceProgram> &r
 	build->omm_bake = p_omm_bake;
 	build->slot = p_slot_index;
 	// Every compilation task and group of this class belongs to RenderingCompilationPool, and is waited for there.
-	build->task = RenderingCompilationPool::get()->add_native_task(&SceneShaderRaytracing::_program_build_worker, build, false, "RT program precompile");
+	// High priority, as the hit group builds (_dispatch_next_locked()): a frame needs the program as soon as its surface is
+	// traced. As a low priority task it queued behind the pipelines compiled in the background, on the few threads the
+	// pool gives low priority work (godot3d's cold load: 9.9 s queued for a program compiled in 0.1 s).
+	build->task = RenderingCompilationPool::get()->add_native_task(&SceneShaderRaytracing::_program_build_worker, build, true, "RT program precompile");
 	program.build = build;
 	program_builds.push_back(build);
 }
