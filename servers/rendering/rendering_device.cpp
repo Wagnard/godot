@@ -10596,6 +10596,14 @@ void RenderingDevice::update_pipeline_cache(bool p_closing) {
 
 	_THREAD_SAFE_METHOD_
 
+	if (!p_closing && !WorkerThreadPool::get_singleton()->is_accepting_tasks()) {
+		// Quitting: after Main::cleanup()'s exit_languages_threads() a task posted to the main pool waits for its finish(),
+		// and pipelines are still created then by the compilation pool (RenderingCompilationPool), under _thread_safe_.
+		// Posting the save from here blocked every other compilation on _thread_safe_, the render thread on them and the
+		// main thread on the render thread (RDG-QUIT-DEADLOCK-FIXES.md's rule). finalize() saves the cache (p_closing).
+		return;
+	}
+
 	{
 		bool still_saving = pipeline_cache_save_task != WorkerThreadPool::INVALID_TASK_ID && !WorkerThreadPool::get_singleton()->is_task_completed(pipeline_cache_save_task);
 		if (still_saving) {
