@@ -625,6 +625,7 @@ public:
 
 	void set_use_taa(bool p_use_taa);
 	bool is_using_taa() const;
+	void reset_temporal_history();
 
 	void set_use_pathtracing(bool p_use_pathtracing);
 	bool is_using_pathtracing() const;

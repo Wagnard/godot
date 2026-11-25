@@ -400,7 +400,17 @@ void RendererViewport::_draw_3d(Viewport *p_viewport) {
 
 	float screen_mesh_lod_threshold = p_viewport->mesh_lod_threshold / float(p_viewport->size.width);
 	RSG::rasterizer->set_frame_generation_source(shown_on_window && p_viewport->viewport_to_screen == DisplayServerEnums::MAIN_WINDOW_ID ? p_viewport->render_target : RID());
+	// viewport_reset_temporal_history(): this frame's render drops every temporal history (TAA, the upscalers, the
+	// denoisers, frame generation's) and its previous camera is the current one.
+	const bool temporal_history_reset = p_viewport->temporal_history_reset_pending && p_viewport->render_buffers.is_valid();
+	if (temporal_history_reset) {
+		p_viewport->render_buffers->set_temporal_history_reset(true);
+		p_viewport->temporal_history_reset_pending = false;
+	}
 	RSG::scene->render_camera(p_viewport->render_buffers, p_viewport->camera, p_viewport->scenario, p_viewport->self, p_viewport->internal_size, p_viewport->jitter_phase_count, screen_mesh_lod_threshold, p_viewport->shadow_atlas, p_viewport->window_output_max_value, &p_viewport->render_info);
+	if (temporal_history_reset) {
+		p_viewport->render_buffers->set_temporal_history_reset(false);
+	}
 	RSG::rasterizer->set_frame_generation_source(RID());
 
 	// The render target holds the finished 3D image without the canvas: the HUD-less color.
@@ -1593,6 +1603,13 @@ bool RendererViewport::viewport_get_use_pathtracing(RID p_viewport) const {
 	const Viewport *viewport = viewport_owner.get_or_null(p_viewport);
 	ERR_FAIL_NULL_V(viewport, true);
 	return viewport->use_pathtracing;
+}
+
+void RendererViewport::viewport_reset_temporal_history(RID p_viewport) {
+	Viewport *viewport = viewport_owner.get_or_null(p_viewport);
+	ERR_FAIL_NULL(viewport);
+	// One shot: consumed by the next frame that draws this viewport's 3D (_draw_3d()).
+	viewport->temporal_history_reset_pending = true;
 }
 
 void RendererViewport::viewport_set_use_taa(RID p_viewport, bool p_use_taa) {

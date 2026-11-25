@@ -632,7 +632,8 @@ bool NRDDenoiser::denoise(RenderSceneBuffersRD *p_render_buffers, const Paramete
 	common.resourceSize[0] = common.resourceSizePrev[0] = common.rectSize[0] = common.rectSizePrev[0] = uint16_t(p_params.size.width);
 	common.resourceSize[1] = common.resourceSizePrev[1] = common.rectSize[1] = common.rectSizePrev[1] = uint16_t(p_params.size.height);
 	common.frameIndex = context->frame_index;
-	common.accumulationMode = context->frame_index == 0 ? nrd::AccumulationMode::CLEAR_AND_RESTART : nrd::AccumulationMode::CONTINUE;
+	// A camera cut restarts the accumulation (NRDSettings.h's RESTART); the first frame also clears the history resources.
+	common.accumulationMode = context->frame_index == 0 ? nrd::AccumulationMode::CLEAR_AND_RESTART : (p_params.reset ? nrd::AccumulationMode::RESTART : nrd::AccumulationMode::CONTINUE);
 	ERR_FAIL_COND_V(nrd::SetCommonSettings(*context->instance, common) != nrd::Result::SUCCESS, false);
 
 	// Accumulation lengths in seconds, not frames. NRDSettings.h: "it is recommended to make the accumulated frame count

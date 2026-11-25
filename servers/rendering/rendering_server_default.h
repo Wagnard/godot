@@ -838,6 +838,7 @@ public:
 	FUNC2(viewport_set_msaa_3d, RID, RSE::ViewportMSAA)
 	FUNC2(viewport_set_screen_space_aa, RID, RSE::ViewportScreenSpaceAA)
 	FUNC2(viewport_set_use_taa, RID, bool)
+	FUNC1(viewport_reset_temporal_history, RID)
 	FUNC2(viewport_set_use_pathtracing, RID, bool)
 	FUNC2(viewport_set_use_debanding, RID, bool)
 	FUNC2(viewport_set_force_motion_vectors, RID, bool)

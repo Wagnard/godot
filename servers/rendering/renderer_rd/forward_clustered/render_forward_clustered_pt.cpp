@@ -646,6 +646,7 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 				// In pixels, as the temporal upscalers take it (_render_3d_upscaling()).
 				params.jitter = p_render_data->scene_data->taa_jitter * Vector2(params.size) * 0.5f;
 				params.prev_jitter = p_render_data->scene_data->prev_taa_jitter * Vector2(params.size) * 0.5f;
+				params.reset = rb->get_temporal_history_reset();
 				// The sun the raygen lit apart (RenderRaytracing::update_uniform_set()), whose shadow SIGMA denoises.
 				if (raytracing->nrd_get_sigma_sun(p_render_data, params.sun_direction, params.sun_tan_angular_radius)) {
 					params.sun = raytracing->nrd_get_texture(rb.ptr(), RB_TEX_NRD_SUN);

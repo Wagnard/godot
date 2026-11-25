@@ -375,6 +375,9 @@ public:
 	};
 
 	struct VolumetricFogSettings {
+		// A camera cut (RenderingServer.viewport_reset_temporal_history()): no temporal reprojection this frame, whose
+		// previous camera is the current one; the history starts again from it.
+		bool reset_history = false;
 		Vector2i rb_size;
 		double time;
 		bool is_using_radiance_octmap_array;

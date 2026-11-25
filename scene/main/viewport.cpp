@@ -3907,6 +3907,11 @@ bool Viewport::is_using_taa() const {
 	return use_taa;
 }
 
+void Viewport::reset_temporal_history() {
+	ERR_MAIN_THREAD_GUARD;
+	RS::get_singleton()->viewport_reset_temporal_history(viewport);
+}
+
 void Viewport::set_use_pathtracing(bool p_use_pathtracing) {
 	ERR_MAIN_THREAD_GUARD;
 	if (use_pathtracing == p_use_pathtracing) {
@@ -5286,6 +5291,7 @@ void Viewport::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("set_use_taa", "enable"), &Viewport::set_use_taa);
 	ClassDB::bind_method(D_METHOD("is_using_taa"), &Viewport::is_using_taa);
+	ClassDB::bind_method(D_METHOD("reset_temporal_history"), &Viewport::reset_temporal_history);
 
 	ClassDB::bind_method(D_METHOD("set_use_pathtracing", "enable"), &Viewport::set_use_pathtracing);
 	ClassDB::bind_method(D_METHOD("is_using_pathtracing"), &Viewport::is_using_pathtracing);

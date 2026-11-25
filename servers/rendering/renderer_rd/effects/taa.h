@@ -40,7 +40,9 @@ public:
 	TAA();
 	~TAA();
 
-	void process(Ref<RenderSceneBuffersRD> p_render_buffers, RD::DataFormat p_format, float p_z_near, float p_z_far);
+	// p_reset: a camera cut (RenderingServer.viewport_reset_temporal_history()); the history starts again from this frame,
+	// as when it is first allocated.
+	void process(Ref<RenderSceneBuffersRD> p_render_buffers, RD::DataFormat p_format, float p_z_near, float p_z_far, bool p_reset = false);
 
 private:
 	struct TAAResolvePushConstant {

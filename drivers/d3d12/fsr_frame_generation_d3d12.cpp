@@ -524,7 +524,7 @@ void FSRFrameGenerationD3D12::prepare(const PrepareParams &p_params) {
 	// Godot's velocity buffer is in UV space, like the FSR2 path (effects/fsr2.cpp).
 	prep.motionVectorScale = { (float)p_params.render_width, (float)p_params.render_height };
 	prep.frameTimeDelta = p_params.frame_time_delta_ms;
-	prep.reset = false;
+	prep.reset = p_params.reset;
 	prep.cameraNear = p_params.camera_near;
 	prep.cameraFar = p_params.camera_far;
 	prep.cameraFovAngleVertical = p_params.fov_vertical_radians;

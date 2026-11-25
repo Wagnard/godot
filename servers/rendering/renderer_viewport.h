@@ -82,6 +82,8 @@ public:
 
 		RendererSceneRender::CameraData prev_camera_data;
 		uint64_t prev_camera_data_frame = 0;
+		// viewport_reset_temporal_history(): the next 3D frame drawn has no connection to the previous one.
+		bool temporal_history_reset_pending = false;
 
 		bool use_occlusion_culling = false;
 		bool occlusion_buffer_dirty = false;
@@ -287,6 +289,7 @@ public:
 	void viewport_set_msaa_3d(RID p_viewport, RSE::ViewportMSAA p_msaa);
 	void viewport_set_screen_space_aa(RID p_viewport, RSE::ViewportScreenSpaceAA p_mode);
 	void viewport_set_use_taa(RID p_viewport, bool p_use_taa);
+	void viewport_reset_temporal_history(RID p_viewport);
 	void viewport_set_use_pathtracing(RID p_viewport, bool p_use_pathtracing);
 	bool viewport_get_use_pathtracing(RID p_viewport) const;
 	void viewport_set_use_debanding(RID p_viewport, bool p_use_debanding);

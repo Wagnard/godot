@@ -4005,6 +4005,11 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 		occluders_tex = RSG::viewport->viewport_get_occluder_debug_texture(p_viewport);
 		prev_camera_data = RSG::viewport->viewport_get_prev_camera_data(p_viewport);
 	}
+	if (p_render_buffers.is_valid() && p_render_buffers->get_temporal_history_reset()) {
+		// A camera cut (RenderingServer.viewport_reset_temporal_history()): the previous camera is the current one, so no
+		// pixel gets the camera's motion across the cut (Unreal's camera cut gives the previous view the current matrices).
+		prev_camera_data = p_camera_data;
+	}
 
 	RendererSceneRender::RTCullData rt_cull;
 	rt_cull.instances = &scene_cull_result.rt_geometry_instances;

@@ -108,10 +108,17 @@ public:
 class RenderSceneBuffers : public RefCounted {
 	GDCLASS(RenderSceneBuffers, RefCounted);
 
+	// RenderingServer.viewport_reset_temporal_history(): the frame being rendered has no connection to the previous one
+	// (a camera cut). Set by RendererViewport around that frame's render only.
+	bool temporal_history_reset = false;
+
 protected:
 	static void _bind_methods();
 
 public:
+	void set_temporal_history_reset(bool p_reset) { temporal_history_reset = p_reset; }
+	bool get_temporal_history_reset() const { return temporal_history_reset; }
+
 	RenderSceneBuffers() {}
 	virtual ~RenderSceneBuffers() {}
 

@@ -53,6 +53,8 @@ public:
 		float camera_far = 0.0f;
 		float fov_vertical_radians = 0.0f;
 		bool depth_inverted = true;
+		// A camera cut: AMD's ffxDispatchDescFrameGenerationPrepare "reset".
+		bool reset = false;
 		float camera_position[3] = {};
 		float camera_up[3] = {};
 		float camera_right[3] = {};

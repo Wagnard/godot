@@ -2653,6 +2653,7 @@ void RenderForwardClustered::_update_volumetric_fog(Ref<RenderSceneBuffersRD> p_
 		settings.sky = &sky;
 		settings.gi = &gi;
 		settings.ray_query_shadows = p_ray_query_shadows;
+		settings.reset_history = p_render_buffers->get_temporal_history_reset();
 
 		RendererRD::Fog::get_singleton()->volumetric_fog_update(settings, p_cam_projection, p_cam_transform, p_prev_cam_inv_transform, p_shadow_atlas, p_directional_light_count, p_use_directional_shadows, p_positional_light_count, p_voxel_gi_count, p_fog_volumes);
 	}
@@ -3139,7 +3140,8 @@ void RenderForwardClustered::_render_3d_upscaling(const RenderDataRD *p_render_d
 			params.fovy = fovy;
 			params.jitter = jitter;
 			params.delta_time = float(p_time_step);
-			params.reset_accumulation = false; // FIXME: The engine does not provide a way to reset the accumulation.
+			// RenderingServer.viewport_reset_temporal_history(): a camera cut (AMD's FSR2 "reset").
+			params.reset_accumulation = rb->get_temporal_history_reset();
 
 			Projection correction;
 			correction.set_depth_correction(true, true, false);
@@ -3183,6 +3185,8 @@ void RenderForwardClustered::_render_3d_upscaling(const RenderDataRD *p_render_d
 			params.fovy = p_render_data->scene_data->cam_projection.get_fovy(fov, 1.0 / aspect);
 			params.jitter = p_render_data->scene_data->taa_jitter * Vector2(rb->get_internal_size()) * 0.5f;
 			params.delta_time = float(p_time_step);
+			// RenderingServer.viewport_reset_temporal_history(): a camera cut (FSR 3.1's "reset").
+			params.reset = rb->get_temporal_history_reset();
 
 			Projection correction;
 			correction.set_depth_correction(true, true, false);
@@ -3232,7 +3236,9 @@ void RenderForwardClustered::_render_3d_upscaling(const RenderDataRD *p_render_d
 			params.fovy = fovy;
 			params.jitter = jitter;
 			params.delta_time = float(p_time_step);
-			params.reset_accumulation = false; // FIXME: The engine does not provide a way to reset the accumulation.
+			// RenderingServer.viewport_reset_temporal_history(): a camera cut (Streamline's sl::Constants::reset, which DLSS-SR,
+			// DLSS-RR and DLSS-G read).
+			params.reset_accumulation = rb->get_temporal_history_reset();
 			params.alpha_upscaling = params.context->alpha_upscaling;
 
 			// DLSS Ray Reconstruction guide buffers are supplied by the raytraced path.
@@ -3272,7 +3278,8 @@ void RenderForwardClustered::_render_3d_upscaling(const RenderDataRD *p_render_d
 		}
 	} else if (p_scale_type == SCALE_3D_MFX) {
 #ifdef METAL_MFXTEMPORAL_ENABLED
-		bool reset = rb_data->ensure_mfx_temporal(mfx_temporal_effect);
+		// A new context, or a camera cut (RenderingServer.viewport_reset_temporal_history(), MTLFXTemporalScaler.reset).
+		bool reset = rb_data->ensure_mfx_temporal(mfx_temporal_effect) || rb->get_temporal_history_reset();
 
 		RID exposure;
 		if (RSG::camera_attributes->camera_attributes_uses_auto_exposure(p_render_data->camera_attributes)) {
@@ -3303,7 +3310,7 @@ void RenderForwardClustered::_render_3d_upscaling(const RenderDataRD *p_render_d
 	} else if (p_using_taa) {
 		RD::get_singleton()->draw_command_begin_label("TAA");
 		RENDER_TIMESTAMP("TAA");
-		taa->process(rb, rb->get_base_data_format(), p_render_data->scene_data->z_near, p_render_data->scene_data->z_far);
+		taa->process(rb, rb->get_base_data_format(), p_render_data->scene_data->z_near, p_render_data->scene_data->z_far, rb->get_temporal_history_reset());
 		RD::get_singleton()->draw_command_end_label();
 	}
 }
@@ -3329,6 +3336,8 @@ void RenderForwardClustered::_prepare_fsr_frame_generation(const RenderDataRD *p
 	params.z_far = p_render_data->scene_data->z_far;
 	params.fovy = p_render_data->scene_data->cam_projection.get_fovy(fov, 1.0 / aspect);
 	params.delta_time = float(p_time_step);
+	// RenderingServer.viewport_reset_temporal_history(): a camera cut, which AMD's prepare takes as "reset".
+	params.reset = rb->get_temporal_history_reset();
 
 	Projection correction;
 	correction.set_depth_correction(true, true, false);

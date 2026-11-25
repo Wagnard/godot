@@ -52,6 +52,8 @@ public:
 		// The decode shader's convention (see DLSSContext::Parameters::reprojection).
 		Projection reprojection;
 		Transform3D cam_transform;
+		// A camera cut (RenderingServer.viewport_reset_temporal_history()): AMD's prepare "reset".
+		bool reset = false;
 	};
 
 	// Render thread, set by the compositor around each viewport's 3D render: the render target

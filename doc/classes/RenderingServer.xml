@@ -4355,6 +4355,13 @@
 				Detaches a viewport from a canvas.
 			</description>
 		</method>
+		<method name="viewport_reset_temporal_history">
+			<return type="void" />
+			<param index="0" name="viewport" type="RID" />
+			<description>
+				The next frame the [param viewport] draws has no connection to the previous one (a camera cut): its temporal antialiasing, temporal upscaler (FSR 2, FSR 3.1, DLSS, DLSS Ray Reconstruction, MetalFX temporal), and the path tracer's NRD denoiser drop their history for that frame, frame generation is told of the cut, and its camera motion vectors are zero. Call it in the frame the camera jumps (a teleport, a camera switch), never for continuous motion. One shot. See [method Viewport.reset_temporal_history].
+			</description>
+		</method>
 		<method name="viewport_set_active">
 			<return type="void" />
 			<param index="0" name="viewport" type="RID" />

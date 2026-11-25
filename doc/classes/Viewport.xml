@@ -274,6 +274,14 @@
 				[b]Note:[/b] This method doesn't propagate input events to embedded [Window]s or [SubViewport]s.
 			</description>
 		</method>
+		<method name="reset_temporal_history">
+			<return type="void" />
+			<description>
+				Tells the renderer that the next frame this viewport draws has no connection to the previous one, as after a camera cut. Call it in the same frame the camera jumps: a teleport, a portal, a switch to another camera or between first and third person, the start of a cutscene shot. On that frame, every temporal effect drops what it kept of the previous frames instead of blending it into the new view: TAA ([member use_taa]), FSR 2, FSR 3.1, DLSS, DLSS Ray Reconstruction, MetalFX temporal, the path tracer's NRD denoiser; frame generation (DLSS-G, FSR frame generation) is told of the cut too. The camera's motion vectors of that frame are zero (the previous camera is taken to be the current one).
+				Without it, the old view ghosts into the new one for a few frames. Do not call it for continuous camera motion, however fast: dropping the history makes that frame aliased and noisy, as the first frame after the viewport starts.
+				The call is one shot and is consumed by the next frame that draws this viewport's 3D scene. See also [method RenderingServer.viewport_reset_temporal_history].
+			</description>
+		</method>
 		<method name="set_canvas_cull_mask_bit">
 			<return type="void" />
 			<param index="0" name="layer" type="int" />

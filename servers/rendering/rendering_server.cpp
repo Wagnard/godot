@@ -2920,6 +2920,7 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("viewport_set_use_hdr_2d", "viewport", "enabled"), &RenderingServer::viewport_set_use_hdr_2d);
 	ClassDB::bind_method(D_METHOD("viewport_set_screen_space_aa", "viewport", "mode"), &RenderingServer::viewport_set_screen_space_aa);
 	ClassDB::bind_method(D_METHOD("viewport_set_use_taa", "viewport", "enable"), &RenderingServer::viewport_set_use_taa);
+	ClassDB::bind_method(D_METHOD("viewport_reset_temporal_history", "viewport"), &RenderingServer::viewport_reset_temporal_history);
 	ClassDB::bind_method(D_METHOD("viewport_set_use_pathtracing", "viewport", "enable"), &RenderingServer::viewport_set_use_pathtracing);
 	ClassDB::bind_method(D_METHOD("viewport_set_use_debanding", "viewport", "enable"), &RenderingServer::viewport_set_use_debanding);
 	ClassDB::bind_method(D_METHOD("viewport_set_use_occlusion_culling", "viewport", "enable"), &RenderingServer::viewport_set_use_occlusion_culling);

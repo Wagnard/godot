@@ -229,7 +229,7 @@ void FSR3UpscalerEffect::upscale(const Parameters &p_params) {
 	payload->ffx_context = context->ffx_context;
 	payload->vulkan = context->vulkan;
 	payload->params = p_params;
-	payload->reset = context->reset;
+	payload->reset = context->reset || p_params.reset;
 	context->reset = false;
 	payload->color = _resolve_texture(p_params.color);
 	payload->depth = _resolve_texture(p_params.depth);

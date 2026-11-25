@@ -615,6 +615,7 @@ public:
 	virtual void viewport_set_screen_space_aa(RID p_viewport, RSE::ViewportScreenSpaceAA p_mode) = 0;
 
 	virtual void viewport_set_use_taa(RID p_viewport, bool p_use_taa) = 0;
+	virtual void viewport_reset_temporal_history(RID p_viewport) = 0;
 	virtual void viewport_set_use_pathtracing(RID p_viewport, bool p_use_pathtracing) = 0;
 
 	virtual void viewport_set_use_debanding(RID p_viewport, bool p_use_debanding) = 0;

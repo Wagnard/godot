@@ -169,6 +169,7 @@ void FSRFrameGenerationEffect::_prepare_graph_callback(RenderingDeviceDriver *p_
 	fg.fov_vertical_radians = Math::deg_to_rad(p.fovy);
 	fg.depth_inverted = p.reverse_depth;
 	fg.hudless_resource = payload->hudless_resource;
+	fg.reset = p.reset;
 	const Basis &basis = p.cam_transform.get_basis();
 	const Vector3 origin = p.cam_transform.get_origin();
 	const Vector3 up = basis.get_column(1).normalized();

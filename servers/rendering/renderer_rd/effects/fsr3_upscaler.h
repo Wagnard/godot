@@ -69,6 +69,8 @@ public:
 		float delta_time = 0.0f; // Seconds.
 		// The decode shader's convention (see DLSSContext::Parameters::reprojection).
 		Projection reprojection;
+		// A camera cut: the history is dropped (as on the context's first dispatch).
+		bool reset = false;
 	};
 
 	// A texture as the driver knows it, resolved on the render thread for a callback that may run on another thread.

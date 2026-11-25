@@ -70,6 +70,8 @@ public:
 		Transform3D prev_cam_transform;
 		Vector2 jitter;
 		Vector2 prev_jitter;
+		// A camera cut (RenderingServer.viewport_reset_temporal_history()): the accumulation restarts.
+		bool reset = false;
 
 		// SIGMA's sun shadow (is_sigma_available()): the raygen's nrd_sun_image, the sun's light without its shadow in rgb and
 		// the distance to the occluder in alpha, which receives SIGMA's denoised shadow; the direction to the sun (world
