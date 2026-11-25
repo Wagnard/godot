@@ -77,4 +77,5 @@ void RenderSceneBuffersConfiguration::_bind_methods() {
 
 void RenderSceneBuffers::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("configure", "config"), &RenderSceneBuffers::configure);
+	ClassDB::bind_method(D_METHOD("get_temporal_history_reset"), &RenderSceneBuffers::get_temporal_history_reset);
 }

@@ -78,7 +78,7 @@ void DepthReconstruct::_ensure_history_texture(const Size2i &p_size) {
 void DepthReconstruct::process(RID p_lowres_depth, RID p_upscaled_color, RID p_velocity,
 		RID p_dest_depth,
 		const Size2i &p_target_size, const Size2i &p_lowres_size,
-		float p_z_near, float p_z_far) {
+		float p_z_near, float p_z_far, bool p_reset) {
 	UniformSetCacheRD *uniform_set_cache = UniformSetCacheRD::get_singleton();
 	ERR_FAIL_NULL(uniform_set_cache);
 	MaterialStorage *material_storage = MaterialStorage::get_singleton();
@@ -87,7 +87,7 @@ void DepthReconstruct::process(RID p_lowres_depth, RID p_upscaled_color, RID p_v
 	_ensure_history_texture(p_target_size);
 
 	frame_count++;
-	float history_weight = (frame_count <= 1) ? 0.0f : 0.875f;
+	float history_weight = (frame_count <= 1 || p_reset) ? 0.0f : 0.875f;
 
 	memset(&push_constant, 0, sizeof(PushConstant));
 	push_constant.target_size[0] = p_target_size.x;

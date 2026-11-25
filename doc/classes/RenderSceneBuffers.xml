@@ -17,5 +17,11 @@
 				This method is called by the rendering server when the associated viewport's configuration is changed. It will discard the old buffers and recreate the internal buffers used.
 			</description>
 		</method>
+		<method name="get_temporal_history_reset" qualifiers="const">
+			<return type="bool" />
+			<description>
+				Returns [code]true[/code] while the frame being rendered follows a camera cut ([method Viewport.reset_temporal_history]). A [CompositorEffect] that keeps a history of previous frames (temporal filtering, motion blur) should drop it on such a frame, as the engine's own temporal effects do. The previous camera matrices of the frame's scene data are then the current ones.
+			</description>
+		</method>
 	</methods>
 </class>

@@ -533,7 +533,7 @@ void RendererSceneRenderRD::_render_buffers_post_process_and_tonemap(const Rende
 				RID velocity = rb->get_velocity_buffer(false, i);
 				RID dest_depth = rb->get_texture_slice(RB_SCOPE_BUFFERS, RB_TEX_RECONSTRUCTED_DEPTH, i, 0);
 
-				depth_reconstruct->process(lowres_depth, upscaled_color, velocity, dest_depth, target_size, internal_size, z_near, z_far);
+				depth_reconstruct->process(lowres_depth, upscaled_color, velocity, dest_depth, target_size, internal_size, z_near, z_far, rb->get_temporal_history_reset());
 			}
 			has_reconstructed_depth = true;
 

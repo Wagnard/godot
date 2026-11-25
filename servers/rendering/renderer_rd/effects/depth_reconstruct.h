@@ -64,11 +64,11 @@ public:
 	~DepthReconstruct();
 
 	// Reconstructs p_dest_depth (R32F, p_target_size) from reverse-Z p_lowres_depth, guided by p_upscaled_color edges.
-	// p_velocity is RG16F prev_uv - current_uv.
+	// p_velocity is RG16F prev_uv - current_uv. p_reset: a camera cut, the history is not blended in (as on the first frame).
 	void process(RID p_lowres_depth, RID p_upscaled_color, RID p_velocity,
 			RID p_dest_depth,
 			const Size2i &p_target_size, const Size2i &p_lowres_size,
-			float p_z_near, float p_z_far);
+			float p_z_near, float p_z_far, bool p_reset = false);
 };
 
 } // namespace RendererRD
