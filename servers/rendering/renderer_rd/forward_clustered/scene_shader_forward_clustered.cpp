@@ -298,6 +298,12 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	print_line("\n**fragment_globals:\n" + gen_code.stage_globals[ShaderCompiler::STAGE_FRAGMENT]);
 #endif
 	pipeline_hash_map.clear_pipelines();
+	{
+		// The surfaces were classified with the previous code; the next instances and mesh loads record them again.
+		MutexLock lock(precompiled_surfaces_mutex);
+		precompiled_surfaces.clear();
+		precompiled_surfaces_update = false;
+	}
 
 	SceneShaderForwardClustered::singleton->shader.version_set_code(version, gen_code.code, gen_code.uniforms, gen_code.stage_globals[ShaderCompiler::STAGE_VERTEX], gen_code.stage_globals[ShaderCompiler::STAGE_FRAGMENT], gen_code.defines);
 

@@ -30,6 +30,7 @@
 
 #pragma once
 
+#include "core/templates/hash_set.h"
 #include "servers/rendering/renderer_rd/pipeline_hash_map_rd.h"
 #include "servers/rendering/renderer_rd/shaders/forward_clustered/scene_forward_clustered.glsl.gen.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
@@ -525,6 +526,31 @@ public:
 			bool backface_culling = cull_mode == RSE::CULL_MODE_BACK;
 			return !uses_particle_trails && !writes_modelview_or_projection && !uses_vertex && !uses_position && !uses_discard && !uses_depth_prepass_alpha && !uses_alpha_clip && !uses_alpha_antialiasing && backface_culling && !uses_point_size && !uses_world_coordinates && !billboard.is_camera_dependent() && !wireframe && !uses_z_clip_scale && !stencil_enabled;
 		}
+
+		// The surfaces RenderForwardClustered::_mesh_compile_pipelines_for_surface() compiled this shader's pipelines for,
+		// with what their pipeline keys take from them (formats, primitives and the surface's passes) and no pointer to
+		// them: when a global requirement appears later (motion vectors, once a view resolves temporally), their pipelines
+		// are compiled for it too, though the meshes and instances that asked may be gone (a game's prewarm under its
+		// loading screen, before its upscaler runs). Their pipelines would otherwise be compiled at the next draw.
+		struct PrecompiledSurface {
+			uint64_t format = 0;
+			uint64_t shadow_format = 0;
+			uint32_t flags = 0; // RenderForwardClustered::SurfacePipelineData's primitives and booleans, packed.
+
+			bool operator==(const PrecompiledSurface &p_other) const {
+				return format == p_other.format && shadow_format == p_other.shadow_format && flags == p_other.flags;
+			}
+			static uint32_t hash(const PrecompiledSurface &p_surface) {
+				uint32_t h = hash_murmur3_one_64(p_surface.format);
+				h = hash_murmur3_one_64(p_surface.shadow_format, h);
+				return hash_fmix32(hash_murmur3_one_32(p_surface.flags, h));
+			}
+		};
+		Mutex precompiled_surfaces_mutex; // Mesh loads add to the set from their own threads.
+		HashSet<PrecompiledSurface, PrecompiledSurface> precompiled_surfaces;
+		// The surfaces' pipelines are to be compiled for the requirements that changed, once the shader is compiled
+		// (RenderForwardClustered::_update_precompiled_surfaces(), render thread).
+		bool precompiled_surfaces_update = false;
 
 		virtual void set_code(const String &p_Code) override;
 		virtual void set_code_rt(const String &p_code_rt) override;

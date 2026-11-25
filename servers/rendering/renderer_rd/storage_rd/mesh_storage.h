@@ -738,6 +738,13 @@ public:
 		return _mesh_surface_generate_vertex_format(s->format, p_input_mask, p_instanced_surface, p_input_motion_vectors, p_point_size_emulated, position_stride);
 	}
 
+	// The same from a surface's format alone (mesh_surface_get_format()): the vertex format depends on nothing else of the
+	// surface, so a pipeline key can be built for a surface that no longer exists.
+	_FORCE_INLINE_ RD::VertexFormatID mesh_surface_format_get_vertex_format(uint64_t p_surface_format, uint64_t p_input_mask, bool p_instanced_surface, bool p_input_motion_vectors, bool p_point_size_emulated) {
+		uint32_t position_stride = 0;
+		return _mesh_surface_generate_vertex_format(p_surface_format, p_input_mask, p_instanced_surface, p_input_motion_vectors, p_point_size_emulated, position_stride);
+	}
+
 	Dependency *mesh_get_dependency(RID p_mesh) const;
 
 	/* MESH INSTANCE API */

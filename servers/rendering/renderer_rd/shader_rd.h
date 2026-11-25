@@ -235,6 +235,9 @@ public:
 
 	bool version_is_valid(RID p_version);
 	bool version_is_group_compiled(RID p_version, int p_group);
+	// Whether no compilation (or load from the shader cache) of the version's enabled groups is in flight: never waits,
+	// starts the compilation of a dirty version. Once true, version_is_valid() returns at once (false for a failed one).
+	bool version_is_compiled(RID p_version);
 
 	bool version_free(RID p_version);
 

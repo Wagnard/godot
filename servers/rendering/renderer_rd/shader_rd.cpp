@@ -949,6 +949,36 @@ bool ShaderRD::version_is_group_compiled(RID p_version, int p_group) {
 	return version->valid;
 }
 
+bool ShaderRD::version_is_compiled(RID p_version) {
+	Version *version = version_owner.get_or_null(p_version);
+	ERR_FAIL_NULL_V(version, true);
+
+	MutexLock lock(*version->mutex);
+
+	if (version->dirty) {
+		_initialize_version(version);
+		for (int i = 0; i < group_enabled.size(); i++) {
+			if (!group_enabled[i]) {
+				_allocate_placeholders(version, i);
+				continue;
+			}
+			_compile_version_start(version, i);
+		}
+	}
+
+	for (int i = 0; i < version->group_compilation_tasks.size(); i++) {
+		const WorkerThreadPool::GroupID task = version->group_compilation_tasks[i];
+		if (task == 0) {
+			continue;
+		}
+		if (!RenderingCompilationPool::get()->is_group_task_completed(task)) {
+			return false;
+		}
+		_compile_version_end(version, i); // Completed: does not wait.
+	}
+	return true;
+}
+
 bool ShaderRD::version_free(RID p_version) {
 	if (version_owner.owns(p_version)) {
 		{
