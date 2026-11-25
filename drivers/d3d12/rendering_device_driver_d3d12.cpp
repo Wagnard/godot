@@ -3006,6 +3006,18 @@ void RenderingDeviceDriverD3D12::command_pipeline_barrier(CommandBufferID p_cmd_
 		}
 		_rd_stages_and_access_to_d3d12(p_src_stages, texture_barrier_rd.prev_layout, texture_barrier_rd.src_access, texture_barrier_d3d12.SyncBefore, texture_barrier_d3d12.AccessBefore);
 		_rd_stages_and_access_to_d3d12(p_dst_stages, texture_barrier_rd.next_layout, texture_barrier_rd.dst_access, texture_barrier_d3d12.SyncAfter, texture_barrier_d3d12.AccessAfter);
+		// The accesses a layout does not allow are masked out above, which can leave the common access (0) next to a scope
+		// reserved to its own access: RenderingDeviceGraph returns a texture's slices to the layout of the whole texture
+		// with the access and stages of the command that then uses the whole texture (a storage clear of a texture whose
+		// mips were sampled: SYNC_CLEAR_UNORDERED_ACCESS_VIEW in LAYOUT_SHADER_RESOURCE). The runtime refuses a reserved
+		// scope with ACCESS_COMMON (Enhanced Barriers, "Access Bits Barrier Sync Compatibility"; Close() fails E_INVALIDARG
+		// and the device is removed): as in _push_global_barrier(), everything waits instead.
+		if (texture_barrier_d3d12.AccessBefore == D3D12_BARRIER_ACCESS_COMMON && (texture_barrier_d3d12.SyncBefore & RESERVED_SYNC_SCOPES)) {
+			texture_barrier_d3d12.SyncBefore = D3D12_BARRIER_SYNC_ALL;
+		}
+		if (texture_barrier_d3d12.AccessAfter == D3D12_BARRIER_ACCESS_COMMON && (texture_barrier_d3d12.SyncAfter & RESERVED_SYNC_SCOPES)) {
+			texture_barrier_d3d12.SyncAfter = D3D12_BARRIER_SYNC_ALL;
+		}
 		texture_barrier_d3d12.LayoutBefore = _rd_texture_layout_to_d3d12_barrier_layout(texture_barrier_rd.prev_layout, cmd_buf_info->list_type);
 		texture_barrier_d3d12.LayoutAfter = _rd_texture_layout_to_d3d12_barrier_layout(texture_barrier_rd.next_layout, cmd_buf_info->list_type);
 		texture_barrier_d3d12.pResource = texture_info->resource;
