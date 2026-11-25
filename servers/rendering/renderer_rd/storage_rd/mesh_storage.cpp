@@ -1759,9 +1759,15 @@ void MeshStorage::_multimesh_set_mesh(RID p_multimesh, RID p_mesh) {
 		//need to re-create AABB unfortunately, calling this has a penalty
 		if (multimesh->buffer_set) {
 			Vector<uint8_t> buffer = RD::get_singleton()->buffer_get_data(multimesh->buffer);
-			const uint8_t *r = buffer.ptr() + multimesh->motion_vectors_current_offset * multimesh->stride_cache * sizeof(float);
-			const float *data = reinterpret_cast<const float *>(r);
-			_multimesh_re_create_aabb(multimesh, data, multimesh->instances);
+			// The read back is empty when it failed (device lost).
+			const uint64_t needed = uint64_t(multimesh->motion_vectors_current_offset + multimesh->instances) * multimesh->stride_cache * sizeof(float);
+			if (uint64_t(buffer.size()) >= needed) {
+				const uint8_t *r = buffer.ptr() + multimesh->motion_vectors_current_offset * multimesh->stride_cache * sizeof(float);
+				const float *data = reinterpret_cast<const float *>(r);
+				_multimesh_re_create_aabb(multimesh, data, multimesh->instances);
+			} else {
+				ERR_PRINT("MultiMesh buffer read back failed.");
+			}
 		}
 	}
 
@@ -2339,7 +2345,10 @@ Vector<float> MeshStorage::_multimesh_get_buffer(RID p_multimesh) const {
 			memcpy(w, r, ret.size() * sizeof(float));
 		} else {
 			Vector<uint8_t> buffer = RD::get_singleton()->buffer_get_data(multimesh->buffer);
-			const uint8_t *r = buffer.ptr() + multimesh->motion_vectors_current_offset * multimesh->stride_cache * sizeof(float);
+			// The read back is empty when it failed (device lost).
+			const uint64_t offset = uint64_t(multimesh->motion_vectors_current_offset) * multimesh->stride_cache * sizeof(float);
+			ERR_FAIL_COND_V_MSG(uint64_t(buffer.size()) < offset + uint64_t(ret.size()) * sizeof(float), Vector<float>(), "MultiMesh buffer read back failed.");
+			const uint8_t *r = buffer.ptr() + offset;
 			memcpy(w, r, ret.size() * sizeof(float));
 		}
 		return ret;
