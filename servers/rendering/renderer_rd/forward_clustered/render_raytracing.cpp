@@ -2011,6 +2011,8 @@ void RenderRaytracing::_displace_surfaces(const RenderDataRD *p_render_data, con
 				continue;
 			}
 			RID program_shader;
+			// Invalid while its program compiles (never waited for): traced undisplaced until then, as a program that failed
+			// and a skinned surface not skinned yet; its first displaced build is a full build (displaced_frame == 0).
 			const RID pipeline = rt_shader->get_displace_pipeline(mat_data->rt_sbt_offset, program_shader);
 			if (!pipeline.is_valid() && !capture) {
 				continue;
@@ -2556,9 +2558,14 @@ RTOmmEntry *RenderRaytracing::_omm_entry(void *p_mesh_surface, RID p_mesh, uint3
 	}
 
 	RTOmmEntry &entry = *existing;
+	// Its program still compiling (it never waits): tried again on a later frame, the surface keeping its any-hit tests
+	// meanwhile, as a bake past its budget does.
+	bool program_pending = false;
+	entry.bake_pipeline = rt_shader->get_omm_bake_pipeline(slot, entry.bake_shader, &program_pending);
+	if (program_pending) {
+		return nullptr;
+	}
 	entry.failed = true;
-
-	entry.bake_pipeline = rt_shader->get_omm_bake_pipeline(slot, entry.bake_shader);
 	if (!entry.bake_pipeline.is_valid() || !_omm_fill_job(entry, p_mesh_surface, p_mat_data, p_lod)) {
 		return nullptr;
 	}

@@ -563,11 +563,14 @@ public:
 	uint32_t get_pending_hit_group_count() const;
 
 	// Compute pipeline running the slot's vertex() on every vertex (raytracing_displace.glsl); invalid if the slot
-	// does not displace or failed to compile. Compiled on first use, unless precompiled.
-	RID get_displace_pipeline(uint32_t p_slot_index, RID &r_shader);
+	// does not displace or failed to compile, and while it compiles (r_pending then true): these never wait. The compile
+	// is started on RenderingCompilationPool at the hit group's precache (precompile_slot_programs()), else here, at
+	// first use; until it is done the surface is traced undisplaced, as with a program that failed.
+	RID get_displace_pipeline(uint32_t p_slot_index, RID &r_shader, bool *r_pending = nullptr);
 	// The program baking a slot's cut-out into opacity micromaps (raytracing_omm_bake.glsl); invalid when the slot's
-	// cut-out cannot be baked (CustomShaderEntry::alpha_bakeable) or failed to compile.
-	RID get_omm_bake_pipeline(uint32_t p_slot_index, RID &r_shader);
+	// cut-out cannot be baked (CustomShaderEntry::alpha_bakeable) or failed to compile, and while it compiles (r_pending
+	// then true: the bake is tried again on a later frame).
+	RID get_omm_bake_pipeline(uint32_t p_slot_index, RID &r_shader, bool *r_pending = nullptr);
 	// Starts compiling, on a worker, the slot's displacement program and (p_omm_bake) its opacity micromap bake program,
 	// those it needs: compiled on the render thread at first use, they stalled the frame its surfaces first appeared in.
 	void precompile_slot_programs(uint32_t p_slot_index, bool p_omm_bake);
@@ -675,8 +678,11 @@ private:
 	bool _create_compute_program(const String &p_source, const String &p_name, RID &r_shader, RID &r_pipeline) const;
 	static void _program_build_worker(void *p_userdata);
 	void _start_program_build(LocalVector<DisplaceProgram> &r_programs, bool p_omm_bake, uint32_t p_slot_index, const String &p_source, const String &p_name);
-	// Waits for its worker if needed, then installs its result into its program.
+	// Waits for its worker if needed (only at shutdown: the frame's callers adopt finished builds), then installs its
+	// result into its program.
 	void _finish_program_build(ProgramBuild *p_build);
+	// get_displace_pipeline() / get_omm_bake_pipeline() after their slot checks: never waits.
+	RID _get_program_pipeline(LocalVector<DisplaceProgram> &r_programs, bool p_omm_bake, uint32_t p_slot_index, const CustomShaderEntry *p_entry, RID &r_shader, bool *r_pending);
 
 	bool async_compilation_enabled = true;
 	CompileLane compile_lane;

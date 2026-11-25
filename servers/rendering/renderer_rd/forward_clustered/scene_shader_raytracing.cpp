@@ -1208,37 +1208,56 @@ void SceneShaderRaytracing::precompile_slot_programs(uint32_t p_slot_index, bool
 	}
 }
 
-RID SceneShaderRaytracing::get_displace_pipeline(uint32_t p_slot_index, RID &r_shader) {
-	const CustomShaderEntry *entry = get_custom_shader_entry(p_slot_index);
-	if (!entry || !entry->writes_vertex || displace_template.is_empty()) {
-		return RID();
+// The render thread never waits for these programs: a build still running answers "pending", one finished is adopted
+// (_finish_program_build() then finds its task completed), and a program never started (a material met before its hit
+// group's precache) is started on RenderingCompilationPool now rather than compiled on this thread. Unreal's PSO
+// precaching skips what is not compiled yet the same way (r.PSOPrecache.ProxyCreationDelayStrategy).
+RID SceneShaderRaytracing::_get_program_pipeline(LocalVector<DisplaceProgram> &r_programs, bool p_omm_bake, uint32_t p_slot_index, const CustomShaderEntry *p_entry, RID &r_shader, bool *r_pending) {
+	if (r_programs.size() < hit_group_slots.size()) {
+		r_programs.resize(hit_group_slots.size());
 	}
-	if (displace_programs.size() < hit_group_slots.size()) {
-		displace_programs.resize(hit_group_slots.size());
+	ProgramBuild *build = r_programs[p_slot_index].build;
+	if (build) {
+		if (!RenderingCompilationPool::get()->is_task_completed(build->task)) {
+			if (r_pending) {
+				*r_pending = true;
+			}
+			return RID();
+		}
+		_finish_program_build(build);
 	}
-	if (displace_programs[p_slot_index].build) {
-		_finish_program_build(displace_programs[p_slot_index].build);
-	}
-	DisplaceProgram &program = displace_programs[p_slot_index];
+	const DisplaceProgram &program = r_programs[p_slot_index];
 	if (program.pipeline.is_valid() || program.failed) {
 		r_shader = program.shader;
 		return program.pipeline;
 	}
-	program.failed = true;
-	if (!_create_compute_program(_displace_source(*entry), "RT displace", program.shader, program.pipeline)) {
-		if (program.shader.is_valid()) {
-			RD::get_singleton()->free_rid(program.shader);
-			program.shader = RID();
-		}
-		_warn_program_failed(false, p_slot_index);
-		return RID();
+	// The names are part of the programs' cache keys (_compile_compute_binary()): the same as precompile_slot_programs().
+	if (p_omm_bake) {
+		_start_program_build(r_programs, true, p_slot_index, _omm_bake_source(p_entry), "RT OMM bake");
+	} else {
+		_start_program_build(r_programs, false, p_slot_index, _displace_source(*p_entry), "RT displace");
 	}
-	program.failed = false;
-	r_shader = program.shader;
-	return program.pipeline;
+	if (r_pending) {
+		*r_pending = true;
+	}
+	return RID();
 }
 
-RID SceneShaderRaytracing::get_omm_bake_pipeline(uint32_t p_slot_index, RID &r_shader) {
+RID SceneShaderRaytracing::get_displace_pipeline(uint32_t p_slot_index, RID &r_shader, bool *r_pending) {
+	if (r_pending) {
+		*r_pending = false;
+	}
+	const CustomShaderEntry *entry = get_custom_shader_entry(p_slot_index);
+	if (!entry || !entry->writes_vertex || displace_template.is_empty()) {
+		return RID();
+	}
+	return _get_program_pipeline(displace_programs, false, p_slot_index, entry, r_shader, r_pending);
+}
+
+RID SceneShaderRaytracing::get_omm_bake_pipeline(uint32_t p_slot_index, RID &r_shader, bool *r_pending) {
+	if (r_pending) {
+		*r_pending = false;
+	}
 	if (omm_bake_template.is_empty()) {
 		return RID();
 	}
@@ -1249,29 +1268,7 @@ RID SceneShaderRaytracing::get_omm_bake_pipeline(uint32_t p_slot_index, RID &r_s
 			return RID();
 		}
 	}
-	if (omm_bake_programs.size() < hit_group_slots.size()) {
-		omm_bake_programs.resize(hit_group_slots.size());
-	}
-	if (omm_bake_programs[p_slot_index].build) {
-		_finish_program_build(omm_bake_programs[p_slot_index].build);
-	}
-	DisplaceProgram &program = omm_bake_programs[p_slot_index];
-	if (program.pipeline.is_valid() || program.failed) {
-		r_shader = program.shader;
-		return program.pipeline;
-	}
-	program.failed = true;
-	if (!_create_compute_program(_omm_bake_source(entry), "RT OMM bake", program.shader, program.pipeline)) {
-		if (program.shader.is_valid()) {
-			RD::get_singleton()->free_rid(program.shader);
-			program.shader = RID();
-		}
-		_warn_program_failed(true, p_slot_index);
-		return RID();
-	}
-	program.failed = false;
-	r_shader = program.shader;
-	return program.pipeline;
+	return _get_program_pipeline(omm_bake_programs, true, p_slot_index, entry, r_shader, r_pending);
 }
 
 bool SceneShaderRaytracing::is_hg_ready_in_bundle(uint32_t p_slot_index, uint32_t p_rt_flags) const {
