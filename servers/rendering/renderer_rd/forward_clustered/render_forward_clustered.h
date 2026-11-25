@@ -1242,6 +1242,9 @@ protected:
 		bool pt_rasterized = false;
 		// Drawn into DLSS-RR's transparency layer by a path traced view (_rr_transparency_layer_surface()).
 		bool pt_rr_transparency_layer = false;
+		// Can be drawn by a path traced view's transparent pass (rt_pass_flags' FLAG_PASS_ALPHA, or an alpha faded
+		// instance): its pipelines with RT shadows, whose variants its material compiles on demand.
+		bool pt_transparent = false;
 	};
 
 	struct GlobalPipelineData {

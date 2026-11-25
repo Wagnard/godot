@@ -271,6 +271,7 @@ void ShaderRD::_initialize_version(Version *p_version) {
 	p_version->variant_data.resize(variant_defines.size());
 	p_version->group_compilation_tasks.resize_initialized(group_enabled.size());
 	p_version->group_loaded_from_cache.resize_initialized(group_enabled.size());
+	p_version->started_groups = 0;
 }
 
 // RenderingDevice frees only on the render thread, but a version is also cleared and recompiled by whichever thread
@@ -747,11 +748,19 @@ void ShaderRD::_allocate_placeholders(Version *p_version, int p_group) {
 // Try to compile all variants for a given group.
 // Will skip variants that are disabled.
 void ShaderRD::_compile_version_start(Version *p_version, int p_group) {
-	if (!group_enabled[p_group]) {
+	if (!_is_group_compiled_for(p_version, p_group)) {
 		return;
 	}
 
 	p_version->dirty = false;
+
+	// Once per group and initialization: an on-demand group may be asked for by a version while enable_group() goes
+	// through the versions.
+	const uint64_t group_bit = uint64_t(1) << p_group;
+	if (p_version->started_groups & group_bit) {
+		return;
+	}
+	p_version->started_groups |= group_bit;
 
 #if ENABLE_SHADER_CACHE
 	if (shader_cache_user_dir_valid || shader_cache_res_dir_valid) {
@@ -794,7 +803,7 @@ void ShaderRD::_compile_version_end(Version *p_version, int p_group) {
 	if (!all_valid) {
 		// Clear versions if they exist.
 		for (int i = 0; i < variant_defines.size(); i++) {
-			if (!variants_enabled[i] || !group_enabled[variant_defines[i].group]) {
+			if (!variants_enabled[i] || !_is_group_compiled_for(p_version, variant_defines[i].group)) {
 				continue; // Disabled.
 			}
 			if (!p_version->variants[i].is_null()) {
@@ -837,7 +846,7 @@ void ShaderRD::_version_set(Version *p_version, const HashMap<String, String> &p
 	if (p_version->initialize_needed) {
 		_initialize_version(p_version);
 		for (int i = 0; i < group_enabled.size(); i++) {
-			if (!group_enabled[i]) {
+			if (!_is_group_compiled_for(p_version, i)) {
 				_allocate_placeholders(p_version, i);
 				continue;
 			}
@@ -905,7 +914,7 @@ bool ShaderRD::version_is_valid(RID p_version) {
 	if (version->dirty) {
 		_initialize_version(version);
 		for (int i = 0; i < group_enabled.size(); i++) {
-			if (!group_enabled[i]) {
+			if (!_is_group_compiled_for(version, i)) {
 				_allocate_placeholders(version, i);
 				continue;
 			}
@@ -928,10 +937,14 @@ bool ShaderRD::version_is_group_compiled(RID p_version, int p_group) {
 
 	MutexLock lock(*version->mutex);
 
+	if (!_is_group_compiled_for(version, p_group)) {
+		return false; // On demand, not asked for by this version.
+	}
+
 	if (version->dirty) {
 		_initialize_version(version);
 		for (int i = 0; i < group_enabled.size(); i++) {
-			if (!group_enabled[i]) {
+			if (!_is_group_compiled_for(version, i)) {
 				_allocate_placeholders(version, i);
 				continue;
 			}
@@ -958,7 +971,7 @@ bool ShaderRD::version_is_compiled(RID p_version) {
 	if (version->dirty) {
 		_initialize_version(version);
 		for (int i = 0; i < group_enabled.size(); i++) {
-			if (!group_enabled[i]) {
+			if (!_is_group_compiled_for(version, i)) {
 				_allocate_placeholders(version, i);
 				continue;
 			}
@@ -1044,6 +1057,50 @@ void ShaderRD::enable_group(int p_group) {
 
 bool ShaderRD::is_group_enabled(int p_group) const {
 	return group_enabled[p_group];
+}
+
+void ShaderRD::set_group_on_demand(int p_group, bool p_on_demand) {
+	ERR_FAIL_COND(version_owner.get_rid_count() > 0); // Versions exist.
+	ERR_FAIL_INDEX(p_group, group_enabled.size());
+	ERR_FAIL_COND(p_group >= 64);
+	const uint64_t group_bit = uint64_t(1) << p_group;
+	on_demand_groups = p_on_demand ? (on_demand_groups | group_bit) : (on_demand_groups & ~group_bit);
+}
+
+bool ShaderRD::is_group_on_demand(int p_group) const {
+	ERR_FAIL_INDEX_V(p_group, group_enabled.size(), false);
+	return on_demand_groups & (uint64_t(1) << p_group);
+}
+
+bool ShaderRD::version_request_group(RID p_version, int p_group) {
+	ERR_FAIL_INDEX_V(p_group, group_enabled.size(), false);
+	Version *version = version_owner.get_or_null(p_version);
+	ERR_FAIL_NULL_V(version, false);
+
+	MutexLock lock(*version->mutex);
+
+	const uint64_t group_bit = uint64_t(1) << p_group;
+	if (version->requested_groups & group_bit) {
+		return false;
+	}
+	version->requested_groups |= group_bit;
+
+	// A version not compiled yet (no code, or code changed since) compiles its groups at its next initialization. Otherwise
+	// its variants of the group are placeholders now (_allocate_placeholders()), which the compilation or cache load fills
+	// in place, as for a group enabled after the version (enable_group()).
+	if (_is_group_compiled_for(version, p_group) && !version->initialize_needed && !version->dirty && !version->variants.is_empty()) {
+		_compile_version_start(version, p_group);
+	}
+	return true;
+}
+
+bool ShaderRD::version_is_group_enabled(RID p_version, int p_group) {
+	ERR_FAIL_INDEX_V(p_group, group_enabled.size(), false);
+	Version *version = version_owner.get_or_null(p_version);
+	ERR_FAIL_NULL_V(version, false);
+
+	MutexLock lock(*version->mutex);
+	return _is_group_compiled_for(version, p_group);
 }
 
 int64_t ShaderRD::get_group_count() const {

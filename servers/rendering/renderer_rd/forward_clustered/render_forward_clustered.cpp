@@ -6881,6 +6881,11 @@ void RenderForwardClustered::_geometry_instance_add_surface_with_material(Geomet
 			rt_pass_flags |= GeometryInstanceSurfaceDataCache::FLAG_PT_PARTICLES_CARD;
 		}
 	}
+	if (rt_pass_flags & GeometryInstanceSurfaceDataCache::FLAG_PASS_ALPHA) {
+		// The path tracer's transparent pass may draw it (_fill_render_list_chunk()): its material's RT shadow variants are
+		// compiled from now on, or once a view traces. An instance faded at run time asks at its first draw there.
+		p_material->shader_data->request_rt_shadows_groups();
+	}
 
 	if (p_material->shader_data->uses_particle_trails) {
 		flags |= GeometryInstanceSurfaceDataCache::FLAG_USES_PARTICLE_TRAILS;
@@ -7560,8 +7565,9 @@ void RenderForwardClustered::_mesh_compile_pipelines_for_surface(const SurfacePi
 					}
 				}
 
-				if (alpha && !multiview && p_global.use_rt_shadows && scene_shader.is_rt_shadows_shader_group_enabled()) {
-					// The path tracer's transparent pass.
+				if (alpha && !multiview && p_surface.pt_transparent && p_global.use_rt_shadows && scene_shader.is_rt_shadows_shader_group_enabled()) {
+					// The path tracer's transparent pass, for the surfaces it draws: the others' material does not compile
+					// these variants (ShaderData::request_rt_shadows_groups()).
 					SceneShaderForwardClustered::ShaderData::PipelineKey rt_shadows_key = pipeline_key;
 					rt_shadows_key.color_pass_flags |= SceneShaderForwardClustered::PIPELINE_COLOR_PASS_FLAG_RT_SHADOWS;
 					_mesh_compile_pipeline_for_surface(p_surface.shader, p_surface.surface_format, true, p_surface.instanced, p_source, rt_shadows_key, r_pipeline_pairs);
@@ -7762,6 +7768,8 @@ void RenderForwardClustered::_mesh_generate_all_pipelines_for_surface_cache(Geom
 	surface.can_use_lightmap = p_surface_cache->owner->lightmap_instance.is_valid() || p_surface_cache->owner->lightmap_sh;
 	surface.pt_rasterized = p_surface_cache->rt_pass_flags & GeometryInstanceSurfaceDataCache::FLAG_PT_RASTERIZED;
 	surface.pt_rr_transparency_layer = (p_surface_cache->rt_pass_flags & GeometryInstanceSurfaceDataCache::FLAG_PASS_ALPHA) && _rr_transparency_layer_shader(p_surface_cache->shader, surface.pt_rasterized);
+	// As _fill_render_list_chunk() sends a surface to the path tracer's transparent pass: rt_pass_flags, or the instance's fade.
+	surface.pt_transparent = (p_surface_cache->rt_pass_flags & GeometryInstanceSurfaceDataCache::FLAG_PASS_ALPHA) || uses_fade;
 	_mesh_compile_pipelines_for_surface(surface, p_global, RSE::PIPELINE_SOURCE_SURFACE);
 	_mesh_generate_extra_pipelines_for_surface_cache(p_surface_cache);
 }
@@ -7877,7 +7885,8 @@ SceneShaderForwardClustered::ShaderData::PrecompiledSurface RenderForwardCluster
 	precompiled.flags = uint32_t(p_surface.primitive) | (uint32_t(p_surface.primitive_shadow) << 3) |
 			(p_surface.instanced ? 1u << 6 : 0u) | (p_surface.uses_opaque ? 1u << 7 : 0u) | (p_surface.uses_transparent ? 1u << 8 : 0u) |
 			(p_surface.uses_depth ? 1u << 9 : 0u) | (p_surface.can_use_lightmap ? 1u << 10 : 0u) | (p_surface.pt_rasterized ? 1u << 11 : 0u) |
-			(p_surface.pt_rr_transparency_layer ? 1u << 12 : 0u) | (p_surface.shader_shadow == p_surface.shader ? 1u << 13 : 0u);
+			(p_surface.pt_rr_transparency_layer ? 1u << 12 : 0u) | (p_surface.shader_shadow == p_surface.shader ? 1u << 13 : 0u) |
+			(p_surface.pt_transparent ? 1u << 14 : 0u);
 	return precompiled;
 }
 
@@ -7894,6 +7903,7 @@ RenderForwardClustered::SurfacePipelineData RenderForwardClustered::_precompiled
 	surface.can_use_lightmap = p_surface.flags & (1u << 10);
 	surface.pt_rasterized = p_surface.flags & (1u << 11);
 	surface.pt_rr_transparency_layer = p_surface.flags & (1u << 12);
+	surface.pt_transparent = p_surface.flags & (1u << 14);
 	surface.shader = p_shader;
 	surface.shader_shadow = p_shader;
 	if (!(p_surface.flags & (1u << 13))) {
@@ -8256,6 +8266,10 @@ void RenderForwardClustered::mesh_generate_pipelines(RID p_mesh, bool p_backgrou
 		const bool rt_alpha = rt_uses_alpha_pass(shader);
 		surface.pt_rasterized = shader->pathtracing_rasterized && !rt_alpha;
 		surface.pt_rr_transparency_layer = rt_alpha && _rr_transparency_layer_shader(shader, false);
+		surface.pt_transparent = rt_alpha || surface.pt_rasterized;
+		if (surface.pt_transparent) {
+			shader->request_rt_shadows_groups(); // As _geometry_instance_add_surface_with_material() will.
+		}
 		_mesh_compile_pipelines_for_surface(surface, global_pipeline_data_required, RSE::PIPELINE_SOURCE_MESH, &pipeline_pairs);
 	}
 

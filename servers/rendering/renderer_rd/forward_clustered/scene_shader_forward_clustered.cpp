@@ -819,10 +819,27 @@ RD::PolygonCullMode SceneShaderForwardClustered::ShaderData::get_cull_mode_from_
 RID SceneShaderForwardClustered::ShaderData::_get_shader_variant(uint16_t p_shader_version) const {
 	if (version.is_valid()) {
 		ERR_FAIL_NULL_V(SceneShaderForwardClustered::singleton, RID());
-		return SceneShaderForwardClustered::singleton->shader.version_get_shader(version, p_shader_version);
+		ShaderRD &shader_rd = SceneShaderForwardClustered::singleton->shader;
+		const int group = shader_rd.get_variant_to_group(p_shader_version);
+		if (shader_rd.is_group_on_demand(group)) {
+			// A surface the classification did not foresee in that group's pass (an instance faded or made transparent
+			// at run time): the group is compiled now, at its first use, and this waits for it.
+			shader_rd.version_request_group(version, group);
+		}
+		return shader_rd.version_get_shader(version, p_shader_version);
 	} else {
 		return RID();
 	}
+}
+
+bool SceneShaderForwardClustered::ShaderData::request_rt_shadows_groups() {
+	if (version.is_null()) {
+		return false;
+	}
+	ShaderRD &shader_rd = SceneShaderForwardClustered::singleton->shader;
+	// The device's group (the other one exists for the shader baker, which bakes from the sources).
+	const ShaderGroup group = SceneShaderForwardClustered::singleton->rt_shadows_opacity_micromaps ? SHADER_GROUP_RT_SHADOWS_OPACITY_MICROMAPS : SHADER_GROUP_RT_SHADOWS;
+	return shader_rd.is_group_on_demand(group) && shader_rd.version_request_group(version, group);
 }
 
 void SceneShaderForwardClustered::ShaderData::_clear_vertex_input_mask_cache() {
@@ -1031,6 +1048,17 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 		dynamic_buffers.push_back(ShaderRD::DynamicBuffer::encode(RenderForwardClustered::RENDER_PASS_UNIFORM_SET, 45));
 		dynamic_buffers.push_back(ShaderRD::DynamicBuffer::encode(RenderForwardClustered::RENDER_PASS_UNIFORM_SET, 46));
 		shader.initialize(shader_versions, p_defines, Vector<RD::PipelineImmutableSampler>(), dynamic_buffers);
+
+		// The path tracer's transparent pass draws only the surfaces RenderForwardClustered classifies into it
+		// (GeometryInstanceSurfaceDataCache::rt_pass_flags' FLAG_PASS_ALPHA, an alpha faded instance): its groups are
+		// compiled for the materials of those surfaces only (ShaderData::request_rt_shadows_groups()), not for every
+		// material once a view traces (a cold godot3d load compiled them for all 199 materials, 148 of which can be drawn
+		// there: transparent ones, rasterized cards, particles' draw passes).
+		// GODOT_RT_SHADOWS_ON_DEMAND=0 compiles them for every material again, for comparisons.
+		if (OS::get_singleton()->get_environment("GODOT_RT_SHADOWS_ON_DEMAND") != "0") {
+			shader.set_group_on_demand(SHADER_GROUP_RT_SHADOWS, true);
+			shader.set_group_on_demand(SHADER_GROUP_RT_SHADOWS_OPACITY_MICROMAPS, true);
+		}
 
 		// The transparent pass of the path tracer has no separate specular or multiview. Its motion vectors are the rasterized
 		// cards' (pathtracing_rasterized), drawn first.

@@ -567,6 +567,9 @@ public:
 		uint64_t get_vertex_input_mask(PipelineVersion p_pipeline_version, uint32_t p_color_pass_flags, bool p_ubershader);
 		RD::PolygonCullMode get_cull_mode_from_cull_variant(CullVariant p_cull_variant);
 		bool is_valid() const;
+		// A surface of this material can be drawn by the path tracer's transparent pass: its on-demand RT shadow group is
+		// compiled (now if a view traces already, else once one does). Never waits. True the first time.
+		bool request_rt_shadows_groups();
 
 		SelfList<ShaderData> shader_list_element;
 		ShaderData();

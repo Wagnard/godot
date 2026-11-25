@@ -64,6 +64,10 @@ private:
 	Vector<uint32_t> variant_to_group;
 	HashMap<int, LocalVector<int>> group_to_variant_map;
 	Vector<bool> group_enabled;
+	// Groups compiled only for the versions that ask for them (version_request_group()), as Unreal compiles a material's
+	// permutations only for the passes it can be drawn in (FMaterialShaderType::ShouldCompilePermutation()). Enabling
+	// such a group (enable_group()) compiles it for the versions that asked; a version asking later compiles it then.
+	uint64_t on_demand_groups = 0;
 
 	Vector<RD::PipelineImmutableSampler> immutable_samplers;
 	Vector<uint64_t> dynamic_buffers;
@@ -83,6 +87,8 @@ private:
 		Vector<CharString> custom_defines;
 		Vector<WorkerThreadPool::GroupID> group_compilation_tasks;
 		Vector<bool> group_loaded_from_cache;
+		uint64_t requested_groups = 0; // The on-demand groups this version asked for; kept across recompilations.
+		uint64_t started_groups = 0; // Groups compiled or loaded since the last _initialize_version(): started once.
 
 		Vector<Vector<uint8_t>> variant_data;
 		Vector<RID> variants;
@@ -107,6 +113,10 @@ private:
 	void _compile_version_end(Version *p_version, int p_group);
 	void _compile_ensure_finished(Version *p_version);
 	void _allocate_placeholders(Version *p_version, int p_group);
+	// Whether the group is compiled for this version: enabled, and asked for when it is on demand.
+	_FORCE_INLINE_ bool _is_group_compiled_for(const Version *p_version, int p_group) const {
+		return group_enabled[p_group] && (!(on_demand_groups & (uint64_t(1) << p_group)) || (p_version->requested_groups & (uint64_t(1) << p_group)));
+	}
 	static void _free_variant(RID p_variant);
 	static void _free_variant_on_render_thread(RID p_variant);
 
@@ -213,7 +223,7 @@ public:
 		if (version->dirty) {
 			_initialize_version(version);
 			for (int i = 0; i < group_enabled.size(); i++) {
-				if (!group_enabled[i]) {
+				if (!_is_group_compiled_for(version, i)) {
 					_allocate_placeholders(version, i);
 					continue;
 				}
@@ -250,6 +260,15 @@ public:
 	// Enable/disable groups for things that might be enabled at run time.
 	void enable_group(int p_group);
 	bool is_group_enabled(int p_group) const;
+	// An on-demand group is compiled only for the versions that ask for it (version_request_group()), once it is enabled.
+	// Set before any version is created.
+	void set_group_on_demand(int p_group, bool p_on_demand);
+	bool is_group_on_demand(int p_group) const;
+	// The version asks for an on-demand group: compiled now (in the background) if the group is enabled, otherwise when it
+	// is. Never waits. Its variants are placeholders until then. Returns true the first time.
+	bool version_request_group(RID p_version, int p_group);
+	// Whether the group is compiled for this version: enabled, and asked for when it is on demand (the shader baker).
+	bool version_is_group_enabled(RID p_version, int p_group);
 	int64_t get_group_count() const;
 	const LocalVector<int> &get_group_to_variants(int p_group) const;
 
