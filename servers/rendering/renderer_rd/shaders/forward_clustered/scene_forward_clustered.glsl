@@ -3470,6 +3470,18 @@ void fragment_shader(in SceneData scene_data) {
 	if (sc_transparent_motion_vectors_pass() && alpha < (1.0 / 3.0)) {
 		discard;
 	}
+#if !defined(MODE_SEPARATE_SPECULAR) && !defined(MODE_OIT)
+	// Under an upscaler that reads the color's alpha as its reactive mask (FSR2, FSR 3.1), the pass also writes the
+	// surface's reactive value (PipelineKey::motion_vectors_reactive_alpha, color writes masked off). AMD: for
+	// alpha-blended objects "applications should write alpha to the reactive mask" (FSR 3.1 and FSR 2 manuals, "Reactive
+	// mask"), whose range "can be tailored to different situations". A surface with its own motion vectors keeps a
+	// fifth of it: tmvtest's sweep (FSR-TC-MASK-DIAG.md) put the knee at 0.2 under FSR 3.1, where the trail behind a
+	// moving mark falls to within a few percent of its level without the render mode while marks at rest stay steady
+	// (0 keeps the trail, 1 brings back the flicker of plain alpha).
+	if (sc_transparent_motion_vectors_pass()) {
+		frag_color.a = alpha * 0.2;
+	}
+#endif
 #endif
 	vec2 position_clip = (screen_position.xy / screen_position.w) - scene_data.taa_jitter;
 	vec2 prev_position_clip = (prev_screen_position.xy / prev_screen_position.w) - scene_data_block.prev_data.taa_jitter;

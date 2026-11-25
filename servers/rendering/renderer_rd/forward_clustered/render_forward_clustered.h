@@ -305,6 +305,9 @@ protected:
 		// The transparent motion vector pass (_render_transparent_motion_vectors()): every surface writes only its motion
 		// vectors (PipelineKey::motion_vectors_only).
 		bool motion_vectors_only = false;
+		// With motion_vectors_only, when the transparent pass kept such surfaces out of the reactive mask (no_reactive_alpha):
+		// they write their reduced reactive value there (PipelineKey::motion_vectors_reactive_alpha).
+		bool motion_vectors_reactive_alpha = false;
 		// A view with a temporal resolve: the surfaces of render_mode draw_after_upscaler are left out of this pass, drawn
 		// after the resolve instead (_render_after_temporal_resolve()).
 		bool exclude_after_upscaler = false;

@@ -660,6 +660,7 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 		// render_mode transparent_motion_vectors: a surface whose motion vectors are drawn stays out of the reactive mask too.
 		pipeline_key.no_reactive_alpha = p_params->no_reactive_alpha && (p_params->no_reactive_alpha_all || shader->reactive_mask_disabled || shader->transparent_motion_vectors);
 		pipeline_key.motion_vectors_only = p_params->motion_vectors_only;
+		pipeline_key.motion_vectors_reactive_alpha = p_params->motion_vectors_reactive_alpha;
 		pipeline_key.ubershader = 0;
 
 		bool emulate_point_size = shader->uses_point_size && scene_shader.emulate_point_size;
@@ -953,6 +954,10 @@ void RenderForwardClustered::_render_transparent_motion_vectors(const RenderList
 	// the texture streaming feedback.
 	RenderListParameters params = p_params;
 	params.motion_vectors_only = true;
+	// Under an upscaler that reads the color's alpha as its reactive mask, where the transparent pass wrote no alpha for
+	// these surfaces: they write a fifth of their alpha here (scene_forward_clustered.glsl, the MOTION_VECTORS variant of
+	// TRANSPARENT_MOTION_VECTORS), joined by maximum to what is there.
+	params.motion_vectors_reactive_alpha = p_params.no_reactive_alpha;
 	params.no_reactive_alpha = false;
 	params.no_reactive_alpha_all = false;
 	params.rr_transparency_layer = false;
@@ -7509,6 +7514,12 @@ void RenderForwardClustered::_mesh_compile_pipelines_for_surface(const SurfacePi
 					motion_key.motion_vectors_only = true;
 					motion_key.framebuffer_format_id = _get_color_framebuffer_format_for_pipeline(buffers_color_format, buffers_can_be_storage, RD::TextureSamples(p_global.texture_samples), false, true, view_count);
 					_mesh_compile_pipeline_for_surface(p_surface.shader, p_surface.mesh_surface, true, p_surface.instanced, p_source, motion_key, r_pipeline_pairs);
+
+					if (p_global.use_no_reactive_alpha) {
+						// Under FSR, the same pass writes the surface's reduced reactive value (motion_vectors_reactive_alpha).
+						motion_key.motion_vectors_reactive_alpha = true;
+						_mesh_compile_pipeline_for_surface(p_surface.shader, p_surface.mesh_surface, true, p_surface.instanced, p_source, motion_key, r_pipeline_pairs);
+					}
 				}
 
 				if (alpha && !multiview && p_surface.shader->draw_after_upscaler && (p_global.use_after_upscaler || p_global.use_after_taa)) {
@@ -7538,6 +7549,11 @@ void RenderForwardClustered::_mesh_compile_pipelines_for_surface(const SurfacePi
 						motion_key.motion_vectors_only = true;
 						motion_key.framebuffer_format_id = _get_color_framebuffer_format_for_pipeline(buffers_color_format, buffers_can_be_storage, RD::TextureSamples(p_global.texture_samples), false, true, 1);
 						_mesh_compile_pipeline_for_surface(p_surface.shader, p_surface.mesh_surface, true, p_surface.instanced, p_source, motion_key, r_pipeline_pairs);
+
+						if (p_global.use_no_reactive_alpha) {
+							motion_key.motion_vectors_reactive_alpha = true;
+							_mesh_compile_pipeline_for_surface(p_surface.shader, p_surface.mesh_surface, true, p_surface.instanced, p_source, motion_key, r_pipeline_pairs);
+						}
 					}
 
 					if (no_reactive_alpha) {

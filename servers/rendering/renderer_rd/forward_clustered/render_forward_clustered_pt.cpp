@@ -992,6 +992,8 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 				motion_params.rt_shadow_texture_uniform_set = rt_shadow_texture_set;
 				motion_params.buffer_dependencies = rt_shadow_buffer_dependencies;
 				motion_params.exclude_after_upscaler = after_temporal_resolve_surfaces;
+				// As its transparent pass: under FSR such surfaces write their reduced reactive value in this pass.
+				motion_params.no_reactive_alpha = using_upscaling && scale_type != SCALE_3D_DLSS;
 				_render_transparent_motion_vectors(motion_params, rasterized_count, alpha_count, rb_data, p_render_data->render_region);
 			}
 		}

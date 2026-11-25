@@ -716,6 +716,18 @@ void SceneShaderForwardClustered::ShaderData::_create_pipeline(PipelineKey p_pip
 				no_color_write.write_g = false;
 				no_color_write.write_b = false;
 				no_color_write.write_a = false;
+				if (p_pipeline_key.motion_vectors_reactive_alpha) {
+					// The color's alpha is FSR's reactive mask here: the surface's reduced reactive value (the shader's alpha,
+					// scaled in this pass) joins what the transparent pass left, by maximum.
+					no_color_write.write_a = true;
+					no_color_write.enable_blend = true;
+					no_color_write.color_blend_op = RD::BLEND_OP_MAXIMUM;
+					no_color_write.alpha_blend_op = RD::BLEND_OP_MAXIMUM;
+					no_color_write.src_color_blend_factor = RD::BLEND_FACTOR_ONE;
+					no_color_write.dst_color_blend_factor = RD::BLEND_FACTOR_ONE;
+					no_color_write.src_alpha_blend_factor = RD::BLEND_FACTOR_ONE;
+					no_color_write.dst_alpha_blend_factor = RD::BLEND_FACTOR_ONE;
+				}
 				blend_state.attachments = { no_color_write, RD::PipelineColorBlendState::Attachment(), RD::PipelineColorBlendState::Attachment() };
 				multisample_state.enable_alpha_to_coverage = false;
 				multisample_state.enable_alpha_to_one = false;

@@ -253,12 +253,16 @@ public:
 			// The transparent motion vector pass (render_mode transparent_motion_vectors): only the motion vectors are
 			// written, the color and the depth are left as the transparent pass drew them.
 			uint32_t motion_vectors_only = false;
+			// With motion_vectors_only, under an upscaler that reads the color's alpha as its reactive mask: the color's
+			// alpha takes the surface's reduced reactive value too (the maximum of both).
+			uint32_t motion_vectors_reactive_alpha = false;
 
 			uint32_t hash() const {
 				uint32_t h = hash_murmur3_one_64(vertex_format_id);
 				h = hash_murmur3_one_32(rr_transparency_layer, h);
 				h = hash_murmur3_one_32(no_reactive_alpha, h);
 				h = hash_murmur3_one_32(motion_vectors_only, h);
+				h = hash_murmur3_one_32(motion_vectors_reactive_alpha, h);
 				h = hash_murmur3_one_32(framebuffer_format_id, h);
 				h = hash_murmur3_one_32(cull_mode, h);
 				h = hash_murmur3_one_32(front_face, h);
