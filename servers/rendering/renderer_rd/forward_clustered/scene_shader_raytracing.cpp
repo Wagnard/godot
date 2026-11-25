@@ -1210,8 +1210,9 @@ void SceneShaderRaytracing::precompile_slot_programs(uint32_t p_slot_index, bool
 
 // The render thread never waits for these programs: a build still running answers "pending", one finished is adopted
 // (_finish_program_build() then finds its task completed), and a program never started (a material met before its hit
-// group's precache) is started on RenderingCompilationPool now rather than compiled on this thread. Unreal's PSO
-// precaching skips what is not compiled yet the same way (r.PSOPrecache.ProxyCreationDelayStrategy).
+// group's precache) is started on RenderingCompilationPool now rather than compiled on this thread. The surface traces
+// undisplaced meanwhile: a stand-in, as Unreal's PSO precaching draws the default material while a PSO compiles
+// (r.PSOPrecache.ProxyCreationDelayStrategy 1; its default 0 skips the draw).
 RID SceneShaderRaytracing::_get_program_pipeline(LocalVector<DisplaceProgram> &r_programs, bool p_omm_bake, uint32_t p_slot_index, const CustomShaderEntry *p_entry, RID &r_shader, bool *r_pending) {
 	if (r_programs.size() < hit_group_slots.size()) {
 		r_programs.resize(hit_group_slots.size());

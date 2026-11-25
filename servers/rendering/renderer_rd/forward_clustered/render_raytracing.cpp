@@ -4626,8 +4626,12 @@ bool RenderRaytracing::_build_merged_mm_blas(
 
 	if (needs_rebake || displace_now) {
 		// RT_BLAS_UPDATE_REBUILD: built again instead of refit (the merge wrote every vertex and index up to the capacity at
-		// the first build, so a build reads defined data).
-		if (!entry.blas_built_once || p_rebuild_only) {
+		// the first build, so a build reads defined data). The first displaced frame after rest positions (the program just
+		// compiled, or the camera came within multimesh_displacement_distance) moves every vertex away from what the BLAS
+		// was built for: built again too, as NVIDIA's RTX best practices ask for large deformations (a refit keeps the
+		// rest topology's bounding volumes). Both lists are built after _displace_merged_multimeshes().
+		const bool leaves_rest = displace_now && !entry.displaced;
+		if (!entry.blas_built_once || p_rebuild_only || leaves_rest) {
 			r_dirty_blas_list.push_back(entry.blas);
 			entry.blas_built_once = true;
 		} else {
