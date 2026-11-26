@@ -38,6 +38,8 @@
 #include "core/os/os.h"
 #include "core/version.h"
 
+#include "platform/linuxbsd/audio_thread_priority_linuxbsd.h"
+
 #ifdef ALSAMIDI_ENABLED
 #ifdef SOWRAP_ENABLED
 #include "drivers/alsa/asound-so_wrap.h"
@@ -367,6 +369,7 @@ Error AudioDriverPulseAudio::init() {
 	}
 
 	init_output_device();
+	AudioThreadPriorityLinuxBSD::initialize();
 	thread.start(AudioDriverPulseAudio::thread_func, this);
 
 	return OK;
@@ -401,6 +404,9 @@ float AudioDriverPulseAudio::get_latency() {
 
 void AudioDriverPulseAudio::thread_func(void *p_udata) {
 	AudioDriverPulseAudio *ad = static_cast<AudioDriverPulseAudio *>(p_udata);
+	Thread::set_name("Pulse audio");
+	AudioThreadPriorityLinuxBSD::raise_current_thread();
+
 	unsigned int write_ofs = 0;
 	size_t avail_bytes = 0;
 	uint64_t default_device_msec = OS::get_singleton()->get_ticks_msec();

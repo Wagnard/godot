@@ -6,6 +6,7 @@ Import("env")
 import platform_linuxbsd_builders
 
 common_linuxbsd = [
+    "audio_thread_priority_linuxbsd.cpp",
     "crash_handler_linuxbsd.cpp",
     "os_linuxbsd.cpp",
     "freedesktop_portal_desktop.cpp",

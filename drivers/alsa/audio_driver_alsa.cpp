@@ -36,6 +36,8 @@
 #include "core/math/math_funcs_binary.h"
 #include "core/os/os.h"
 
+#include "platform/linuxbsd/audio_thread_priority_linuxbsd.h"
+
 #ifdef SOWRAP_ENABLED
 #include "drivers/alsa/asound-so_wrap.h"
 #else
@@ -194,6 +196,7 @@ Error AudioDriverALSA::init() {
 
 	Error err = init_output_device();
 	if (err == OK) {
+		AudioThreadPriorityLinuxBSD::initialize();
 		thread.start(AudioDriverALSA::thread_func, this);
 	}
 
@@ -202,6 +205,8 @@ Error AudioDriverALSA::init() {
 
 void AudioDriverALSA::thread_func(void *p_udata) {
 	AudioDriverALSA *ad = static_cast<AudioDriverALSA *>(p_udata);
+	Thread::set_name("ALSA audio");
+	AudioThreadPriorityLinuxBSD::raise_current_thread();
 
 	while (!ad->exit_thread.is_set()) {
 		ad->lock();
