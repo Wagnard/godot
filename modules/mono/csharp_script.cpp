@@ -1166,14 +1166,10 @@ bool CSharpLanguage::setup_csharp_script_binding(CSharpScriptBinding &r_script_b
 
 	ERR_FAIL_NULL_V(strong_gchandle.value, false);
 
-	r_script_binding.type_name = type_name;
-	r_script_binding.gchandle = MonoGCHandleData(strong_gchandle, gdmono::GCHandleType::STRONG_HANDLE);
-	r_script_binding.owner = p_object;
-	// Published last: another thread may change the owner's reference count meanwhile, and its reference callback
-	// reads the fields above once it sees `inited` (see CSharpScriptBinding).
-	r_script_binding.inited.set();
-
-	// Tie managed to unmanaged
+	// Tie managed to unmanaged, before the binding is published: once it is, another thread's unreference to 1 would
+	// otherwise see the managed side as the only reference and swap the new strong handle for a weak one (freeing the
+	// handle this thread's caller is about to read) while the new wrapper does not count yet. Until `inited` is set,
+	// the reference callback does nothing.
 	RefCounted *rc = Object::cast_to<RefCounted>(p_object);
 
 	if (rc) {
@@ -1186,7 +1182,101 @@ bool CSharpLanguage::setup_csharp_script_binding(CSharpScriptBinding &r_script_b
 		CSharpLanguage::get_singleton()->post_unsafe_reference(rc);
 	}
 
+	r_script_binding.type_name = type_name;
+	r_script_binding.gchandle = MonoGCHandleData(strong_gchandle, gdmono::GCHandleType::STRONG_HANDLE);
+	r_script_binding.owner = p_object;
+	// Published last: another thread may change the owner's reference count meanwhile, and its reference callback
+	// reads the fields above once it sees `inited` (see CSharpScriptBinding).
+	r_script_binding.inited.set();
+
 	return true;
+}
+
+// Called by `InteropUtils.UnmanagedGetManaged()` when the binding's GC handle had no target: the wrapper was collected
+// while only it referenced the owner (a weak handle), and its finalizer has not run yet. The caller read the handle
+// without a lock, so meanwhile other threads may pass the same object to C# too (and get here), change the owner's
+// reference count (the reference callback swaps the handle, or releases it if its target is gone), or finalize the
+// collected wrapper (which releases the handle). One wrapper per binding: the first thread here creates it, the others
+// return it. Decided by the binding's current handle under the locks, not by the caller's copy (`p_old_gchandle`).
+GCHandleIntPtr CSharpLanguage::recreate_csharp_script_binding_managed(CSharpScriptBinding &r_script_binding, Object *p_object, GCHandleIntPtr p_old_gchandle) {
+	// As setup_csharp_script_binding(), under `language_bind_mutex`: it also creates the binding's wrapper. Reference
+	// count changes do not take it (the reference callback runs under the owner's instance binding mutex), hence the
+	// handle mutex below for every read or change of the handle.
+	MutexLock lock(language_bind_mutex);
+
+	MonoGCHandleData &gchandle = r_script_binding.gchandle;
+
+	{
+		MutexLock gchandle_lock(script_gchandle_release_mutex);
+
+		if (!gchandle.is_released()) {
+			if (!gchandle.is_weak()) {
+				// Another thread created a new wrapper since the caller read the handle. A strong handle keeps it alive.
+				return gchandle.get_intptr();
+			}
+
+			if (gchandle.get_intptr().value != p_old_gchandle.value) {
+				// A weak handle the caller did not see: another thread's new wrapper, swapped since because only it
+				// references the owner. Keep it if it is still alive (the swap tests the target and keeps the type).
+				GCHandleIntPtr old_gchandle = gchandle.get_intptr();
+				gchandle.handle = { nullptr }; // No longer owns the handle (released by swap function)
+
+				GCHandleIntPtr new_gchandle = { nullptr };
+				bool create_weak = true;
+				bool target_alive = GDMonoCache::managed_callbacks.ScriptManagerBridge_SwapGCHandleForType(
+						old_gchandle, &new_gchandle, create_weak);
+
+				if (target_alive) {
+					gchandle = MonoGCHandleData(new_gchandle, gdmono::GCHandleType::WEAK_HANDLE);
+					return gchandle.get_intptr();
+				}
+			}
+		}
+
+		// The handle the caller saw, whose target was collected, if no other thread released it already. The binding
+		// stays `inited` with a released handle meanwhile, as after a swap whose target was collected: the reference
+		// callback and the finalizer skip it, and a thread that reads it gets here and waits for the wrapper below.
+		gchandle.release();
+	}
+
+#ifdef DEBUG_ENABLED
+	CRASH_COND(r_script_binding.type_name == StringName());
+#endif
+
+	bool parent_is_object_class = p_object->is_class(r_script_binding.type_name);
+	if (!parent_is_object_class) {
+		r_script_binding.inited.clear();
+		ERR_FAIL_V_MSG({ nullptr }, "Type inherits from native type '" + r_script_binding.type_name + "', so it can't be instantiated in object of type: '" + p_object->get_class() + "'.");
+	}
+
+	GCHandleIntPtr strong_gchandle =
+			GDMonoCache::managed_callbacks.ScriptManagerBridge_CreateManagedForGodotObjectBinding(
+					&r_script_binding.type_name, p_object);
+
+	if (!strong_gchandle.value) {
+		r_script_binding.inited.clear();
+		ERR_FAIL_V({ nullptr });
+	}
+
+	// Tie managed to unmanaged, before the handle is published, as in setup_csharp_script_binding(). Not under the
+	// handle mutex: reference() runs the reference callback, which takes it under the owner's instance binding mutex
+	// (and skips the released handle).
+	RefCounted *rc = Object::cast_to<RefCounted>(p_object);
+
+	if (rc) {
+		// Unsafe refcount increment. The managed instance also counts as a reference.
+		// This way if the unmanaged world has no references to our owner
+		// but the managed instance is alive, the refcount will be 1 instead of 0.
+		// See: godot_icall_RefCounted_Dtor(MonoObject *p_obj, Object *p_ptr)
+		rc->reference();
+		CSharpLanguage::get_singleton()->post_unsafe_reference(rc);
+	}
+
+	MutexLock gchandle_lock(script_gchandle_release_mutex);
+	gchandle = MonoGCHandleData(strong_gchandle, gdmono::GCHandleType::STRONG_HANDLE);
+	// Set again if the collected wrapper's finalizer released the handle meanwhile (it clears `inited`); still last.
+	r_script_binding.inited.set();
+	return gchandle.get_intptr();
 }
 
 RBMap<Object *, CSharpScriptBinding>::Element *CSharpLanguage::insert_script_binding(Object *p_object, const CSharpScriptBinding &p_script_binding) {
@@ -1281,6 +1371,15 @@ GDExtensionBool CSharpLanguage::_instance_binding_reference_callback(void *p_tok
 
 			// Release the current weak handle and replace it with a strong handle.
 
+			// Tested again under the handle mutex, the reference count included: meanwhile another thread may change
+			// it, re-create a collected wrapper (`recreate_csharp_script_binding_managed()`), or finalize the wrapper
+			// (which releases the handle). A swap decided on a stale count frees a handle another thread was just
+			// given, before it reads the target.
+			MutexLock gchandle_lock(get_singleton()->script_gchandle_release_mutex);
+			if (rc_owner->get_reference_count() <= 1 || gchandle.is_released() || !gchandle.is_weak()) {
+				return false;
+			}
+
 			GCHandleIntPtr old_gchandle = gchandle.get_intptr();
 			gchandle.handle = { nullptr }; // No longer owns the handle (released by swap function)
 
@@ -1304,6 +1403,12 @@ GDExtensionBool CSharpLanguage::_instance_binding_reference_callback(void *p_tok
 			// the managed instance takes responsibility of deleting the owner when GCed.
 
 			// Release the current strong handle and replace it with a weak handle.
+
+			// Tested again under the handle mutex, as in the increment branch above.
+			MutexLock gchandle_lock(get_singleton()->script_gchandle_release_mutex);
+			if (rc_owner->get_reference_count() != 1 || gchandle.is_released() || gchandle.is_weak()) {
+				return refcount == 0;
+			}
 
 			GCHandleIntPtr old_gchandle = gchandle.get_intptr();
 			gchandle.handle = { nullptr }; // No longer owns the handle (released by swap function)

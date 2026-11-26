@@ -453,6 +453,9 @@ struct CSharpScriptBinding {
 	// `language_bind_mutex` (`get_instance_binding_with_setup()`).
 	SafeFlag inited;
 	StringName type_name;
+	// Once the binding is set up, swapped, released or re-created under `script_gchandle_release_mutex` (until the
+	// owner is freed): by whichever thread changes the owner's reference count, finalizes or disposes its wrapper, or
+	// re-creates a collected wrapper. Read without the mutex only as a hint, tested again under it before a change.
 	MonoGCHandleData gchandle;
 	Object *owner = nullptr; // Only valid once `inited` is set. The map element's key is the owner from creation.
 
@@ -644,6 +647,7 @@ public:
 
 	RBMap<Object *, CSharpScriptBinding>::Element *insert_script_binding(Object *p_object, const CSharpScriptBinding &p_script_binding);
 	bool setup_csharp_script_binding(CSharpScriptBinding &r_script_binding, Object *p_object);
+	GCHandleIntPtr recreate_csharp_script_binding_managed(CSharpScriptBinding &r_script_binding, Object *p_object, GCHandleIntPtr p_old_gchandle);
 
 	static void tie_native_managed_to_unmanaged(GCHandleIntPtr p_gchandle_intptr, Object *p_unmanaged, const StringName *p_native_name, bool p_ref_counted);
 	static void tie_user_managed_to_unmanaged(GCHandleIntPtr p_gchandle_intptr, Object *p_unmanaged, Ref<CSharpScript> *p_script, bool p_ref_counted);

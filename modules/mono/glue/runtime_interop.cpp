@@ -265,46 +265,9 @@ GCHandleIntPtr godotsharp_internal_unmanaged_instance_binding_create_managed(Obj
 	CSharpScriptBinding &script_binding = ((RBMap<Object *, CSharpScriptBinding>::Element *)data)->value();
 	ERR_FAIL_COND_V(!script_binding.inited.is_set(), { nullptr });
 
-	MonoGCHandleData &gchandle = script_binding.gchandle;
-
-	// TODO: Possible data race?
-	CRASH_COND(gchandle.get_intptr().value != p_old_gchandle.value);
-
-	CSharpLanguage::get_singleton()->release_script_gchandle(gchandle);
-	script_binding.inited.clear();
-
-	// Create a new one
-
-#ifdef DEBUG_ENABLED
-	CRASH_COND(script_binding.type_name == StringName());
-#endif
-
-	bool parent_is_object_class = p_unmanaged->is_class(script_binding.type_name);
-	ERR_FAIL_COND_V_MSG(!parent_is_object_class, { nullptr },
-			"Type inherits from native type '" + script_binding.type_name + "', so it can't be instantiated in object of type: '" + p_unmanaged->get_class() + "'.");
-
-	GCHandleIntPtr strong_gchandle =
-			GDMonoCache::managed_callbacks.ScriptManagerBridge_CreateManagedForGodotObjectBinding(
-					&script_binding.type_name, p_unmanaged);
-
-	ERR_FAIL_NULL_V(strong_gchandle.value, { nullptr });
-
-	gchandle = MonoGCHandleData(strong_gchandle, gdmono::GCHandleType::STRONG_HANDLE);
-	script_binding.inited.set(); // Last, as in CSharpLanguage::setup_csharp_script_binding().
-
-	// Tie managed to unmanaged
-	RefCounted *rc = Object::cast_to<RefCounted>(p_unmanaged);
-
-	if (rc) {
-		// Unsafe refcount increment. The managed instance also counts as a reference.
-		// This way if the unmanaged world has no references to our owner
-		// but the managed instance is alive, the refcount will be 1 instead of 0.
-		// See: godot_icall_RefCounted_Dtor(MonoObject *p_obj, Object *p_ptr)
-		rc->reference();
-		CSharpLanguage::get_singleton()->post_unsafe_reference(rc);
-	}
-
-	return gchandle.get_intptr();
+	// Several threads may get here at once for the same object, while others change its reference count or finalize
+	// its collected wrapper: see CSharpLanguage::recreate_csharp_script_binding_managed().
+	return CSharpLanguage::get_singleton()->recreate_csharp_script_binding_managed(script_binding, p_unmanaged, p_old_gchandle);
 }
 
 void godotsharp_internal_tie_native_managed_to_unmanaged(GCHandleIntPtr p_gchandle_intptr, Object *p_unmanaged, const StringName *p_native_name, bool p_ref_counted) {
