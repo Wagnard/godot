@@ -1516,6 +1516,18 @@ public:
 	// nrd_direct_light_denoising, update_uniform_set()).
 	bool nrd_get_direct_light(const RenderDataRD *p_render_data) const;
 
+	// Every variant declares every denoiser's images (raytracing_common_inc.glsl): the ones a variant does not write are
+	// bound to a 1x1 storage image of their format, made at the first use (update_uniform_set()).
+	enum DenoiserPlaceholder {
+		DENOISER_PLACEHOLDER_RGBA16F,
+		DENOISER_PLACEHOLDER_R16F,
+		DENOISER_PLACEHOLDER_R32F,
+		DENOISER_PLACEHOLDER_RG16F,
+		DENOISER_PLACEHOLDER_MAX,
+	};
+	RID denoiser_placeholders[DENOISER_PLACEHOLDER_MAX];
+	RID _get_denoiser_placeholder(DenoiserPlaceholder p_format);
+
 	void register_raytracing_buffer_dependencies(RD::RaytracingListID p_list);
 	// The buffers written per frame that the shaders read through the addresses in RT_GeometryData and RT_MaterialData.
 	void get_buffers_read_by_address(LocalVector<RID> &r_buffers);

@@ -52,26 +52,23 @@ void store_path_timing(ivec2 p_pixel, uvec2 p_start_clock) {
 layout(set = 0, binding = 0, rgba16f) uniform image2D image;
 // The reflection of the first transparent surface in front of the opaque ones, and that surface's view depth (0: none).
 layout(set = 0, binding = 29, rgba16f) uniform image2D front_layer_image;
-#ifdef NRD_ENABLED
+// NRD's images, declared in every variant as the other denoisers' (raytracing_common_inc.glsl): written in the NRD ones.
 // The light of the primary surfaces NRD denoises (RenderRaytracing::nrd_ensure_buffers()): per lobe, its radiance divided
 // by the lobe's albedo guide, and the hit distance of the bounce that took it (0 where the bounce took the other lobe).
 // The image above then holds the rest, which is not denoised.
 layout(set = 0, binding = 41, rgba16f) uniform image2D nrd_diffuse_image;
 layout(set = 0, binding = 43, rgba16f) uniform image2D nrd_specular_image;
-// NRD's IN_VIEWZ: the primary hit's view depth, NRD_SKY_VIEW_Z where the camera ray missed. Ray Reconstruction's depth
-// guide binding: the two are never in the same variant.
-layout(set = 0, binding = 39, r32f) uniform image2D nrd_view_z_image;
+// NRD's IN_VIEWZ: rt_guide_depth_image (binding 39, raytracing_common_inc.glsl).
 // SIGMA's sun (lights_evaluate_sigma_sun()): rgb its light its shadow can take, without that shadow, a the distance to the
 // occluder of its ray, which nrd_sigma_frontend.hlsl packs into SIGMA's penumbra and nrd_sigma_backend.hlsl replaces by the
 // denoised shadow (effects/nrd_denoiser.cpp).
 layout(set = 0, binding = 48, rgba16f) uniform image2D nrd_sun_image;
-#ifdef NRD_DIRECT_LIGHT
-// rendering/pathtracing/nrd_direct_light_denoising: the light choice's diffuse light at the primary hit over the diffuse
-// albedo, and its distance to the occluder or the light (NRD's README, "Other": "For direct lighting a distance to an
-// occluder or a light source is needed"), which NRD's second ReBLUR denoises (effects/nrd_denoiser.cpp). That light then
-// leaves nrd_diffuse_image.
+// rendering/pathtracing/nrd_direct_light_denoising (NRD_DIRECT_LIGHT): the light choice's diffuse light at the primary hit
+// over the diffuse albedo, and its distance to the occluder or the light (NRD's README, "Other": "For direct lighting a
+// distance to an occluder or a light source is needed"), which NRD's second ReBLUR denoises (effects/nrd_denoiser.cpp).
+// That light then leaves nrd_diffuse_image.
 layout(set = 0, binding = 49, rgba16f) uniform image2D nrd_direct_image;
-#endif
+#ifdef NRD_ENABLED
 // Past NRD's CommonSettings::denoisingRange (500000 by default, effects/nrd_denoiser.cpp): NRD leaves the pixel out.
 #define NRD_SKY_VIEW_Z 1e7
 #endif
@@ -92,9 +89,9 @@ layout(set = 0, binding = 5, std430) readonly buffer MaterialBuffer {
 	MaterialData materials[];
 };
 
-#ifdef DLSS_RR_SPECULAR_MOTION_VECTORS
 // The previous frame's instance transforms, as the closest hit reads them for the velocity: the specular motion vectors
-// move the surfaces their ray queries meet (raytracing_shade_inc.glsl).
+// (DLSS_RR_SPECULAR_MOTION_VECTORS) move the surfaces their ray queries meet (raytracing_shade_inc.glsl). Declared in
+// every variant, as the denoisers' images.
 layout(set = 0, binding = 4, std430) readonly buffer MotionIndexBuffer {
 	int motion_indices[];
 };
@@ -102,7 +99,6 @@ layout(set = 0, binding = 4, std430) readonly buffer MotionIndexBuffer {
 layout(set = 0, binding = 32, std430) readonly buffer MotionTransforms {
 	InstanceMotionData motion_transforms[];
 };
-#endif
 // clang-format on
 
 #include "raytracing_lights_inc.glsl"
@@ -264,14 +260,14 @@ void debug_transparency_layers(uvec2 p_pixel, vec3 p_origin, vec3 p_direction) {
 	// Nothing for NRD to add back (raytracing_nrd_composite.glsl).
 	imageStore(nrd_diffuse_image, pixel, vec4(0.0));
 	imageStore(nrd_specular_image, pixel, vec4(0.0));
-	imageStore(nrd_view_z_image, pixel, vec4(NRD_SKY_VIEW_Z));
+	imageStore(rt_guide_depth_image, pixel, vec4(NRD_SKY_VIEW_Z));
 	imageStore(nrd_sun_image, pixel, vec4(0.0, 0.0, 0.0, NRD_MISS_HIT_T));
 #ifdef NRD_DIRECT_LIGHT
 	imageStore(nrd_direct_image, pixel, vec4(0.0));
 #endif
 #endif
 #ifdef DLSS_RR_ENABLED
-	imageStore(dlss_rr_depth, pixel, imageLoad(rt_depth_image, pixel));
+	imageStore(rt_guide_depth_image, pixel, imageLoad(rt_depth_image, pixel));
 #endif
 }
 #endif // RT_DEBUG_ENABLED
@@ -351,6 +347,15 @@ float peel_write_dominant_guides(HitRecord r, float p_alpha, vec3 p_origin, vec3
 #endif // DLSS_RR_ENABLED
 #endif // RT_TRANSPARENCY_PEELING
 
+#ifdef RT_LAYOUT_STUB
+// A custom hit group's binary holds this stage for its declarations only, never in a pipeline
+// (SceneShaderRaytracing::_variant_stage_sources()): its reflection must be the real stage's. An unsized descriptor array
+// is runtime-sized only where a non-constant index reads it (glslang sizes an unread one to 1), so the stub reads the
+// bindless textures once, as the real stage does.
+void main() {
+	const vec4 unused = textureLod(sampler2D(bindless_textures[nonuniformEXT(gl_LaunchIDEXT.x)], SAMPLER_LINEAR_CLAMP), vec2(0.0), 0.0);
+}
+#else
 void main() {
 	if (gl_LaunchSizeEXT.z == 2u) {
 		trace_probe_ray();
@@ -571,7 +576,7 @@ void main() {
 		const float ndc_depth = imageLoad(rt_depth_image, nrd_pixel).r;
 		const vec4 view_position = scene_data_block.data.inv_projection_matrix * vec4(0.0, 0.0, ndc_depth, 1.0);
 		const float view_z = ndc_depth == 0.0 ? NRD_SKY_VIEW_Z : -view_position.z / view_position.w;
-		imageStore(nrd_view_z_image, nrd_pixel, vec4(view_z));
+		imageStore(rt_guide_depth_image, nrd_pixel, vec4(view_z));
 		imageStore(image, nrd_pixel, vec4(nrd_emission * inv_samples, image_alpha));
 		imageStore(nrd_diffuse_image, nrd_pixel, vec4(nrd_diffuse * inv_samples / diffuse_albedo, hit_t.x));
 		imageStore(nrd_specular_image, nrd_pixel, vec4(nrd_specular * inv_samples / specular_albedo, hit_t.y));
@@ -731,12 +736,13 @@ void main() {
 	}
 	imageStore(front_layer_image, ivec2(pixel), front_layer);
 #ifdef DLSS_RR_ENABLED
-	imageStore(dlss_rr_depth, ivec2(pixel), vec4(rr_depth));
+	imageStore(rt_guide_depth_image, ivec2(pixel), vec4(rr_depth));
 #endif
 #ifdef RT_TIMING_ENABLED
 	store_path_timing(ivec2(pixel), start_clock);
 #endif
 }
+#endif // RT_LAYOUT_STUB
 
 #[miss]
 
@@ -790,6 +796,11 @@ vec3 radiance_octmap_sample(vec2 p_oct_uv, float p_roughness) {
 
 #include "raytracing_environment_inc.glsl"
 
+#ifdef RT_LAYOUT_STUB
+// Its declarations only, as the ray generation stage's stub above (no unsized descriptor array here).
+void main() {
+}
+#else
 void main() {
 	PathState ps;
 	ps.packed_bounces_flags = payload.packed_bounces_flags;
@@ -879,6 +890,7 @@ void main() {
 #endif // RT_DEBUG_ENABLED
 	payload_write_light(payload, light, light_flags);
 }
+#endif // RT_LAYOUT_STUB
 
 #[closest_hit]
 

@@ -165,6 +165,12 @@ RenderRaytracing::~RenderRaytracing() {
 		RD::get_singleton()->free_rid(mat_ubo_pool_buffer);
 		mat_ubo_pool_buffer = RID();
 	}
+	for (RID &placeholder : denoiser_placeholders) {
+		if (placeholder.is_valid()) {
+			RD::get_singleton()->free_rid(placeholder);
+			placeholder = RID();
+		}
+	}
 
 	if (bindless_block) {
 		memdelete(bindless_block);
@@ -7146,6 +7152,26 @@ void RenderRaytracing::build_sky_sampling(RTViewportState *p_state, RID p_radian
 // Uniform set update
 // ---------------------------------------------------------------------------
 
+RID RenderRaytracing::_get_denoiser_placeholder(DenoiserPlaceholder p_format) {
+	ERR_FAIL_INDEX_V(p_format, DENOISER_PLACEHOLDER_MAX, RID());
+	if (denoiser_placeholders[p_format].is_null()) {
+		static const RD::DataFormat formats[DENOISER_PLACEHOLDER_MAX] = { RD::DATA_FORMAT_R16G16B16A16_SFLOAT, RD::DATA_FORMAT_R16_SFLOAT, RD::DATA_FORMAT_R32_SFLOAT, RD::DATA_FORMAT_R16G16_SFLOAT };
+		static const char *names[DENOISER_PLACEHOLDER_MAX] = { "RT denoiser placeholder RGBA16F", "RT denoiser placeholder R16F", "RT denoiser placeholder R32F", "RT denoiser placeholder RG16F" };
+		// A valid storage image of the declared format (the declaration's format qualifier), which the variant never accesses:
+		// Vulkan requires a valid descriptor only for what the pipeline statically uses, D3D12's descriptor tables are fully
+		// populated anyway (RenderingDevice validates every binding of the layout).
+		RD::TextureFormat tf;
+		tf.format = formats[p_format];
+		tf.width = 1;
+		tf.height = 1;
+		tf.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT;
+		denoiser_placeholders[p_format] = RD::get_singleton()->texture_create(tf, RD::TextureView());
+		ERR_FAIL_COND_V(denoiser_placeholders[p_format].is_null(), RID());
+		RD::get_singleton()->set_resource_name(denoiser_placeholders[p_format], names[p_format]);
+	}
+	return denoiser_placeholders[p_format];
+}
+
 RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderDataRD *p_render_data, uint32_t p_rt_flags, bool p_background_is_color, const Color &p_background_color, bool p_reflection_shows_background) {
 	ERR_FAIL_NULL_V(p_state, RID());
 
@@ -7413,9 +7439,31 @@ RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderD
 		uniforms.push_back(u);
 	}
 
-	// Bindings 9-12: DLSS Ray Reconstruction output buffers (only in DLSS RR shader variant).
-	bool dlss_rr_enabled = dlss_rr_has_buffers(rb);
-	if (dlss_rr_enabled) {
+	// The denoisers' images: every variant declares all of them (raytracing_common_inc.glsl), so that the variants share one
+	// layout and their hit groups; each binds its denoiser's, and a placeholder of the declared format where it writes none.
+	const bool rr_variant = p_rt_flags & SceneShaderRaytracing::RT_FLAG_DLSS_RR_ENABLED;
+	const bool nrd_variant = p_rt_flags & SceneShaderRaytracing::RT_FLAG_NRD_ENABLED;
+	if (!rr_variant && !nrd_variant) {
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 9, _get_denoiser_placeholder(DENOISER_PLACEHOLDER_RGBA16F)));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 10, _get_denoiser_placeholder(DENOISER_PLACEHOLDER_RGBA16F)));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 11, _get_denoiser_placeholder(DENOISER_PLACEHOLDER_RGBA16F)));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 39, _get_denoiser_placeholder(DENOISER_PLACEHOLDER_R32F)));
+	}
+	if (!rr_variant) {
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 12, _get_denoiser_placeholder(DENOISER_PLACEHOLDER_R16F)));
+	}
+	if (!(p_rt_flags & SceneShaderRaytracing::RT_FLAG_DLSS_RR_SPECULAR_MOTION_VECTORS)) {
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 44, _get_denoiser_placeholder(DENOISER_PLACEHOLDER_RG16F)));
+	}
+	if (!nrd_variant) {
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 41, _get_denoiser_placeholder(DENOISER_PLACEHOLDER_RGBA16F)));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 43, _get_denoiser_placeholder(DENOISER_PLACEHOLDER_RGBA16F)));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 48, _get_denoiser_placeholder(DENOISER_PLACEHOLDER_RGBA16F)));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 49, _get_denoiser_placeholder(DENOISER_PLACEHOLDER_RGBA16F)));
+	}
+
+	// Bindings 9-12, 39, 44: DLSS Ray Reconstruction's guides (the DLSS RR variant).
+	if (rr_variant && dlss_rr_has_buffers(rb)) {
 		// Binding 9: DLSS RR Diffuse Albedo
 		{
 			RD::Uniform u;
@@ -7459,7 +7507,7 @@ RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderD
 		if (p_rt_flags & SceneShaderRaytracing::RT_FLAG_DLSS_RR_SPECULAR_MOTION_VECTORS) {
 			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 44, dlss_rr_get_specular_motion_vectors(rb)));
 		}
-	} else if ((p_rt_flags & SceneShaderRaytracing::RT_FLAG_NRD_ENABLED) && nrd_has_buffers(rb)) {
+	} else if (nrd_variant && nrd_has_buffers(rb)) {
 		// Bindings 9-11: the same guides for NRD, and 41 / 43 the light of each lobe (nrd_ensure_buffers()).
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 9, nrd_get_texture(rb, RB_TEX_NRD_DIFFUSE_ALBEDO)));
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 10, nrd_get_texture(rb, RB_TEX_NRD_SPECULAR_ALBEDO)));

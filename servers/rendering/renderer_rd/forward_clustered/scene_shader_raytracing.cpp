@@ -107,6 +107,21 @@ static uint32_t _raygen_variant_from_rt_flags(uint32_t p_rt_flags) {
 	return variant;
 }
 
+// The flags that change only a variant's ray generation and miss stages. Since the closest hits only evaluate the
+// material (PT-SHADE-IN-RAYGEN-FIXES), the hit stages of the variants that differ by these are the same code: each was
+// compiled with and without them (closest hit, default and custom, and any-hit) and gave the same SPIR-V once unused
+// declarations are removed (COLD-LOAD-2-STUDY, B.1). Neither do they change a declaration of the RT set: the denoisers'
+// images are declared in every variant (raytracing_common_inc.glsl, the raygen) and bound to placeholders where a variant
+// does not write them (RenderRaytracing's uniform set). So one hit group binary serves them all: NRD and Ray
+// Reconstruction, SER on and off, opacity micromaps or not. Ray cones, transparent shadows, the decal mode, transparency
+// peeling and specular energy compensation (a declaration) do change the hit stages or the layout: they stay in the key.
+// A flag added here that does change a declaration is refused loudly by RenderingDevice ("All shaders must have
+// compatible layouts") when the hit group is added to the pipeline.
+static constexpr uint32_t RT_RAYGEN_ONLY_FLAGS = SceneShaderRaytracing::RT_FLAG_DLSS_RR_ENABLED | SceneShaderRaytracing::RT_FLAG_NRD_ENABLED |
+		SceneShaderRaytracing::RT_FLAG_DLSS_RR_SPECULAR_MOTION_VECTORS | SceneShaderRaytracing::RT_FLAG_NRD_DIRECT_LIGHT |
+		SceneShaderRaytracing::RT_FLAG_SER_ENABLED | SceneShaderRaytracing::RT_FLAG_OPACITY_MICROMAPS | SceneShaderRaytracing::RT_FLAG_SHADOW_GROUPS |
+		SceneShaderRaytracing::RT_FLAG_RAY_QUERY_SHADOWS_ENABLED | SceneShaderRaytracing::RT_FLAG_RASTER_BRDF;
+
 // Procedural hit groups only: their shaders share the intersection shader's hit attributes.
 static constexpr const char *INTERSECTION_SHADERS_DEFINE = "#define ENABLE_INTERSECTION_SHADERS\n";
 
@@ -448,6 +463,7 @@ struct SceneShaderRaytracing::PipelineBuildTask {
 
 	RID base_shader;
 	Vector<RD::PipelineSpecializationConstant> spec_constants;
+	// VariantCompileContext::hit_group_base_sources / hit_group_base_key: shared by the variants with the same hit stages.
 	Vector<String> base_sources;
 	String base_sources_key;
 	// Compiled from base_sources by the worker, only when a hit group misses the cache.
@@ -1501,13 +1517,17 @@ Vector<uint8_t> SceneShaderRaytracing::_compile_compute_binary(const String &p_s
 
 // Per-rt_flags base SPIR-V + HG templates (immutable cache for worker tasks).
 
-bool SceneShaderRaytracing::_build_variant_compile_context(uint32_t p_rt_flags, VariantCompileContext &r_ctx) {
-	ERR_FAIL_COND_V(!raygen_shader_version.is_valid(), false);
+uint32_t SceneShaderRaytracing::_hit_stage_flags(uint32_t p_rt_flags) {
+	return p_rt_flags & ~RT_RAYGEN_ONLY_FLAGS;
+}
+
+Vector<String> SceneShaderRaytracing::_variant_stage_sources(uint32_t p_rt_flags, bool p_layout_stub) {
+	ERR_FAIL_COND_V(!raygen_shader_version.is_valid(), Vector<String>());
 
 	int variant = (int)_raygen_variant_from_rt_flags(p_rt_flags);
 
 	Vector<String> sources = raygen_shader.version_build_variant_stage_sources(raygen_shader_version, variant);
-	ERR_FAIL_COND_V(sources.is_empty(), false);
+	ERR_FAIL_COND_V(sources.is_empty(), Vector<String>());
 
 	auto inject_define = [](Vector<String> &p_sources, const String &p_define) {
 		for (int i = 0; i < p_sources.size(); i++) {
@@ -1541,8 +1561,7 @@ bool SceneShaderRaytracing::_build_variant_compile_context(uint32_t p_rt_flags, 
 		inject_define(sources, "#define RT_RASTER_BRDF\n");
 	}
 	// rendering/pathtracing/nrd_direct_light_denoising: the raygen stage only (it shades; hit shaders only evaluate the
-	// material). Every hit group's binary carries the raygen, so this variant still compiles, caches and bakes hit groups
-	// of its own, as RT_RASTER_BRDF's does; the shader baker bakes the one the export preset's setting picks.
+	// material). Its hit groups are the other NRD variants' (RT_RAYGEN_ONLY_FLAGS).
 	if ((p_rt_flags & RT_FLAG_NRD_DIRECT_LIGHT) && (p_rt_flags & RT_FLAG_NRD_ENABLED) && sources.size() > RD::SHADER_STAGE_RAYGEN) {
 		Vector<String> raygen_source = { sources[RD::SHADER_STAGE_RAYGEN] };
 		inject_define(raygen_source, "#define NRD_DIRECT_LIGHT\n");
@@ -1570,15 +1589,38 @@ bool SceneShaderRaytracing::_build_variant_compile_context(uint32_t p_rt_flags, 
 		inject_define(sources, "#define TEXTURE_STREAMING\n");
 	}
 
-	// Procedural templates come from intersection stage; strip from base HG0 path.
-	String intersection_source_template;
-	if (sources.size() > RD::SHADER_STAGE_INTERSECTION) {
-		intersection_source_template = sources[RD::SHADER_STAGE_INTERSECTION];
-		sources.write[RD::SHADER_STAGE_INTERSECTION] = String();
+	// RT_LAYOUT_STUB: the ray generation and miss stages keep their declarations and drop their code (scene_raytracing_raygen.glsl).
+	// A custom hit group's binary holds them for its layout only: RenderingDevice requires every shader of a ray tracing
+	// pipeline to have the pipeline's uniform set formats, stage masks included (raytracing_pipeline_create()), and D3D12
+	// numbers a binary's registers from its own declarations (RenderingShaderContainerD3D12::_assign_dxil_slots()); the
+	// pipeline only takes its hit stages (D3D12 collections, Vulkan libraries). Translated, the real ones cost about 0.47 s
+	// of Mesa per hit group (D3D12, COLD-LOAD-2-STUDY).
+	if (p_layout_stub) {
+		for (const int stage : { int(RD::SHADER_STAGE_RAYGEN), int(RD::SHADER_STAGE_MISS) }) {
+			if (stage < sources.size() && !sources[stage].is_empty()) {
+				sources.write[stage] = _insert_after_version(sources[stage], "#define RT_LAYOUT_STUB\n");
+			}
+		}
 	}
+	return sources;
+}
 
-	String base_ch_src = sources[RD::SHADER_STAGE_CLOSEST_HIT];
-	String base_ah_src = sources[RD::SHADER_STAGE_ANY_HIT];
+bool SceneShaderRaytracing::_build_variant_compile_context(uint32_t p_rt_flags, VariantCompileContext &r_ctx) {
+	Vector<String> sources = _variant_stage_sources(p_rt_flags, false);
+	ERR_FAIL_COND_V(sources.size() <= RD::SHADER_STAGE_INTERSECTION, false);
+	// Hit group 0 is a triangle hit group: the base has no intersection stage (the procedural templates are below).
+	sources.write[RD::SHADER_STAGE_INTERSECTION] = String();
+	r_ctx.base_sources = sources;
+	r_ctx.base_sources_key = _binary_cache_key("RT_base", sources);
+
+	// The custom hit groups', from the hit stage options alone: one binary for every variant that has the same ones.
+	Vector<String> hit_sources = _variant_stage_sources(_hit_stage_flags(p_rt_flags), true);
+	ERR_FAIL_COND_V(hit_sources.size() <= RD::SHADER_STAGE_INTERSECTION, false);
+	const String intersection_source_template = hit_sources[RD::SHADER_STAGE_INTERSECTION];
+	hit_sources.write[RD::SHADER_STAGE_INTERSECTION] = String();
+
+	String base_ch_src = hit_sources[RD::SHADER_STAGE_CLOSEST_HIT];
+	String base_ah_src = hit_sources[RD::SHADER_STAGE_ANY_HIT];
 	ERR_FAIL_COND_V(base_ch_src.is_empty(), false);
 	ERR_FAIL_COND_V(base_ah_src.is_empty(), false);
 
@@ -1597,9 +1639,8 @@ bool SceneShaderRaytracing::_build_variant_compile_context(uint32_t p_rt_flags, 
 		}
 	}
 
-	// Full base stages; CH/AH SPIR-V is HG0 default; RG+miss duplicated into each HG bytecode.
-	r_ctx.base_sources = sources;
-	r_ctx.base_sources_key = _binary_cache_key("RT_base", sources);
+	r_ctx.hit_group_base_sources = hit_sources;
+	r_ctx.hit_group_base_key = _binary_cache_key("RT_hg_base", hit_sources);
 	return true;
 }
 
@@ -1762,6 +1803,8 @@ void SceneShaderRaytracing::get_material_bake_programs(RID p_material, bool p_si
 	}
 	entry.name = material_storage->material_get_shader_path_hint(p_material);
 
+	// The variants that differ only by RT_RAYGEN_ONLY_FLAGS share one hit group binary: baked once.
+	HashSet<String> baked_keys;
 	for (const uint32_t flags : _bake_rt_flags(p_simple_shadows, p_ser, p_specular_motion_vectors, p_transparent_shadows, p_decal_mode, p_transparency_peeling, p_shadow_groups, p_specular_energy_compensation, p_raster_brdf, p_nrd_direct_light, p_ray_cones)) {
 		if (!bake_compile_contexts.has(flags)) {
 			VariantCompileContext ctx;
@@ -1774,20 +1817,24 @@ void SceneShaderRaytracing::get_material_bake_programs(RID p_material, bool p_si
 		const bool custom_any_hit = _custom_any_hit(entry, flags);
 		const HitGroupSources sources = _hit_group_sources(entry, ctx, custom_any_hit);
 
-		// The stages _compile_hit_group() puts in the binary, in its order: the base's ray generation and miss stages,
-		// the closest hit, the any-hit (the slot's own, else the base's), the intersection.
+		// The stages _compile_hit_group() puts in the binary, in its order: the layout stub's ray generation and miss
+		// stages, the closest hit, the any-hit (the slot's own, else the base's), the intersection.
 		BakeProgram program;
-		program.cache_key = _binary_cache_key("RT_hg", { sources.ch, sources.ah, sources.is }, ctx.base_sources_key);
+		program.cache_key = _binary_cache_key("RT_hg", { sources.ch, sources.ah, sources.is }, ctx.hit_group_base_key);
+		if (baked_keys.has(program.cache_key)) {
+			continue;
+		}
+		baked_keys.insert(program.cache_key);
 		program.name = entry.name.is_empty() ? String("RT_hg") : entry.name;
-		for (int i = 0; i < ctx.base_sources.size(); i++) {
-			if ((i == RD::SHADER_STAGE_RAYGEN || i == RD::SHADER_STAGE_MISS) && !ctx.base_sources[i].strip_edges().is_empty()) {
+		for (int i = 0; i < ctx.hit_group_base_sources.size(); i++) {
+			if ((i == RD::SHADER_STAGE_RAYGEN || i == RD::SHADER_STAGE_MISS) && !ctx.hit_group_base_sources[i].strip_edges().is_empty()) {
 				program.stages.push_back(RD::ShaderStage(i));
-				program.sources.push_back(ctx.base_sources[i]);
+				program.sources.push_back(ctx.hit_group_base_sources[i]);
 			}
 		}
 		program.stages.push_back(RD::SHADER_STAGE_CLOSEST_HIT);
 		program.sources.push_back(sources.ch);
-		const String &any_hit = custom_any_hit ? sources.ah : (entry.is_procedural ? ctx.ah_procedural_src : ctx.base_sources[RD::SHADER_STAGE_ANY_HIT]);
+		const String &any_hit = custom_any_hit ? sources.ah : (entry.is_procedural ? ctx.ah_procedural_src : ctx.hit_group_base_sources[RD::SHADER_STAGE_ANY_HIT]);
 		if (!any_hit.strip_edges().is_empty()) {
 			program.stages.push_back(RD::SHADER_STAGE_ANY_HIT);
 			program.sources.push_back(any_hit);
@@ -1959,8 +2006,8 @@ SceneShaderRaytracing::PipelineBuildTask *SceneShaderRaytracing::_make_pipeline_
 	task->base_group_count = p_bundle.pipeline_group_count;
 	task->base_empty_group = p_bundle.empty_group;
 	task->base_sbt_capacity = p_bundle.hit_sbt_capacity;
-	task->base_sources = ctx.base_sources;
-	task->base_sources_key = ctx.base_sources_key;
+	task->base_sources = ctx.hit_group_base_sources;
+	task->base_sources_key = ctx.hit_group_base_key;
 	task->base_any_hit_procedural_src = ctx.ah_procedural_src;
 	{
 		RD::PipelineSpecializationConstant sc;
@@ -2147,7 +2194,8 @@ void SceneShaderRaytracing::_load_hit_group_from_cache(uint32_t p_index, Pipelin
 	sources.push_back(si.ch_src);
 	sources.push_back(si.ah_src);
 	sources.push_back(si.is_src);
-	// The base's sources too: the binary holds its ray generation and miss stages (and its any-hit without one here).
+	// The hit group base's key too: the binary holds the layout stub's ray generation and miss stages (and the default
+	// any-hit without one here), shared by every variant with the same hit stage options.
 	si.cache_key = _binary_cache_key("RT_hg", sources, p_task->base_sources_key);
 	si.binary = _binary_cache_load(si.cache_key);
 }
@@ -2279,7 +2327,7 @@ void SceneShaderRaytracing::_build_pipeline_worker(PipelineBuildTask *p_task) {
 	uint64_t base_usec = 0;
 	uint64_t hit_groups_usec = 0;
 	if (!p_task->compile_indices.is_empty() && !check_abort()) {
-		// The variant's ray generation and miss stages, which every hit group's binary holds.
+		// The layout stub's ray generation and miss stages, which every hit group's binary holds (VariantCompileContext).
 		const Vector<RD::ShaderStageSPIRVData> base_stages = ShaderRD::compile_stages(p_task->base_sources, {});
 		base_usec = OS::get_singleton()->get_ticks_usec() - batch_begin;
 		for (const RD::ShaderStageSPIRVData &sd : base_stages) {

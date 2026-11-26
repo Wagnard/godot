@@ -507,7 +507,7 @@ public:
 	bool usable = false;
 	HashMap<SourceHash128, uint32_t, SourceHash128Hasher> source_hash_to_slot;
 
-	// One RD RT pipeline variant (rt_flags key). Owns base + per-slot HG shaders (RG+miss baked in per HG).
+	// One RD RT pipeline variant (rt_flags key). Owns base + per-slot HG shaders (each with the layout stub's RG + miss).
 	struct PipelineBundle {
 		RID pipeline; // RD::free_rid on swap (deferred internally).
 		RID hit_sbt; // RD::free_rid on swap.
@@ -615,11 +615,16 @@ private:
 
 	// Eager/late stage assembly bits cached per variant for compile workers.
 	struct VariantCompileContext {
-		// The variant's stages (CH and AH: hit group 0's); their SPIR-V (RAYGEN + MISS, and the AH of hit groups without
-		// their own) is compiled by the first worker that misses the binary cache.
+		// The variant's own stages: its base shader (ray generation, miss, hit group 0's CH and AH).
 		Vector<String> base_sources;
-		String base_sources_key; // Their hash, part of every hit group's cache key.
-		String ch_template; // Template GLSL with /* RT_CUSTOM_* */ markers.
+		String base_sources_key;
+		// What a custom hit group's binary holds besides its own stages, from the variant's hit stage options alone
+		// (_hit_stage_flags()), so that every variant with the same ones shares it: the ray generation and miss stages
+		// reduced to their declarations (RT_LAYOUT_STUB), which give the binary the pipeline's layout, and the AH of hit
+		// groups without their own. Their SPIR-V is compiled by the first worker that misses the binary cache.
+		Vector<String> hit_group_base_sources;
+		String hit_group_base_key; // Their hash, part of every hit group's cache key.
+		String ch_template; // Template GLSL with /* RT_CUSTOM_* */ markers, from the hit stage options.
 		String ah_template;
 		String is_template; // With ENABLE_INTERSECTION_SHADERS.
 		// The base any-hit for procedural hit groups without their own: their hit attributes are the intersection
@@ -629,6 +634,12 @@ private:
 	HashMap<uint32_t, VariantCompileContext> variant_compile_contexts;
 	HashMap<uint32_t, VariantCompileContext> bake_compile_contexts; // The shader baker's, which create no bundle.
 
+	// The flags of a variant that its hit stages (closest hit, any-hit, intersection) depend on: the others change only its
+	// ray generation and miss stages (RT_RAYGEN_ONLY_FLAGS).
+	static uint32_t _hit_stage_flags(uint32_t p_rt_flags);
+	// A variant's stage sources, with the defines its flags inject; p_layout_stub: its ray generation and miss stages
+	// reduced to their declarations.
+	Vector<String> _variant_stage_sources(uint32_t p_rt_flags, bool p_layout_stub);
 	bool _build_variant_compile_context(uint32_t p_rt_flags, VariantCompileContext &r_ctx);
 	bool _ensure_variant_compile_context(uint32_t p_rt_flags);
 

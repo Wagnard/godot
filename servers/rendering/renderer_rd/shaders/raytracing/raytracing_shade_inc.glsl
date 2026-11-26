@@ -70,7 +70,7 @@ void apply_segment_fog(vec3 p_ray_origin, vec3 p_ray_dir, float segment_dist, in
 // NVIDIA, Streamline's ProgrammingGuideDLSS_RR.md, 4.1.8: "DLSS-RR uses Specular Motion Vectors to improve Image Quality of
 // Reflections during motion", a "Dense motion vector field for Reflections (Virtually Reflected Geometries)"; the specular
 // hit distance (4.1.9) is "Only needed if Specular Motion Vectors are not provided". In rt_velocity_image's convention.
-// Required bindings: motion_indices[], motion_transforms[] (the raygen declares them with this define).
+// Required bindings: motion_indices[], motion_transforms[] (the raygen declares them).
 
 /// The screen motion of a point from the previous frame, as the closest hit writes the velocity (write_primary_hit_velocity()).
 vec2 rt_motion_vector(vec3 p_pos, vec3 p_prev_pos) {

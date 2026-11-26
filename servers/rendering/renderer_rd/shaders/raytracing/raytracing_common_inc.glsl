@@ -82,24 +82,24 @@ void rt_primary_outputs_barrier() {
 	memoryBarrierImage();
 }
 
+// The denoisers' images are declared in every variant, whichever denoiser it writes for (RenderRaytracing binds a
+// placeholder to those it does not): every variant then has the same layout, and the hit groups, whose code does not
+// depend on the denoiser, are compiled once for all of them (SceneShaderRaytracing's RT_RAYGEN_ONLY_FLAGS). Only the
+// code that writes them is under DLSS_RR_ENABLED / NRD_ENABLED.
+
 // The guides of the primary surfaces: DLSS Ray Reconstruction's, which NRD (NRD_ENABLED) also takes: its normal and
 // roughness, and the albedos the diffuse and specular light were divided by (raytracing_nrd_composite.glsl).
-#if defined(DLSS_RR_ENABLED) || defined(NRD_ENABLED)
 layout(set = 0, binding = 9, rgba16f) RT_PRIMARY_OUTPUT uniform image2D dlss_rr_diffuse_albedo;
 layout(set = 0, binding = 10, rgba16f) RT_PRIMARY_OUTPUT uniform image2D dlss_rr_specular_albedo;
 layout(set = 0, binding = 11, rgba16f) RT_PRIMARY_OUTPUT uniform image2D dlss_rr_normal_roughness;
-#endif
 
-#ifdef DLSS_RR_ENABLED
 layout(set = 0, binding = 12, r16f) RT_PRIMARY_OUTPUT uniform image2D dlss_rr_specular_hit_dist;
-// NDC depth for Ray Reconstruction (RenderRaytracing::dlss_rr_get_depth()), written by the raygen.
-layout(set = 0, binding = 39, r32f) uniform image2D dlss_rr_depth;
-#ifdef DLSS_RR_SPECULAR_MOTION_VECTORS
+// The primary hit's depth guide, written by the raygen: NDC depth for Ray Reconstruction (RenderRaytracing::
+// dlss_rr_get_depth()); NRD's IN_VIEWZ in the NRD variants, the view depth, NRD_SKY_VIEW_Z where the camera ray missed.
+layout(set = 0, binding = 39, r32f) uniform image2D rt_guide_depth_image;
 // Ray Reconstruction's specular motion vectors (rendering/pathtracing/specular_motion_vectors), in rt_velocity_image's
 // convention: written by the raygen (rt_specular_motion_vector()) and, where the camera ray misses, by the miss shader.
 layout(set = 0, binding = 44, rg16f) RT_PRIMARY_OUTPUT uniform image2D dlss_rr_specular_motion_vectors;
-#endif
-#endif
 
 // Binding 14 is reserved for GlobalShaderUniformData (declared above).
 // Samplers occupy 16-27 (see raytracing_samplers_inc.glsl); velocity sits at
