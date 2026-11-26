@@ -2358,7 +2358,10 @@ Error EditorExportPlatform::save_pack(const Ref<EditorExportPreset> &p_preset, b
 	Error err = export_project_files(p_preset, p_debug, p_save_func, p_remove_func, &pd, _pack_add_shared_object);
 
 	if (err != OK) {
-		add_message(EXPORT_MESSAGE_ERROR, TTR("Save PCK"), TTR("Failed to export project files."));
+		// ERR_SKIP: canceled by the user, not a failure (as save_zip()).
+		if (err != ERR_SKIP) {
+			add_message(EXPORT_MESSAGE_ERROR, TTR("Save PCK"), TTR("Failed to export project files."));
+		}
 		return err;
 	}
 

@@ -853,19 +853,15 @@ Error EditorExportPlatformWeb::_export_project(const Ref<EditorExportPreset> &p_
 	const String basepath = dest.path_join("tmp_js_export");
 	Error err = export_project(p_preset, true, basepath + ".html", p_debug_flags);
 	if (err != OK) {
-		// Export generates several files, clean them up on failure.
-		DirAccess::remove_file_or_error(basepath + ".html");
-		DirAccess::remove_file_or_error(basepath + ".offline.html");
-		DirAccess::remove_file_or_error(basepath + ".js");
-		DirAccess::remove_file_or_error(basepath + ".audio.worklet.js");
-		DirAccess::remove_file_or_error(basepath + ".audio.position.worklet.js");
-		DirAccess::remove_file_or_error(basepath + ".service.worker.js");
-		DirAccess::remove_file_or_error(basepath + ".pck");
-		DirAccess::remove_file_or_error(basepath + ".png");
-		DirAccess::remove_file_or_error(basepath + ".side.wasm");
-		DirAccess::remove_file_or_error(basepath + ".wasm");
-		DirAccess::remove_file_or_error(basepath + ".icon.png");
-		DirAccess::remove_file_or_error(basepath + ".apple-touch-icon.png");
+		// Export generates several files, clean them up on failure. A failed or canceled export may not have created
+		// them all (the pack is saved first).
+		static const char *extensions[] = { ".html", ".offline.html", ".js", ".audio.worklet.js", ".audio.position.worklet.js", ".service.worker.js", ".pck", ".png", ".side.wasm", ".wasm", ".icon.png", ".apple-touch-icon.png" };
+		for (const char *extension : extensions) {
+			const String path = basepath + extension;
+			if (da->file_exists(path)) {
+				da->remove(path);
+			}
+		}
 	}
 	return err;
 }

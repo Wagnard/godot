@@ -2398,7 +2398,10 @@ Error EditorExportPlatformAndroid::run(const Ref<EditorExportPreset> &p_preset, 
 
 #define CLEANUP_AND_RETURN(m_err) \
 	{ \
-		DirAccess::remove_file_or_error(tmp_export_path); \
+		/* A failed or canceled export may not have created the APK. */ \
+		if (FileAccess::exists(tmp_export_path)) { \
+			DirAccess::remove_file_or_error(tmp_export_path); \
+		} \
 		if (FileAccess::exists(tmp_export_path + ".idsig")) { \
 			DirAccess::remove_file_or_error(tmp_export_path + ".idsig"); \
 		} \

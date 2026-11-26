@@ -3263,8 +3263,8 @@ Error EditorExportPlatformMacOS::run(const Ref<EditorExportPreset> &p_preset, in
 	}
 	Error err = export_project(p_preset, true, basepath + ".zip", p_debug_flags);
 	if (err != OK) {
-		DirAccess::remove_file_or_error(basepath + ".zip");
-		return err;
+		// A failed or canceled export may not have created the archive.
+		CLEANUP_AND_RETURN(err);
 	}
 
 	String cmd_args;

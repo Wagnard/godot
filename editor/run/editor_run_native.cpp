@@ -36,6 +36,7 @@
 #include "editor/export/editor_export_platform.h"
 #include "editor/settings/editor_settings.h"
 #include "editor/themes/editor_scale.h"
+#include "scene/main/scene_tree.h"
 
 void EditorRunNative::_notification(int p_what) {
 	switch (p_what) {
@@ -87,6 +88,20 @@ void EditorRunNative::_notification(int p_what) {
 void EditorRunNative::_confirm_run_native() {
 	run_confirmed = true;
 	resume_run_native();
+}
+
+// The Remote Deploy menu (a click, its shortcuts), the architecture warning and the main scene picker run their handlers
+// inside the dispatch of an input event, and DisplayServer drops every input event that arrives while one is being
+// dispatched (`_dispatch_input_event()` on Windows and macOS): a deploy run from there showed the export's Cancel button,
+// but no click or key could reach it. The deploy starts at the next process frame instead, as
+// EditorFileSystem::_queue_refresh_filesystem() runs its scan actions. Not call_deferred(): ProgressDialog::add_task()
+// refuses tasks while the message queue is flushing. The debug adapter calls start_run_native() itself, from its process
+// notification, and still gets the deploy's error.
+void EditorRunNative::_start_run_native_next_frame(int p_id) {
+	const Callable run_callable = callable_mp(this, &EditorRunNative::start_run_native).bind(p_id);
+	if (!get_tree()->is_connected(SNAME("process_frame"), run_callable)) {
+		get_tree()->connect(SNAME("process_frame"), run_callable, CONNECT_ONE_SHOT);
+	}
 }
 
 Error EditorRunNative::start_run_native(int p_id) {
@@ -151,7 +166,8 @@ Error EditorRunNative::start_run_native(int p_id) {
 	eep->clear_messages();
 	Error err = eep->run(preset, idx, flags);
 	result_dialog_log->clear();
-	if (eep->fill_log_messages(result_dialog_log, err)) {
+	// ERR_SKIP: canceled by the user, as ProjectExportDialog treats it.
+	if (err != ERR_SKIP && eep->fill_log_messages(result_dialog_log, err)) {
 		if (eep->get_worst_message_type() >= EditorExportPlatform::EXPORT_MESSAGE_ERROR) {
 			result_dialog->popup_centered_ratio(0.5);
 		}
@@ -160,7 +176,7 @@ Error EditorRunNative::start_run_native(int p_id) {
 }
 
 void EditorRunNative::resume_run_native() {
-	start_run_native(resume_id);
+	_start_run_native_next_frame(resume_id);
 }
 
 void EditorRunNative::_bind_methods() {
@@ -182,7 +198,7 @@ EditorRunNative::EditorRunNative() {
 	remote_debug->set_flat(false);
 	remote_debug->set_theme_type_variation("RunBarButton");
 	remote_debug->get_popup()->set_auto_translate_mode(AUTO_TRANSLATE_MODE_DISABLED);
-	remote_debug->get_popup()->connect(SceneStringName(id_pressed), callable_mp(this, &EditorRunNative::start_run_native));
+	remote_debug->get_popup()->connect(SceneStringName(id_pressed), callable_mp(this, &EditorRunNative::_start_run_native_next_frame));
 	remote_debug->set_tooltip_text(TTRC("Remote Deploy"));
 	remote_debug->hide();
 
