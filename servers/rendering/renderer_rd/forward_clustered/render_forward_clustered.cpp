@@ -1020,10 +1020,15 @@ bool RenderForwardClustered::_prepare_after_temporal_resolve(const RenderDataRD 
 	// The resolved image has no jitter: neither may what is drawn over it, or it would shake by a fraction of an internal
 	// pixel every frame. Its screen and viewport sizes are the resolve's.
 	RenderSceneDataRD *scene_data = p_render_data->scene_data;
+	// Its samplers are the default ones (_render_after_temporal_resolve()): no mipmap bias for the texture streaming
+	// feedback either.
 	const Vector2 jitter = scene_data->taa_jitter;
+	const float mipmap_bias = scene_data->texture_mipmap_bias;
 	scene_data->taa_jitter = Vector2();
+	scene_data->texture_mipmap_bias = 0.0f;
 	after_temporal_resolve.uniform_buffer_index = _setup_environment(p_render_data, false, after_temporal_resolve.size, after_temporal_resolve.size, Color(), false, false);
 	scene_data->taa_jitter = jitter;
+	scene_data->texture_mipmap_bias = mipmap_bias;
 
 	after_temporal_resolve.render_buffers = rb.ptr();
 	after_temporal_resolve.from = p_from;

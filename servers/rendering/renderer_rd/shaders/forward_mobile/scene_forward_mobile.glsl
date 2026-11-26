@@ -1381,6 +1381,8 @@ void main() {
 			// Calculate the mip level needed for the current fragment based on UV derivatives.
 			float footprint_sq = streaming_footprint_sq(uv_ddx, uv_ddy);
 #endif
+			// The level the view's samplers read: theirs carry the mipmap bias.
+			footprint_sq = streaming_footprint_sq_biased(footprint_sq);
 
 			// Bitwise NOT inverts the ordering so that smaller footprint_sq (higher quality)
 			// maps to larger uint values, allowing atomicMax with a 0-cleared buffer.

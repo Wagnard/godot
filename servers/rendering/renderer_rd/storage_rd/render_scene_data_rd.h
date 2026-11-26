@@ -89,6 +89,10 @@ public:
 
 	uint32_t frame_number = 0; ///< Monotonic frame counter, unlike taa_frame_count which wraps with the jitter cycle.
 
+	/// The mipmap bias of the samplers the pass reads material textures with (RenderSceneBuffersRD::get_samplers(), 0 for
+	/// the default ones): texture streaming's feedback adds it to the UV footprint, raster and path tracing alike.
+	float texture_mipmap_bias = 0.0f;
+
 	virtual Transform3D get_cam_transform() const override;
 	virtual Projection get_cam_projection() const override;
 
@@ -172,7 +176,7 @@ private:
 		float ambient_light_color_energy[4];
 
 		float reflection_color[3];
-		uint32_t pad;
+		float texture_mipmap_bias; // Read only with texture streaming (scene_data_inc.glsl), padding otherwise.
 
 		float ambient_color_sky_mix;
 		float fog_density;

@@ -1494,6 +1494,8 @@ void RendererSceneRenderRD::render_scene(const Ref<RenderSceneBuffers> &p_render
 		scene_data.frame_number = uint32_t(RSG::rasterizer->get_frame_number());
 		scene_data.main_cam_transform = p_camera_data->main_transform;
 		scene_data.flip_y = !p_reflection_probe.is_valid();
+		// The samplers the color passes bind: the view's, the default ones (no bias) in a reflection probe.
+		scene_data.texture_mipmap_bias = p_reflection_probe.is_valid() ? 0.0f : rb->get_samplers().mipmap_bias;
 
 		scene_data.view_count = p_camera_data->view_count;
 		for (uint32_t v = 0; v < p_camera_data->view_count; v++) {

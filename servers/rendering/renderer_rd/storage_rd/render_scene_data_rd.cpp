@@ -137,6 +137,7 @@ void RenderSceneDataRD::update_ubo(RID p_uniform_buffer, RSE::ViewportDebugDraw 
 	ubo.screen_pixel_size[1] = screen_pixel_size.y;
 
 	ubo.frame_number = frame_number;
+	ubo.texture_mipmap_bias = texture_mipmap_bias;
 
 	ubo.shadow_atlas_pixel_size[0] = shadow_atlas_pixel_size.x;
 	ubo.shadow_atlas_pixel_size[1] = shadow_atlas_pixel_size.y;

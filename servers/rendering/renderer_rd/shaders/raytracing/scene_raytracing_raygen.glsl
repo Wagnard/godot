@@ -950,7 +950,8 @@ void rt_streaming_feedback(GeometryData p_geom, float p_footprint_sq) {
 		return;
 	}
 	const uint slot = p_geom.material_feedback - 1u;
-	const uint required = ~floatBitsToUint(p_footprint_sq);
+	// The level the view's samplers read (bindings 16-27 are raster's, with the mipmap bias), as raster's feedback.
+	const uint required = ~floatBitsToUint(streaming_footprint_sq_biased(p_footprint_sq));
 	// A plain read first: most hits repeat a value already stored, and atomics on a few hot slots serialize.
 	if (rt_material_feedback.data[slot] < required) {
 		atomicMax(rt_material_feedback.data[slot], required);

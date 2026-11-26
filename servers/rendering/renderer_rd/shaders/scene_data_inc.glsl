@@ -65,7 +65,13 @@ struct SceneData {
 	vec4 ambient_light_color_energy;
 
 	vec3 reflection_color;
+#ifdef TEXTURE_STREAMING
+	// The mipmap bias of the samplers the material textures are read with (RenderSceneDataRD::texture_mipmap_bias): the
+	// texture streaming feedback requests the level they read (scene_forward_streaming_inc.glsl).
+	float texture_mipmap_bias;
+#else
 	uint pad;
+#endif
 
 	float ambient_color_sky_mix;
 	float fog_density;
