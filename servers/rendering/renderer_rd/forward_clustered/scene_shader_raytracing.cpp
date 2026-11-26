@@ -658,27 +658,37 @@ static String _depth_buffer_reads(const String &p_code) {
 	return result;
 }
 
-// Ray tracing stages read mip 0 with texture(): its calls in fragment code become textureGrad() with the screen
-// derivatives of the coordinates (dFdx() is defined by the hit shaders). Shadow and other samplers are left as they are.
+// Ray tracing stages have no implicit derivatives (implicit level of detail sampling is defined for the Fragment execution
+// model and those with workgroups only: SPV_KHR_compute_shader_derivatives), so texture() and textureProj() read mip 0
+// there. texture() calls in fragment code become textureGrad() with the screen derivatives of the coordinates (dFdx() is
+// defined by the hit shaders), and textureProj() on 2D samplers becomes textureProjGrad() with the derivatives of the projected
+// coordinates (GLSL 4.60 section 8.9.2: textureProjGrad()'s derivatives "are assumed to be already projected"),
+// rt_texture_proj_coord() (raytracing_custom_globals_inc.glsl). Shadow and other samplers are left as they are.
 static String _texture_calls_with_gradients(const String &p_code) {
+	static const String texture_call = "texture(";
+	static const String proj_call = "textureProj(";
 	String result;
 	int from = 0;
 	while (true) {
-		int start = p_code.find("texture(", from);
+		const int texture_start = p_code.find(texture_call, from);
+		const int proj_start = p_code.find(proj_call, from);
+		const bool proj = proj_start >= 0 && (texture_start < 0 || proj_start < texture_start);
+		const int start = proj ? proj_start : texture_start;
+		const int call_length = proj ? proj_call.length() : texture_call.length();
 		if (start < 0) {
 			result += p_code.substr(from);
 			break;
 		}
 		const char32_t before = start > 0 ? p_code[start - 1] : U' ';
 		if (is_ascii_identifier_char(before)) {
-			result += p_code.substr(from, start + 8 - from);
-			from = start + 8;
+			result += p_code.substr(from, start + call_length - from);
+			from = start + call_length;
 			continue;
 		}
 		// Split the arguments at the top level.
 		Vector<String> args;
 		int depth = 0;
-		int arg_begin = start + 8;
+		int arg_begin = start + call_length;
 		int i = arg_begin;
 		for (; i < p_code.length(); i++) {
 			const char32_t c = p_code[i];
@@ -702,10 +712,12 @@ static String _texture_calls_with_gradients(const String &p_code) {
 
 		String grad_swizzle;
 		bool supported = args.size() == 2 || args.size() == 3;
-		if (args[0].begins_with("sampler2DArray(") || args[0].begins_with("usampler2DArray(") || args[0].begins_with("isampler2DArray(")) {
+		const bool sampler_2d = args[0].begins_with("sampler2D(") || args[0].begins_with("usampler2D(") || args[0].begins_with("isampler2D(");
+		if (proj) {
+			supported = supported && sampler_2d;
+		} else if (args[0].begins_with("sampler2DArray(") || args[0].begins_with("usampler2DArray(") || args[0].begins_with("isampler2DArray(")) {
 			grad_swizzle = ".xy";
-		} else if (args[0].begins_with("sampler2D(") || args[0].begins_with("usampler2D(") || args[0].begins_with("isampler2D(") ||
-				args[0].begins_with("sampler3D(") || args[0].begins_with("samplerCube(")) {
+		} else if (sampler_2d || args[0].begins_with("sampler3D(") || args[0].begins_with("samplerCube(")) {
 			grad_swizzle = "";
 		} else {
 			supported = false;
@@ -717,7 +729,12 @@ static String _texture_calls_with_gradients(const String &p_code) {
 			const String coord = _texture_calls_with_gradients(args[1]);
 			// A bias scales the footprint the way it offsets the LOD.
 			const String scale = args.size() == 3 ? " * exp2(" + _texture_calls_with_gradients(args[2]) + ")" : String();
-			result += "textureGrad(" + _texture_calls_with_gradients(args[0]) + ", " + coord + ", dFdx(" + coord + ")" + grad_swizzle + scale + ", dFdy(" + coord + ")" + grad_swizzle + scale + ")";
+			if (proj) {
+				const String projected = "rt_texture_proj_coord(" + coord + ")";
+				result += "textureProjGrad(" + _texture_calls_with_gradients(args[0]) + ", " + coord + ", dFdx(" + projected + ")" + scale + ", dFdy(" + projected + ")" + scale + ")";
+			} else {
+				result += "textureGrad(" + _texture_calls_with_gradients(args[0]) + ", " + coord + ", dFdx(" + coord + ")" + grad_swizzle + scale + ", dFdy(" + coord + ")" + grad_swizzle + scale + ")";
+			}
 		}
 		from = i + 1;
 	}
@@ -2231,6 +2248,14 @@ void SceneShaderRaytracing::_compile_hit_group(uint32_t p_index, PipelineBuildTa
 	String error;
 	const uint64_t glslang_begin = OS::get_singleton()->get_ticks_usec();
 
+	// GODOT_RT_TEST_FAIL_HIT_GROUP=<text>: a hit group whose closest hit source contains <text> fails as a compile error
+	// would (the failedhgtest bench; no construct of the shading language fails in the hit stages only any more).
+	static const String test_fail_marker = OS::get_singleton()->get_environment("GODOT_RT_TEST_FAIL_HIT_GROUP");
+	if (!test_fail_marker.is_empty() && si.ch_src.contains(test_fail_marker)) {
+		print_line(vformat("RT: hit group %d fails to compile on purpose (GODOT_RT_TEST_FAIL_HIT_GROUP).", i));
+		return;
+	}
+
 	Vector<RD::ShaderStageSPIRVData> custom_stages = p_task->base_non_hit_stages;
 	{
 		RD::ShaderStageSPIRVData sd;
@@ -2964,6 +2989,10 @@ void SceneShaderRaytracing::init(const String p_defines) {
 		actions.renames["FRONT_FACING"] = "rt_front_facing";
 		actions.renames["NORMAL_MAP"] = "normal_map";
 		actions.renames["NORMAL_MAP_DEPTH"] = "normal_map_depth";
+		// Written by fragment() / vertex() for raster only (bent normals, first-person depth clipping): globals the path
+		// tracer ignores (raytracing_custom_globals_inc.glsl), so such shaders still compile in the hit stages.
+		actions.renames["BENT_NORMAL_MAP"] = "rt_bent_normal_map";
+		actions.renames["Z_CLIP_SCALE"] = "rt_z_clip_scale";
 		actions.renames["ALBEDO"] = "albedo";
 		actions.renames["ALPHA"] = "alpha";
 		actions.renames["PREMUL_ALPHA_FACTOR"] = "premul_alpha";
@@ -3018,7 +3047,10 @@ void SceneShaderRaytracing::init(const String p_defines) {
 		actions.renames["CAMERA_VISIBLE_LAYERS"] = "scene_data_block.data.camera_visible_layers";
 		actions.renames["NODE_POSITION_VIEW"] = "(read_view_matrix * read_model_matrix)[3].xyz";
 
-		actions.renames["VIEW_INDEX"] = "ViewIndex";
+		// A traced view is one view, as raster's ViewIndex without USE_MULTIVIEW (`#define ViewIndex 0`); the hit stages
+		// declare no ViewIndex, so a shader reading VIEW_INDEX failed every hit group.
+		actions.renames["VIEW_INDEX"] = "0";
+		actions.renames["IS_MULTIVIEW"] = "false";
 		actions.renames["VIEW_MONO_LEFT"] = "0";
 		actions.renames["VIEW_RIGHT"] = "1";
 		actions.renames["EYE_OFFSET"] = "eye_offset";
@@ -3028,6 +3060,10 @@ void SceneShaderRaytracing::init(const String p_defines) {
 		actions.renames["SPECULAR_AMOUNT"] = "specular_amount";
 		actions.renames["LIGHT_COLOR"] = "light_color";
 		actions.renames["LIGHT_IS_DIRECTIONAL"] = "is_directional";
+		// The path tracer has no area lights: the values raster's light() gets for a punctual light.
+		actions.renames["LIGHT_IS_AREA"] = "false";
+		actions.renames["LIGHT_AREA_DIFFUSE_MULTIPLIER"] = "vec3(1.0)";
+		actions.renames["LIGHT_AREA_SPECULAR_MULTIPLIER"] = "vec3(1.0)";
 		actions.renames["LIGHT"] = "light";
 		actions.renames["ATTENUATION"] = "attenuation";
 		actions.renames["DIFFUSE_LIGHT"] = "diffuse_light";

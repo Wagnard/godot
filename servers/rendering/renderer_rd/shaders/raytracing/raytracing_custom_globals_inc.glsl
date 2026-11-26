@@ -110,6 +110,18 @@ vec2 rt_screen_uv = vec2(0.0);
 vec4 rt_frag_coord = vec4(0.0);
 vec2 rt_point_coord = vec2(0.5); // A ray hits no point sprite: its center.
 vec3 eye_offset = vec3(0.0); // One view.
+// textureProj() on a 2D sampler becomes textureProjGrad() with the derivatives of these projected coordinates
+// (_texture_calls_with_gradients(), scene_shader_raytracing.cpp).
+vec2 rt_texture_proj_coord(vec3 p_coord) {
+	return p_coord.xy / p_coord.z;
+}
+vec2 rt_texture_proj_coord(vec4 p_coord) {
+	return p_coord.xy / p_coord.w;
+}
+
+// Raster-only outputs a material may write (BENT_NORMAL_MAP, Z_CLIP_SCALE): kept so the code compiles, never read.
+vec3 rt_bent_normal_map = vec3(0.5, 0.5, 1.0);
+float rt_z_clip_scale = 1.0;
 float alpha_antialiasing_edge = 0.0;
 vec2 alpha_texture_coordinate = vec2(0.0);
 
