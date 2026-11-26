@@ -218,6 +218,27 @@ vec2 rt_specular_motion_vector(HitRecord r, float p_roughness, vec3 p_ray_origin
 #endif // DLSS_RR_SPECULAR_MOTION_VECTORS
 
 // ============================================================================
+// QUALITY PRESET
+// ============================================================================
+// rendering/pathtracing/quality_preset Performance (RT_PARAM_FLAG_PERFORMANCE): without hardware opacity micromaps, every
+// cut-out a ray crosses (foliage) runs an any-hit shader. Performance traces the rays of a path that has left a diffuse
+// or rough bounce, and the shadow rays of the hits they reach, with gl_RayFlagsOpaqueEXT (DXR RAY_FLAG_FORCE_OPAQUE): no
+// any-hit shader runs, cut-outs block them whole. The camera's rays, near-mirror reflections (singular paths) and the
+// shadows of the surfaces they reach keep their cut-outs. AMD, "Radeon Raytracing Analyzer 1.3", "Reduce number of
+// any-hit shader invocations": RAY_FLAG_FORCE_OPAQUE on all but the primary ray; NVIDIA, "Best Practices for Using NVIDIA
+// RTX Ray Tracing (Updated)": opaque wherever possible. pt-perf-preset study: forest, emulated RTX 30, -30 % Pathtracer.
+
+bool rt_performance_preset() {
+	return (uint(get_rt_param(RT_PARAM_FLAGS)) & RT_PARAM_FLAG_PERFORMANCE) != 0u;
+}
+
+/// The flags Performance adds to the rays of a path whose bounce flags are p_packed: its next ray, and the shadow rays of
+/// the hit it reached.
+uint rt_performance_ray_flags(uint p_packed) {
+	return rt_performance_preset() && !is_singular_path(p_packed) ? gl_RayFlagsOpaqueEXT : 0u;
+}
+
+// ============================================================================
 // SHADE AND BOUNCE
 // ============================================================================
 
@@ -408,6 +429,8 @@ bool shade_and_bounce(inout PathState ps, HitRecord r, vec3 p_ray_origin, vec3 p
 	// =================================================================
 	// NEE: Next Event Estimation (direct light sampling)
 	// =================================================================
+	// The shadow rays of a hit a non-singular path reached: opaque with the Performance preset (rt_performance_ray_flags()).
+	const uint shadow_ray_flags = rt_performance_ray_flags(ps.packed_bounces_flags);
 	uint rt_light_count = uint(get_rt_param(RT_PARAM_LIGHT_COUNT));
 	if (rt_light_count > 0u) {
 		vec3 hit_pos_offset = offset_ray_origin(hit_pos, r.geometry_normal);
@@ -432,10 +455,10 @@ bool shade_and_bounce(inout PathState ps, HitRecord r, vec3 p_ray_origin, vec3 p
 		vec4 direct_shadow_ray;
 #endif
 		vec3 direct_light = lights_evaluate_direct_lighting(
-				hit_pos_offset, hit_pos_back, r.geometry_normal, N, V, brdf_mat, r.backlight, (r.flags & HIT_FLAG_SPECULAR_DISABLED) != 0u, ps.rng_state, is_indirect, rt_light_count, geometries[r.geometry_idx].layer_mask RT_SHADOW_RECEIVER_OF(r.geometry_idx), nrd_sun, direct_specular NRD_SHADOW_RAY_ARG_OF(direct_shadow_ray));
+				hit_pos_offset, hit_pos_back, r.geometry_normal, N, V, brdf_mat, r.backlight, (r.flags & HIT_FLAG_SPECULAR_DISABLED) != 0u, ps.rng_state, is_indirect, rt_light_count, geometries[r.geometry_idx].layer_mask, shadow_ray_flags RT_SHADOW_RECEIVER_OF(r.geometry_idx), nrd_sun, direct_specular NRD_SHADOW_RAY_ARG_OF(direct_shadow_ray));
 #else
 		vec3 direct_light = lights_evaluate_direct_lighting(
-				hit_pos_offset, hit_pos_back, r.geometry_normal, N, V, brdf_mat, r.backlight, (r.flags & HIT_FLAG_SPECULAR_DISABLED) != 0u, ps.rng_state, is_indirect, rt_light_count, geometries[r.geometry_idx].layer_mask RT_SHADOW_RECEIVER_OF(r.geometry_idx));
+				hit_pos_offset, hit_pos_back, r.geometry_normal, N, V, brdf_mat, r.backlight, (r.flags & HIT_FLAG_SPECULAR_DISABLED) != 0u, ps.rng_state, is_indirect, rt_light_count, geometries[r.geometry_idx].layer_mask, shadow_ray_flags RT_SHADOW_RECEIVER_OF(r.geometry_idx));
 #endif
 		ps.radiance += ps.throughput * direct_light * mix(1.0, r.ao, r.ao_light_affect);
 #ifdef NRD_ENABLED
@@ -481,6 +504,9 @@ bool shade_and_bounce(inout PathState ps, HitRecord r, vec3 p_ray_origin, vec3 p
 	// multiple importance sampling (raytracing_environment_inc.glsl)
 	// =================================================================
 	RTEnvSampling env_sampling = rt_env_sampling_setup(specular_probability, roughness, !is_unextended(ps.packed_bounces_flags), dot(N, V));
+	// The lobes it samples are diffuse or rough (RT_ENV_SAMPLING_MIN_ROUGHNESS): the BRDF rays it shares them with leave
+	// non-singular, so with the Performance preset they are opaque, and so are its visibility rays.
+	env_sampling.ray_flags = rt_performance_preset() ? gl_RayFlagsOpaqueEXT : 0u;
 	if (env_sampling.diffuse || env_sampling.specular) {
 #ifdef NRD_ENABLED
 		vec3 env_specular;
@@ -908,13 +934,15 @@ bool trace_path_ray(inout PathState ps, inout vec3 ray_origin, inout vec3 ray_di
 	// The camera ray leaves out what the raster pass draws over the traced image (RT_MASK_SECONDARY); every other ray sees
 	// it, the first ray of a front layer reflection included (it starts at bounce 0 too).
 	const uint mask = p_camera_ray ? RT_MASK_CAMERA : RT_MASK_BOUNCE;
+	// After a diffuse or rough bounce, opaque with the Performance preset (rt_performance_ray_flags()).
+	const uint ray_flags = RT_RAY_FLAGS | rt_performance_ray_flags(ps.packed_bounces_flags);
 #ifdef VISIBILITY_RANGE_DITHERED_FADE
 	// The camera's own ray: not the first ray of a probe (trace_probe_ray()), which has no pixel.
 	const bool fade_ray = p_camera_ray && get_total_bounces(ps.packed_bounces_flags) == 0u;
 #endif
 #ifdef USE_SER
 	hitObjectEXT hitObject;
-	hitObjectTraceRayEXT(hitObject, tlas, RT_RAY_FLAGS, mask, 0, 0, 0, ray_origin, PATH_RAY_TMIN, ray_dir, 10000.0, 0);
+	hitObjectTraceRayEXT(hitObject, tlas, ray_flags, mask, 0, 0, 0, ray_origin, PATH_RAY_TMIN, ray_dir, 10000.0, 0);
 #ifdef VISIBILITY_RANGE_DITHERED_FADE
 	if (fade_ray) {
 		// Read from the hit object, before any hit shader runs: a dropped hit costs its traversal only.
@@ -945,7 +973,7 @@ bool trace_path_ray(inout PathState ps, inout vec3 ray_origin, inout vec3 ray_di
 	HitRecord r = hit_unpack(payload);
 	r.hit_t = missed ? 0.0 : hitObjectGetRayTMaxEXT(hitObject);
 #else
-	traceRayEXT(tlas, RT_RAY_FLAGS, mask, 0, 0, 0, ray_origin, PATH_RAY_TMIN, ray_dir, 10000.0, 0);
+	traceRayEXT(tlas, ray_flags, mask, 0, 0, 0, ray_origin, PATH_RAY_TMIN, ray_dir, 10000.0, 0);
 
 	const bool missed = is_path_terminated(payload.packed_bounces_flags);
 	HitRecord r = hit_unpack(payload);

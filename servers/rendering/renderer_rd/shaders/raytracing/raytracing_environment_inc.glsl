@@ -82,6 +82,9 @@ struct RTEnvSampling {
 	float alpha; // GGX alpha: roughness squared.
 	float total; // The distribution's integral (RT_SKY_SAMPLING_MARGINAL_CDF's last value).
 	mat3 world_to_sky;
+	// Added to the sky visibility rays' flags: the BRDF rays' own (rendering/pathtracing/quality_preset Performance:
+	// gl_RayFlagsOpaqueEXT), so that both estimators of the sky see the same scene. shade_and_bounce() sets it.
+	uint ray_flags;
 };
 
 // p_extended: the raygen traces the BRDF ray this hit picks (not is_unextended()). p_n_dot_v: the clamped shading normal's
@@ -95,6 +98,7 @@ RTEnvSampling rt_env_sampling_setup(float p_specular_probability, float p_roughn
 	s.specular = false;
 	s.total = 0.0;
 	s.world_to_sky = mat3(1.0);
+	s.ray_flags = 0u;
 	// Without the BRDF ray, its share of the sky would be missing.
 	if (get_rt_param(RT_PARAM_ENV_SAMPLING) == 0.0 || !p_extended) {
 		return s;
@@ -187,11 +191,11 @@ uint rt_env_bounce_share(RTEnvSampling p_env, bool p_specular, vec3 p_n, vec3 p_
 
 // Nothing a camera or BRDF ray would hit is in the way: the same flags, mask and any-hit shaders (cut-outs), so a
 // direction is seen by both estimators alike.
-bool rt_environment_visible(vec3 p_origin, vec3 p_direction) {
+bool rt_environment_visible(vec3 p_origin, vec3 p_direction, uint p_ray_flags) {
 	if (!rt_ray_is_finite(p_origin, p_direction, 10000.0)) {
 		return false; // An untraceable ray: blocked (rt_ray_is_finite()).
 	}
-	const uint flags = RT_RAY_FLAGS | gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT;
+	const uint flags = RT_RAY_FLAGS | p_ray_flags | gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT;
 #if defined(USE_SER)
 	hitObjectEXT hit_object;
 	hitObjectTraceRayEXT(hit_object, tlas, flags, RT_MASK_BOUNCE, 0, 0, 0, p_origin, 0.001, p_direction, 10000.0, 0);
@@ -272,7 +276,7 @@ vec3 rt_environment_nee(RTEnvSampling p_env, vec3 p_origin, vec3 p_geometry_norm
 #endif
 	}
 
-	if (!(dot(value, vec3(1.0)) > 0.0) || !rt_environment_visible(p_origin, l)) {
+	if (!(dot(value, vec3(1.0)) > 0.0) || !rt_environment_visible(p_origin, l, p_env.ray_flags)) {
 #ifdef NRD_ENABLED
 		r_specular = vec3(0.0);
 #endif

@@ -30,7 +30,7 @@
 #define RT_PARAM_FLAG_LIGHT_SAMPLING_RIS 1u // Bit 0: rendering/pathtracing/light_sampling_ris
 #define RT_PARAM_FLAG_RUSSIAN_ROULETTE 2u // Bit 1: rendering/pathtracing/russian_roulette
 #define RT_PARAM_FLAG_DECALS_SINGULAR_ONLY 4u // Bit 2: rendering/pathtracing/decals Singular Only (RT_DECAL_MODE variant)
-// Bit 3: free (the shadow groups' ray query switch, before they were instance mask bits).
+#define RT_PARAM_FLAG_PERFORMANCE 8u // Bit 3: rendering/pathtracing/quality_preset Performance (raygen only)
 // Bits 4-7: the light index + 1 of the sun whose shadow NRD's SIGMA denoises, 0: none (NRD_ENABLED variant)
 #define RT_PARAM_FLAG_NRD_SUN_SHIFT 4u
 #define RT_PARAM_FLAG_NRD_SUN_MASK 0xFu

@@ -184,7 +184,9 @@ public:
 	static constexpr uint32_t RT_PARAM_FLAG_RUSSIAN_ROULETTE = 1u << 1; // rendering/pathtracing/russian_roulette.
 	// rendering/pathtracing/decals Singular Only, else Skip After Diffuse: read in the RT_FLAG_DECAL_MODE variant only.
 	static constexpr uint32_t RT_PARAM_FLAG_DECALS_SINGULAR_ONLY = 1u << 2;
-	// Bit 3: free (the shadow groups' ray query switch, before they were instance mask bits).
+	// rendering/pathtracing/quality_preset Performance: the path rays after a diffuse or rough bounce, the sky visibility
+	// rays and the shadow rays of the hits they reach are traced opaque (no any-hit shader). Raygen only.
+	static constexpr uint32_t RT_PARAM_FLAG_PERFORMANCE = 1u << 3;
 	// Bits 4-7: the light buffer index + 1 of the sun whose shadow NRD's SIGMA denoises (0: none), read in the
 	// RT_FLAG_NRD_ENABLED variant only (RenderRaytracing::update_uniform_set()).
 	static constexpr uint32_t RT_PARAM_FLAG_NRD_SUN_SHIFT = 4;
