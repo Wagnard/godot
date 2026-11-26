@@ -53,6 +53,8 @@ class RendererCompositor {
 private:
 	bool xr_enabled = false;
 	static RendererCompositor *singleton;
+	double unscaled_frame_delta_time = 0.0;
+	double unscaled_total_time = 0.0;
 
 protected:
 	static RendererCompositor *(*_create_func)();
@@ -98,6 +100,16 @@ public:
 	virtual uint64_t get_pending_frame_number() const = 0;
 	virtual double get_frame_delta_time() const = 0;
 	virtual double get_total_time() const = 0;
+	// The frame's step before Engine.time_scale (Engine::get_process_step(): what MainTimerSync measured, fixed under
+	// --fixed-fps and Movie Maker mode), carried with the draw command (RenderingServerDefault::draw()) so the render
+	// thread reads this frame's, and their sum (no rollover). For effects that follow the rendered rate, not the game's
+	// time (NRD's accumulation, NRDDenoiser::denoise()). get_frame_delta_time() is scaled.
+	void set_unscaled_frame_delta_time(double p_step) {
+		unscaled_frame_delta_time = p_step;
+		unscaled_total_time += p_step;
+	}
+	double get_unscaled_frame_delta_time() const { return unscaled_frame_delta_time; }
+	double get_unscaled_total_time() const { return unscaled_total_time; }
 	virtual bool can_create_resources_async() const = 0;
 
 	static bool is_low_end() { return low_end; }

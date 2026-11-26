@@ -30,6 +30,7 @@
 
 #include "rendering_server_default.h"
 
+#include "core/config/engine.h"
 #include "core/object/callable_mp.h"
 #include "core/os/os.h"
 #include "core/profiling/profiling.h"
@@ -81,7 +82,7 @@ void RenderingServerDefault::request_frame_drawn_callback(const Callable &p_call
 	frame_drawn_callbacks.push_back(p_callable);
 }
 
-void RenderingServerDefault::_draw(bool p_swap_buffers, double frame_step, uint64_t p_frame_token) {
+void RenderingServerDefault::_draw(bool p_swap_buffers, double frame_step, double p_unscaled_step, uint64_t p_frame_token) {
 #ifdef STREAMLINE_ENABLED
 	// The Streamline token this draw was issued with, see draw(). Read on this thread only.
 	StreamlineContext::get().render_token = (sl::FrameToken *)p_frame_token;
@@ -91,6 +92,7 @@ void RenderingServerDefault::_draw(bool p_swap_buffers, double frame_step, uint6
 	}
 
 	GodotProfileZoneGroupedFirst(_profile_zone, "rasterizer->begin_frame");
+	RSG::rasterizer->set_unscaled_frame_delta_time(p_unscaled_step);
 	RSG::rasterizer->begin_frame(frame_step);
 
 	TIMESTAMP_BEGIN()
@@ -497,10 +499,13 @@ void RenderingServerDefault::draw(bool p_present, double frame_step) {
 #ifdef STREAMLINE_ENABLED
 	frame_token = (uint64_t)StreamlineContext::get().get_frame_token_for_draw();
 #endif
+	// The step before Engine.time_scale, read here on the main thread (which writes it every iteration) and carried with
+	// the command, as the token: RendererCompositor::get_unscaled_frame_delta_time().
+	const double unscaled_step = Engine::get_singleton()->get_process_step();
 	if (create_thread) {
-		command_queue.push(this, &RenderingServerDefault::_draw, p_present, frame_step, frame_token);
+		command_queue.push(this, &RenderingServerDefault::_draw, p_present, frame_step, unscaled_step, frame_token);
 	} else {
-		_draw(p_present, frame_step, frame_token);
+		_draw(p_present, frame_step, unscaled_step, frame_token);
 	}
 }
 

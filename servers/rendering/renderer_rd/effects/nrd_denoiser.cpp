@@ -135,7 +135,7 @@ public:
 	// The time between this view's denoisings, low-pass filtered (NRDSettings.h's filter): the frame rate the accumulation
 	// lengths follow. It starts at NRD's assumed 60 FPS.
 	float smoothed_frame_time_ms = 1000.0f / 60.0f;
-	double last_denoise_time = 0.0; // RendererCompositor::get_total_time() at the last denoising.
+	double last_denoise_time = 0.0; // RendererCompositor::get_unscaled_total_time() at the last denoising.
 	LocalVector<RID> permanent_pool;
 	LocalVector<RID> transient_pool;
 	// One per constant data a frame's dispatches upload, in their order: none is rewritten while the frame uses it.
@@ -637,17 +637,17 @@ bool NRDDenoiser::denoise(RenderSceneBuffersRD *p_render_buffers, const Paramete
 	// A camera cut restarts the accumulation (NRDSettings.h's RESTART); the first frame also clears the history resources.
 	common.accumulationMode = context->frame_index == 0 ? nrd::AccumulationMode::CLEAR_AND_RESTART : (p_params.reset ? nrd::AccumulationMode::RESTART : nrd::AccumulationMode::CONTINUE);
 
-	// The time between this view's denoisings, on the renderer's clock: the frame steps RenderingServer.draw() was given
-	// (RendererCompositor::get_total_time(), the steps the temporal upscalers get as their delta time, Engine.time_scale
-	// included), never the wall clock. The main loop measures them (MainTimerSync), so they follow the rendered rate, and
-	// they are fixed under --fixed-fps and Movie Maker mode: the denoised image of a run depends on its frames, not on how
-	// fast the machine drew them (VK-NRD-DETERMINISM-FIXES.md). Clamped: a view not drawn for a while (a hidden viewport) is not a stutter of seconds,
-	// and NRD needs a delta above 0 (below, it times the frames itself).
-	const double now = RSG::rasterizer->get_total_time();
+	// The time between this view's denoisings, on the renderer's clock: the main loop's frame steps before Engine.time_scale
+	// (RendererCompositor::get_unscaled_total_time(), carried with each draw), never the wall clock. MainTimerSync measures
+	// them, so they follow the rendered rate (a pause by time_scale 0 or a slow motion does not change how fast frames
+	// come), and they are fixed under --fixed-fps and Movie Maker mode: the denoised image of a run depends on its frames,
+	// not on how fast the machine drew them (VK-NRD-DETERMINISM-FIXES.md). Clamped: a view not drawn for a while (a hidden
+	// viewport) is not a stutter of seconds, and NRD needs a delta above 0 (below, it times the frames itself).
+	const double now = RSG::rasterizer->get_unscaled_total_time();
 	double elapsed = now - context->last_denoise_time;
 	if (context->frame_index == 0 || elapsed <= 0.0) {
-		// The first denoising, or the total time rolled over (rendering/limits/time/time_rollover_secs): this frame's step.
-		elapsed = RSG::rasterizer->get_frame_delta_time();
+		// The first denoising, or a second denoising in the same frame: this frame's step.
+		elapsed = RSG::rasterizer->get_unscaled_frame_delta_time();
 	}
 	context->last_denoise_time = now;
 	const float frame_time_ms = CLAMP(float(elapsed * 1000.0), 1.0f, 250.0f);
