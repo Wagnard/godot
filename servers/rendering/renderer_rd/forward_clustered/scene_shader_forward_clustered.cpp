@@ -842,6 +842,19 @@ bool SceneShaderForwardClustered::ShaderData::request_rt_shadows_groups() {
 	return shader_rd.is_group_on_demand(group) && shader_rd.version_request_group(version, group);
 }
 
+void SceneShaderForwardClustered::ShaderData::request_advanced_groups(bool p_lightmap, bool p_material) {
+	if (version.is_null()) {
+		return;
+	}
+	ShaderRD &shader_rd = SceneShaderForwardClustered::singleton->shader;
+	if (p_lightmap && shader_rd.is_group_on_demand(SHADER_GROUP_ADVANCED_LIGHTMAP)) {
+		shader_rd.version_request_group(version, SHADER_GROUP_ADVANCED_LIGHTMAP);
+	}
+	if (p_material && shader_rd.is_group_on_demand(SHADER_GROUP_ADVANCED_MATERIAL)) {
+		shader_rd.version_request_group(version, SHADER_GROUP_ADVANCED_MATERIAL);
+	}
+}
+
 void SceneShaderForwardClustered::ShaderData::_clear_vertex_input_mask_cache() {
 	for (uint32_t i = 0; i < VERTEX_INPUT_MASKS_SIZE; i++) {
 		vertex_input_masks[i].store(0);
@@ -983,12 +996,12 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 			shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_BASE, base_define + "\n#define MODE_RENDER_DEPTH\n", true)); // SHADER_VERSION_DEPTH_PASS
 			shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_BASE, base_define + "\n#define MODE_RENDER_DEPTH\n#define MODE_DUAL_PARABOLOID\n", true)); // SHADER_VERSION_DEPTH_PASS_DP
 			shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_BASE, base_define + "\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n", true)); // SHADER_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS
-			shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_ADVANCED, base_define + "\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MODE_RENDER_VOXEL_GI\n", false)); // SHADER_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_AND_VOXEL_GI
+			shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_ADVANCED_VOXEL_GI, base_define + "\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MODE_RENDER_VOXEL_GI\n", false)); // SHADER_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_AND_VOXEL_GI
 			shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_MULTIVIEW, base_define + "\n#define USE_MULTIVIEW\n#define MODE_RENDER_DEPTH\n", false)); // SHADER_VERSION_DEPTH_PASS_MULTIVIEW
 			shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_MULTIVIEW, base_define + "\n#define USE_MULTIVIEW\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n", false)); // SHADER_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_MULTIVIEW
 			shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_ADVANCED_MULTIVIEW, base_define + "\n#define USE_MULTIVIEW\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MODE_RENDER_VOXEL_GI\n", false)); // SHADER_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_AND_VOXEL_GI_MULTIVIEW
-			shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_ADVANCED, base_define + "\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_MATERIAL\n", false)); // SHADER_VERSION_DEPTH_PASS_WITH_MATERIAL
-			shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_ADVANCED, base_define + "\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_SDF\n", false)); // SHADER_VERSION_DEPTH_PASS_WITH_SDF
+			shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_ADVANCED_MATERIAL, base_define + "\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_MATERIAL\n", false)); // SHADER_VERSION_DEPTH_PASS_WITH_MATERIAL
+			shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_ADVANCED_SDF, base_define + "\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_SDF\n", false)); // SHADER_VERSION_DEPTH_PASS_WITH_SDF
 			shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_CUBE_LAYERED, base_define + "\n#define MODE_RENDER_DEPTH\n#define MODE_CUBE_LAYERED\n", false)); // SHADER_VERSION_DEPTH_PASS_CUBE_LAYERED
 		}
 
@@ -1029,8 +1042,13 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 				group = SHADER_GROUP_RT_SHADOWS;
 			} else if (advanced_group && multiview_group) {
 				group = SHADER_GROUP_ADVANCED_MULTIVIEW;
+			} else if (i & SHADER_COLOR_PASS_FLAG_LIGHTMAP) {
+				// A combination's group is that of its rarest feature: lightmaps (per material), then separate specular.
+				group = SHADER_GROUP_ADVANCED_LIGHTMAP;
+			} else if (i & SHADER_COLOR_PASS_FLAG_SEPARATE_SPECULAR) {
+				group = SHADER_GROUP_ADVANCED_SEPARATE_SPECULAR;
 			} else if (advanced_group) {
-				group = SHADER_GROUP_ADVANCED;
+				group = SHADER_GROUP_ADVANCED; // Motion vectors.
 			} else if (multiview_group) {
 				group = SHADER_GROUP_MULTIVIEW;
 			}
@@ -1058,6 +1076,13 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 		if (OS::get_singleton()->get_environment("GODOT_RT_SHADOWS_ON_DEMAND") != "0") {
 			shader.set_group_on_demand(SHADER_GROUP_RT_SHADOWS, true);
 			shader.set_group_on_demand(SHADER_GROUP_RT_SHADOWS_OPACITY_MICROMAPS, true);
+		}
+
+		// The lightmap and material pass variants, per material (AdvancedFeature).
+		advanced_groups_split = OS::get_singleton()->get_environment("GODOT_ADVANCED_GROUPS_SPLIT") != "0";
+		if (advanced_groups_split) {
+			shader.set_group_on_demand(SHADER_GROUP_ADVANCED_LIGHTMAP, true);
+			shader.set_group_on_demand(SHADER_GROUP_ADVANCED_MATERIAL, true);
 		}
 
 		// The transparent pass of the path tracer has no separate specular or multiview. Its motion vectors are the rasterized
@@ -1446,11 +1471,29 @@ void SceneShaderForwardClustered::enable_oit_shader_group(bool p_needs_multiview
 	shader.enable_group(SHADER_GROUP_OIT);
 }
 
-void SceneShaderForwardClustered::enable_advanced_shader_group(bool p_needs_multiview) {
+void SceneShaderForwardClustered::enable_advanced_shader_groups(uint32_t p_features, bool p_needs_multiview) {
 	if (p_needs_multiview || RendererCompositorRD::get_singleton()->is_xr_enabled()) {
 		shader.enable_group(SHADER_GROUP_ADVANCED_MULTIVIEW);
 	}
-	shader.enable_group(SHADER_GROUP_ADVANCED);
+	if (!advanced_groups_split && p_features) {
+		p_features = ADVANCED_FEATURE_ALL;
+	}
+	static const struct {
+		uint32_t feature;
+		ShaderGroup group;
+	} groups[] = {
+		{ ADVANCED_FEATURE_MOTION_VECTORS, SHADER_GROUP_ADVANCED },
+		{ ADVANCED_FEATURE_SEPARATE_SPECULAR, SHADER_GROUP_ADVANCED_SEPARATE_SPECULAR },
+		{ ADVANCED_FEATURE_LIGHTMAP, SHADER_GROUP_ADVANCED_LIGHTMAP },
+		{ ADVANCED_FEATURE_VOXEL_GI, SHADER_GROUP_ADVANCED_VOXEL_GI },
+		{ ADVANCED_FEATURE_MATERIAL, SHADER_GROUP_ADVANCED_MATERIAL },
+		{ ADVANCED_FEATURE_SDF, SHADER_GROUP_ADVANCED_SDF },
+	};
+	for (const auto &g : groups) {
+		if (p_features & g.feature) {
+			shader.enable_group(g.group);
+		}
+	}
 }
 
 bool SceneShaderForwardClustered::is_multiview_shader_group_enabled() const {
@@ -1459,14 +1502,6 @@ bool SceneShaderForwardClustered::is_multiview_shader_group_enabled() const {
 
 bool SceneShaderForwardClustered::is_cube_layered_shader_group_enabled() const {
 	return shader.is_group_enabled(SHADER_GROUP_CUBE_LAYERED);
-}
-
-bool SceneShaderForwardClustered::is_advanced_shader_group_enabled(bool p_multiview) const {
-	if (p_multiview) {
-		return shader.is_group_enabled(SHADER_GROUP_ADVANCED_MULTIVIEW);
-	} else {
-		return shader.is_group_enabled(SHADER_GROUP_ADVANCED);
-	}
 }
 
 void SceneShaderForwardClustered::enable_rt_shadows_shader_group(bool p_for_baking) {

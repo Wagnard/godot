@@ -158,16 +158,16 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 
 	if (p_render_data->scene_data->calculate_motion_vectors) {
 		color_pass_flags |= COLOR_PASS_FLAG_MOTION_VECTORS;
-		scene_shader.enable_advanced_shader_group();
+		scene_shader.enable_advanced_shader_groups(SceneShaderForwardClustered::ADVANCED_FEATURE_MOTION_VECTORS);
 		global_pipeline_data_required.use_motion_vectors = true;
 	}
 
 	// The pipelines of this view's raster passes are compiled ahead of their first draw (_mesh_compile_pipelines_for_surface()):
 	// the rasterized cards', and those writing no alpha under an upscaler that reads it as its reactive mask.
 	// The cards are lit by their traced probes as lightmap captures (pt_probes, _fill_render_list()): the lightmap variants,
-	// in the advanced group.
+	// compiled for the cards' materials only (on demand, _request_advanced_groups_for_surface()).
 	if (raytracing) {
-		scene_shader.enable_advanced_shader_group(p_render_data->scene_data->view_count > 1);
+		scene_shader.enable_advanced_shader_groups(SceneShaderForwardClustered::ADVANCED_FEATURE_LIGHTMAP, p_render_data->scene_data->view_count > 1);
 		global_pipeline_data_required.use_pt_rasterized_cards = true;
 	}
 	if (using_upscaling && scale_type != SCALE_3D_DLSS) {
@@ -417,7 +417,7 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 	// Transparent geometry can still use lightmaps; make sure the matching shader
 	// group and pipeline requirements are live before we (re)compile pipelines.
 	if (scene_state.used_lightmap || scene_state.lightmaps_used > 0) {
-		scene_shader.enable_advanced_shader_group(p_render_data->scene_data->view_count > 1);
+		scene_shader.enable_advanced_shader_groups(SceneShaderForwardClustered::ADVANCED_FEATURE_LIGHTMAP, p_render_data->scene_data->view_count > 1);
 		global_pipeline_data_required.use_lightmaps = true;
 	}
 
@@ -428,9 +428,10 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 		global_pipeline_data_required.use_rt_shadows = true;
 	}
 
-	// The rasterized cards' material pass for DLSS-RR's guides: its variants are in the advanced group (see where it is drawn).
+	// The rasterized cards' material pass for DLSS-RR's guides: its variants are the material pass' group, compiled for the
+	// cards' materials (see where it is drawn).
 	if (raytracing && raytracing->dlss_rr_has_buffers(rb.ptr()) && p_render_data->scene_data->view_count == 1 && _rr_rasterized_guides_enabled()) {
-		scene_shader.enable_advanced_shader_group(false);
+		scene_shader.enable_advanced_shader_groups(SceneShaderForwardClustered::ADVANCED_FEATURE_MATERIAL);
 		global_pipeline_data_required.use_pt_rr_guides = true;
 	}
 
@@ -876,10 +877,10 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 				// background's albedo from the color where the camera rays missed: a card in front of the sky is drawn there.
 				if (raytracing && raytracing->dlss_rr_has_buffers(rb.ptr()) && _rr_rasterized_guides_enabled()) {
 					RENDER_TIMESTAMP("Rasterized Cards RR Guides");
-					// The material pass' variants are in the advanced group, which the motion vectors enable. RR's buffers follow
-					// the Environment, not the viewport's scaling: on the first frame of a map, before DLSS, the group could
-					// be off and the pipeline fell on a placeholder ("Pre-raster shader is not provided", once).
-					scene_shader.enable_advanced_shader_group(p_render_data->scene_data->view_count > 1);
+					// The material pass' group. RR's buffers follow the Environment, not the viewport's scaling: on the first
+					// frame of a map, before DLSS, the group could be off and the pipeline fell on a placeholder ("Pre-raster
+					// shader is not provided", once). On demand: a card the precompilation did not see asks at its first draw.
+					scene_shader.enable_advanced_shader_groups(SceneShaderForwardClustered::ADVANCED_FEATURE_MATERIAL, p_render_data->scene_data->view_count > 1);
 					// Formats and usage shared with the pipeline compilation (_mesh_compile_pipelines_for_surface()).
 					const StringName material_names[PT_RR_MATERIAL_ATTACHMENT_COUNT] = { SNAME("rasterized_albedo"), SNAME("rasterized_normal"), SNAME("rasterized_orm"), SNAME("rasterized_emission"), SNAME("rasterized_view_depth"), SNAME("rasterized_depth") };
 					RID material_textures[PT_RR_MATERIAL_ATTACHMENT_COUNT];

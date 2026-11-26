@@ -1297,6 +1297,10 @@ protected:
 	void _mesh_compile_pipeline_for_surface(SceneShaderForwardClustered::ShaderData *p_shader, uint64_t p_surface_format, bool p_ubershader, bool p_instanced_surface, RSE::PipelineSource p_source, SceneShaderForwardClustered::ShaderData::PipelineKey &r_pipeline_key, Vector<ShaderPipelinePair> *r_pipeline_pairs = nullptr);
 	// p_record: the surface joins its shader's precompiled surfaces (false when they are compiled again from there).
 	void _mesh_compile_pipelines_for_surface(const SurfacePipelineData &p_surface, const GlobalPipelineData &p_global, RSE::PipelineSource p_source, Vector<ShaderPipelinePair> *r_pipeline_pairs = nullptr, bool p_record = true);
+	// The on-demand advanced groups (SceneShaderForwardClustered::AdvancedFeature) a surface's precompiled pipelines need.
+	void _request_advanced_groups_for_surface(const SurfacePipelineData &p_surface, const GlobalPipelineData &p_global);
+	// The material pass' on-demand group for every material of a filled list (the bakes).
+	void _request_material_pass_groups(RenderListType p_render_list);
 	static SceneShaderForwardClustered::ShaderData::PrecompiledSurface _precompiled_surface_from_data(const SurfacePipelineData &p_surface);
 	SurfacePipelineData _precompiled_surface_to_data(SceneShaderForwardClustered::ShaderData *p_shader, const SceneShaderForwardClustered::ShaderData::PrecompiledSurface &p_surface);
 	// When a global requirement changed: the pipelines of every shader's precompiled surfaces, for the new requirements,

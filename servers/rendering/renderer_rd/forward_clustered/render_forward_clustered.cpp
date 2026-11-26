@@ -3525,7 +3525,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 
 		if (p_render_data->scene_data->calculate_motion_vectors) {
 			color_pass_flags |= COLOR_PASS_FLAG_MOTION_VECTORS;
-			scene_shader.enable_advanced_shader_group();
+			scene_shader.enable_advanced_shader_groups(SceneShaderForwardClustered::ADVANCED_FEATURE_MOTION_VECTORS);
 
 			// Indicate pipelines for motion vectors are required.
 			global_pipeline_data_required.use_motion_vectors = true;
@@ -3662,8 +3662,20 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		rb_data->ensure_normal_roughness_texture();
 	}
 
-	if (using_sss || using_separate_specular || scene_state.used_lightmap || scene_state.lightmaps_used > 0 || using_voxelgi || global_surface_data.sss_used) {
-		scene_shader.enable_advanced_shader_group(p_render_data->scene_data->view_count > 1);
+	{
+		uint32_t advanced_features = 0;
+		if (using_sss || using_separate_specular || global_surface_data.sss_used) {
+			advanced_features |= SceneShaderForwardClustered::ADVANCED_FEATURE_SEPARATE_SPECULAR;
+		}
+		if (scene_state.used_lightmap || scene_state.lightmaps_used > 0) {
+			advanced_features |= SceneShaderForwardClustered::ADVANCED_FEATURE_LIGHTMAP;
+		}
+		if (using_voxelgi) {
+			advanced_features |= SceneShaderForwardClustered::ADVANCED_FEATURE_VOXEL_GI;
+		}
+		if (advanced_features) {
+			scene_shader.enable_advanced_shader_groups(advanced_features, p_render_data->scene_data->view_count > 1);
+		}
 	}
 
 	// Update the global pipeline requirements with all the features found to be in use in this scene.
@@ -5575,7 +5587,7 @@ void RenderForwardClustered::_render_material(const Transform3D &p_cam_transform
 	render_data.cluster_max_elements = 32;
 	render_data.instances = &p_instances;
 
-	scene_shader.enable_advanced_shader_group();
+	scene_shader.enable_advanced_shader_groups(SceneShaderForwardClustered::ADVANCED_FEATURE_MATERIAL);
 
 	_update_render_base_uniform_set();
 
@@ -5590,6 +5602,7 @@ void RenderForwardClustered::_render_material(const Transform3D &p_cam_transform
 	_fill_render_list(RENDER_LIST_SECONDARY, &render_data, pass_mode);
 	render_list[RENDER_LIST_SECONDARY].sort_by_key();
 	_fill_instance_data(RENDER_LIST_SECONDARY);
+	_request_material_pass_groups(RENDER_LIST_SECONDARY);
 
 	RID rp_uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_SECONDARY, nullptr, false, RID(), RendererRD::MaterialStorage::get_singleton()->samplers_rd_get_default(), uniform_buffer_index);
 
@@ -5631,7 +5644,7 @@ void RenderForwardClustered::_render_uv2(const PagedArray<RenderGeometryInstance
 	render_data.cluster_max_elements = 32;
 	render_data.instances = &p_instances;
 
-	scene_shader.enable_advanced_shader_group();
+	scene_shader.enable_advanced_shader_groups(SceneShaderForwardClustered::ADVANCED_FEATURE_MATERIAL);
 
 	_update_render_base_uniform_set();
 
@@ -5646,6 +5659,7 @@ void RenderForwardClustered::_render_uv2(const PagedArray<RenderGeometryInstance
 	_fill_render_list(RENDER_LIST_SECONDARY, &render_data, pass_mode);
 	render_list[RENDER_LIST_SECONDARY].sort_by_key();
 	_fill_instance_data(RENDER_LIST_SECONDARY);
+	_request_material_pass_groups(RENDER_LIST_SECONDARY);
 
 	RID rp_uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_SECONDARY, nullptr, false, RID(), RendererRD::MaterialStorage::get_singleton()->samplers_rd_get_default(), uniform_buffer_index);
 
@@ -6595,7 +6609,7 @@ RID RenderForwardClustered::_setup_sdfgi_render_pass_uniform_set(RID p_albedo_te
 	if (scene_shader.default_shader_sdfgi_rd.is_null()) {
 		// The variant for SDF from the default material should only be retrieved when SDFGI is required.
 		ERR_FAIL_NULL_V(scene_shader.default_material_shader_ptr, RID());
-		scene_shader.enable_advanced_shader_group();
+		scene_shader.enable_advanced_shader_groups(SceneShaderForwardClustered::ADVANCED_FEATURE_SDF);
 		scene_shader.default_shader_sdfgi_rd = scene_shader.default_material_shader_ptr->get_shader_variant(SceneShaderForwardClustered::PIPELINE_VERSION_DEPTH_PASS_WITH_SDF, 0, true);
 		ERR_FAIL_COND_V(scene_shader.default_shader_sdfgi_rd.is_null(), RID());
 	}
@@ -6674,7 +6688,7 @@ void RenderForwardClustered::sdfgi_update(const Ref<RenderSceneBuffers> &p_rende
 
 	// Ensure advanced shaders are available if SDFGI is used.
 	// Call here as this is the first entry point for SDFGI.
-	scene_shader.enable_advanced_shader_group();
+	scene_shader.enable_advanced_shader_groups(SceneShaderForwardClustered::ADVANCED_FEATURE_SDF);
 
 	static const uint32_t history_frames_to_converge[RSE::ENV_SDFGI_CONVERGE_MAX] = { 5, 10, 15, 20, 25, 30 };
 	uint32_t requested_history_size = history_frames_to_converge[gi.sdfgi_frames_to_converge];
@@ -6782,7 +6796,7 @@ void RenderForwardClustered::_update_global_pipeline_data_requirements_from_proj
 	const bool use_taa = GLOBAL_GET_CACHED(bool, "rendering/anti_aliasing/quality/use_taa");
 	const RSE::ViewportScaling3DMode scaling_3d_mode = RSE::ViewportScaling3DMode(GLOBAL_GET_CACHED(int, "rendering/scaling_3d/mode"));
 	if (use_taa || RSE::scaling_3d_mode_type(scaling_3d_mode) == RSE::VIEWPORT_SCALING_3D_TYPE_TEMPORAL) {
-		scene_shader.enable_advanced_shader_group();
+		scene_shader.enable_advanced_shader_groups(SceneShaderForwardClustered::ADVANCED_FEATURE_MOTION_VECTORS);
 		global_pipeline_data_required.use_motion_vectors = true;
 	}
 }
@@ -7471,12 +7485,35 @@ void RenderForwardClustered::_mesh_compile_pipeline_for_surface(SceneShaderForwa
 	}
 }
 
+void RenderForwardClustered::_request_advanced_groups_for_surface(const SurfacePipelineData &p_surface, const GlobalPipelineData &p_global) {
+	// The surfaces whose pipelines below have the lightmap flag or are the material pass: the same conditions.
+	const bool cards = p_surface.pt_rasterized && p_global.use_pt_rasterized_cards;
+	const bool lightmap = (p_global.use_lightmaps && p_surface.can_use_lightmap) || cards;
+	const bool material = cards && p_global.use_pt_rr_guides;
+	if (lightmap || material) {
+		p_surface.shader->request_advanced_groups(lightmap, material);
+	}
+}
+
+void RenderForwardClustered::_request_material_pass_groups(RenderListType p_render_list) {
+	// The bakes draw every material of the scene once: their material pass variants compile together, before the draw
+	// list waits for the first one, as they did when the whole advanced group was enabled.
+	const RenderList &list = render_list[p_render_list];
+	for (uint32_t i = 0; i < list.elements.size(); i++) {
+		SceneShaderForwardClustered::ShaderData *shader = list.elements[i]->shader;
+		if (shader) {
+			shader->request_advanced_groups(false, true);
+		}
+	}
+}
+
 void RenderForwardClustered::_mesh_compile_pipelines_for_surface(const SurfacePipelineData &p_surface, const GlobalPipelineData &p_global, RSE::PipelineSource p_source, Vector<ShaderPipelinePair> *r_pipeline_pairs, bool p_record) {
 	if (p_record) {
 		const SceneShaderForwardClustered::ShaderData::PrecompiledSurface precompiled = _precompiled_surface_from_data(p_surface);
 		MutexLock lock(p_surface.shader->precompiled_surfaces_mutex);
 		p_surface.shader->precompiled_surfaces.insert(precompiled);
 	}
+	_request_advanced_groups_for_surface(p_surface, p_global);
 
 	bool octmap_use_storage = !copy_effects->get_raster_effects().has_flag(RendererRD::CopyEffects::RASTER_EFFECT_OCTMAP);
 
@@ -7943,10 +7980,6 @@ void RenderForwardClustered::_update_precompiled_surfaces(bool p_requirements_ch
 			shader.precompiled_surfaces_update = false; // Its code never compiled: nothing to draw with.
 			continue;
 		}
-		if (!scene_shader.shader.version_is_compiled(shader.version)) {
-			precompiled_surfaces_update_pending = true; // Again next frame.
-			continue;
-		}
 
 		surfaces.clear();
 		{
@@ -7954,6 +7987,15 @@ void RenderForwardClustered::_update_precompiled_surfaces(bool p_requirements_ch
 			for (const SceneShaderForwardClustered::ShaderData::PrecompiledSurface &surface : shader.precompiled_surfaces) {
 				surfaces.push_back(surface);
 			}
+		}
+		// The on-demand advanced groups the new requirements need for these surfaces, before waiting for the shader's groups:
+		// the compilations below must not start them (their first fetch would wait for them here).
+		for (const SceneShaderForwardClustered::ShaderData::PrecompiledSurface &precompiled : surfaces) {
+			_request_advanced_groups_for_surface(_precompiled_surface_to_data(&shader, precompiled), global_pipeline_data_compiled);
+		}
+		if (!scene_shader.shader.version_is_compiled(shader.version)) {
+			precompiled_surfaces_update_pending = true; // Again next frame.
+			continue;
 		}
 
 		bool shadow_shader_ready = true;
@@ -8291,7 +8333,7 @@ void RenderForwardClustered::enable_features(BitField<FeatureBits> p_feature_bit
 	}
 
 	if (p_feature_bits.has_flag(FEATURE_ADVANCED_BIT)) {
-		scene_shader.enable_advanced_shader_group(p_feature_bits.has_flag(FEATURE_MULTIVIEW_BIT));
+		scene_shader.enable_advanced_shader_groups(SceneShaderForwardClustered::ADVANCED_FEATURE_ALL, p_feature_bits.has_flag(FEATURE_MULTIVIEW_BIT));
 		// The weighted-blended OIT pass' variants, enabled for every material at the first blend_oit one drawn
 		// (_render_scene()): like the advanced group, the variants a material may need at run time.
 		scene_shader.enable_oit_shader_group(p_feature_bits.has_flag(FEATURE_MULTIVIEW_BIT));

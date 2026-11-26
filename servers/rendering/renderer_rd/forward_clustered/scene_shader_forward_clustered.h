@@ -47,6 +47,8 @@ private:
 public:
 	enum ShaderGroup {
 		SHADER_GROUP_BASE, // Always compiled at the beginning.
+		// The colour pass with motion vectors. The other single-view advanced passes have groups of their own (after
+		// SHADER_GROUP_RT_CAPTURE): see AdvancedFeature.
 		SHADER_GROUP_ADVANCED,
 		SHADER_GROUP_MULTIVIEW,
 		SHADER_GROUP_ADVANCED_MULTIVIEW,
@@ -62,6 +64,42 @@ public:
 		// The path tracer's vertex capture (rendering/pathtracing/vertex_capture_mode), once it is on: compiled for every
 		// material then.
 		SHADER_GROUP_RT_CAPTURE,
+		// The single-view advanced passes other than motion vectors, one group per feature (AdvancedFeature).
+		SHADER_GROUP_ADVANCED_SEPARATE_SPECULAR, // Colour pass with separate specular, with and without motion vectors.
+		SHADER_GROUP_ADVANCED_LIGHTMAP, // Every colour pass with the lightmap flag. On demand, per material.
+		SHADER_GROUP_ADVANCED_VOXEL_GI, // The depth pre-pass writing VoxelGI's buffers.
+		SHADER_GROUP_ADVANCED_MATERIAL, // The material pass (GI / lightmap bakes, the path tracer's cards' RR guides). On demand.
+		SHADER_GROUP_ADVANCED_SDF, // SDFGI's voxelization pass.
+	};
+
+	// The features of the advanced passes, each compiled for every material once a view uses it (upstream's model, "Reducing
+	// stutter from shader (pipeline) compilations"), but each in a group of its own: a godot3d material used 2 to 4 of the 20
+	// variants the single advanced group held (motion vectors; SDFGI in raster), the lightmap, separate specular, VoxelGI and
+	// material pass variants were compiled for nothing. Unity strips its lightmap and fog modes the same way, per mode
+	// ("Shader stripping"); Unreal compiles a material's lightmap permutations per usage (ShouldCompilePermutation()).
+	// Who enables which (enable_advanced_shader_groups()), the one list of the triggers:
+	// - MOTION_VECTORS: a view drawing motion vectors (RenderForwardClustered::_render_scene(), the path tracer's view),
+	//   and a project that resolves temporally (TAA or a temporal 3D scaling mode) from the start.
+	// - SEPARATE_SPECULAR: SSS (a material using it, or a view drawing it) or a compositor effect asking for it.
+	// - LIGHTMAP: a scene with lightmaps or lightmap captures; a path traced view (its rasterized cards are lit by their
+	//   PTProbes as lightmap captures). On demand: compiled only for the materials of surfaces that can be lightmapped
+	//   (ShaderData::request_advanced_groups(), RenderForwardClustered::_request_advanced_groups_for_surface()).
+	// - VOXEL_GI: a view with VoxelGI.
+	// - MATERIAL: the GI / lightmap bakes (_render_material(), _render_uv2()); DLSS-RR's guides of the path tracer's cards.
+	//   On demand: compiled for the materials those draw (the bakes ask for theirs before drawing).
+	// - SDF: SDFGI.
+	// The shader baker enables them all (ADVANCED_FEATURE_ALL), and bakes every enabled group for every material, on-demand
+	// ones included. Multiview keeps one SHADER_GROUP_ADVANCED_MULTIVIEW for all of them.
+	// GODOT_ADVANCED_GROUPS_SPLIT=0: any of them enables all of them, for every material (the single group's behaviour,
+	// for comparisons).
+	enum AdvancedFeature : uint32_t {
+		ADVANCED_FEATURE_MOTION_VECTORS = 1 << 0,
+		ADVANCED_FEATURE_SEPARATE_SPECULAR = 1 << 1,
+		ADVANCED_FEATURE_LIGHTMAP = 1 << 2,
+		ADVANCED_FEATURE_VOXEL_GI = 1 << 3,
+		ADVANCED_FEATURE_MATERIAL = 1 << 4,
+		ADVANCED_FEATURE_SDF = 1 << 5,
+		ADVANCED_FEATURE_ALL = (1 << 6) - 1,
 	};
 
 	// Not an enum because these values are constants that are processed as numbers
@@ -570,6 +608,9 @@ public:
 		// A surface of this material can be drawn by the path tracer's transparent pass: its on-demand RT shadow group is
 		// compiled (now if a view traces already, else once one does). Never waits. True the first time.
 		bool request_rt_shadows_groups();
+		// Its surfaces can be drawn with a lightmap / by the material pass: those on-demand advanced groups are compiled for
+		// it (now if enabled, else once they are). Never waits.
+		void request_advanced_groups(bool p_lightmap, bool p_material);
 
 		SelfList<ShaderData> shader_list_element;
 		ShaderData();
@@ -607,6 +648,8 @@ public:
 	// The device has opacity micromaps: the transparent pass' ray queries use SHADER_GROUP_RT_SHADOWS_OPACITY_MICROMAPS.
 	bool rt_shadows_opacity_micromaps = false;
 	bool depth_prepass_enabled = false;
+	// GODOT_ADVANCED_GROUPS_SPLIT=0 (AdvancedFeature).
+	bool advanced_groups_split = true;
 
 	RID default_shader;
 	RID default_material;
@@ -644,11 +687,11 @@ public:
 	void init(const String p_defines);
 	void set_default_specialization(const ShaderSpecialization &p_specialization);
 	void enable_multiview_shader_group();
-	void enable_advanced_shader_group(bool p_needs_multiview = false);
+	// p_features: AdvancedFeature bits (see there for who enables which). p_needs_multiview: the multiview group too.
+	void enable_advanced_shader_groups(uint32_t p_features, bool p_needs_multiview = false);
 	void enable_oit_shader_group(bool p_needs_multiview = false);
 	bool is_multiview_shader_group_enabled() const;
 	bool is_cube_layered_shader_group_enabled() const;
-	bool is_advanced_shader_group_enabled(bool p_multiview) const;
 	// The transparent pass of the path tracer, once a view traces: compiled for every material then. Needs ray queries.
 	// p_for_baking: the shader baker's, both groups (with and without opacity micromaps), whatever this device has.
 	void enable_rt_shadows_shader_group(bool p_for_baking = false);
