@@ -6798,7 +6798,9 @@ void RenderForwardClustered::_update_global_pipeline_data_requirements_from_proj
 	// A project whose viewports resolve temporally (TAA, or a temporal 3D scaling mode: FSR 2, FSR 3.1, DLSS, MetalFX
 	// temporal) draws its opaque passes with motion vectors: their pipelines are compiled from the first mesh load on, as
 	// a view drawing them would require (render_scene()), not from the first frame that draws them.
-	const bool use_taa = GLOBAL_GET_CACHED(bool, "rendering/anti_aliasing/quality/use_taa");
+	// The SceneTree defines use_taa (scene_tree.cpp), after this renderer is created: until then it is not a setting yet,
+	// and reading it would warn "Property not found". update() reads it again every frame.
+	const bool use_taa = ProjectSettings::get_singleton()->has_setting("rendering/anti_aliasing/quality/use_taa") && GLOBAL_GET_CACHED(bool, "rendering/anti_aliasing/quality/use_taa");
 	const RSE::ViewportScaling3DMode scaling_3d_mode = RSE::ViewportScaling3DMode(GLOBAL_GET_CACHED(int, "rendering/scaling_3d/mode"));
 	if (use_taa || RSE::scaling_3d_mode_type(scaling_3d_mode) == RSE::VIEWPORT_SCALING_3D_TYPE_TEMPORAL) {
 		scene_shader.enable_advanced_shader_groups(SceneShaderForwardClustered::ADVANCED_FEATURE_MOTION_VECTORS);
