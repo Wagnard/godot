@@ -1321,12 +1321,18 @@ void CSharpLanguage::_instance_binding_free_callback(void *, void *, void *p_bin
 		CSharpScriptBinding &script_binding = data->value();
 
 		if (script_binding.inited.is_set()) {
-			// Set the native instance field to IntPtr.Zero, if not yet garbage collected.
-			// This is done to avoid trying to dispose the native instance from Dispose(bool).
-			GDMonoCache::managed_callbacks.ScriptManagerBridge_SetGodotObjectPtr(
-					script_binding.gchandle.get_intptr(), nullptr);
+			MutexLock gchandle_lock(csharp_lang->script_gchandle_release_mutex);
 
-			script_binding.gchandle.release();
+			// The handle is released if a reference count change found the wrapper collected (the swap releases it):
+			// no wrapper to tell then, and GCHandle.FromIntPtr() throws "Handle is not initialized" on a null handle.
+			if (!script_binding.gchandle.is_released()) {
+				// Set the native instance field to IntPtr.Zero, if not yet garbage collected.
+				// This is done to avoid trying to dispose the native instance from Dispose(bool).
+				GDMonoCache::managed_callbacks.ScriptManagerBridge_SetGodotObjectPtr(
+						script_binding.gchandle.get_intptr(), nullptr);
+
+				script_binding.gchandle.release();
+			}
 			script_binding.inited.clear();
 		}
 
@@ -1554,8 +1560,13 @@ void CSharpLanguage::tie_managed_to_unmanaged_with_pre_setup(GCHandleIntPtr p_gc
 
 	CRASH_COND(!instance->gchandle.is_released());
 
-	// Tie managed to unmanaged
-	instance->gchandle = MonoGCHandleData(p_gchandle_intptr, gdmono::GCHandleType::STRONG_HANDLE);
+	{
+		// Tie managed to unmanaged. Under the handle mutex: when a collected wrapper's finalizer gives a still referenced
+		// owner a new managed instance (CSharpInstance::_internal_new_managed()), other threads may change the owner's
+		// reference count meanwhile, and the reference callbacks swap this handle under it.
+		MutexLock gchandle_lock(CSharpLanguage::get_singleton()->script_gchandle_release_mutex);
+		instance->gchandle = MonoGCHandleData(p_gchandle_intptr, gdmono::GCHandleType::STRONG_HANDLE);
+	}
 
 	if (instance->base_ref_counted) {
 		instance->_reference_owner_unsafe(); // Here, after assigning the gchandle (for the refcount_incremented callback)
@@ -2024,7 +2035,10 @@ void CSharpInstance::mono_object_disposed(GCHandleIntPtr p_gchandle_to_free) {
 void CSharpInstance::mono_object_disposed_baseref(GCHandleIntPtr p_gchandle_to_free, bool p_is_finalizer, bool &r_delete_owner, bool &r_remove_script_instance) {
 #ifdef DEBUG_ENABLED
 	CRASH_COND(!base_ref_counted);
-	CRASH_COND(gchandle.is_released());
+	// The handle may be released here (godotengine/godot#83762): when native code references the owner again after
+	// its wrapper was collected and before this finalizer runs (a cached resource loaded again), refcount_incremented()'s
+	// swap finds no target and releases the handle. Nothing to release then, and the owner gets a new managed instance
+	// below if it is still referenced.
 #endif // DEBUG_ENABLED
 
 	// Must make sure event signals are not left dangling
@@ -2083,6 +2097,19 @@ void CSharpInstance::disconnect_event_signals() {
 	connected_event_signals.clear();
 }
 
+GCHandleIntPtr CSharpInstance::get_gchandle_intptr_for_managed() {
+	// A swap of the reference callbacks gives up the old handle before it publishes the new one, so the handle reads as
+	// released meanwhile, and C# would get null for a live object. Read again under the handle mutex then, as the
+	// instance binding path does (a null target leads it to recreate_csharp_script_binding_managed()). Still released
+	// under it: the swap found the wrapper collected (see mono_object_disposed_baseref()).
+	GCHandleIntPtr handle = gchandle.get_intptr();
+	if (handle.value == nullptr && base_ref_counted) {
+		MutexLock gchandle_lock(CSharpLanguage::get_singleton()->script_gchandle_release_mutex);
+		handle = gchandle.get_intptr();
+	}
+	return handle;
+}
+
 void CSharpInstance::refcount_incremented() {
 #ifdef DEBUG_ENABLED
 	CRASH_COND(!base_ref_counted);
@@ -2098,6 +2125,15 @@ void CSharpInstance::refcount_incremented() {
 
 		// Release the current weak handle and replace it with a strong handle.
 
+		// Tested again under the handle mutex, the reference count included, as in the instance binding's reference
+		// callback: a script instance's reference callbacks run with no lock on whichever thread changes the owner's
+		// reference count, so another thread may swap the same handle meanwhile (a 2 -> 1 change), or the collected
+		// wrapper's finalizer release it.
+		MutexLock gchandle_lock(CSharpLanguage::get_singleton()->script_gchandle_release_mutex);
+		if (rc_owner->get_reference_count() <= 1 || gchandle.is_released() || !gchandle.is_weak()) {
+			return;
+		}
+
 		GCHandleIntPtr old_gchandle = gchandle.get_intptr();
 		gchandle.handle = { nullptr }; // No longer owns the handle (released by swap function)
 
@@ -2107,7 +2143,9 @@ void CSharpInstance::refcount_incremented() {
 				old_gchandle, &new_gchandle, create_weak);
 
 		if (!target_alive) {
-			return; // Called after the managed side was collected, so nothing to do here
+			// Called after the managed side was collected. The handle stays released until the collected wrapper's
+			// finalizer gives the owner a new managed instance (see mono_object_disposed_baseref()).
+			return;
 		}
 
 		gchandle = MonoGCHandleData(new_gchandle, gdmono::GCHandleType::STRONG_HANDLE);
@@ -2129,6 +2167,12 @@ bool CSharpInstance::refcount_decremented() {
 		// the managed instance takes responsibility of deleting the owner when GCed.
 
 		// Release the current strong handle and replace it with a weak handle.
+
+		// Tested again under the handle mutex, as in refcount_incremented().
+		MutexLock gchandle_lock(CSharpLanguage::get_singleton()->script_gchandle_release_mutex);
+		if (rc_owner->get_reference_count() != 1 || gchandle.is_released() || gchandle.is_weak()) {
+			return false; // Changed by another thread meanwhile. Not dying: `refcount` was 1.
+		}
 
 		GCHandleIntPtr old_gchandle = gchandle.get_intptr();
 		gchandle.handle = { nullptr }; // No longer owns the handle (released by swap function)

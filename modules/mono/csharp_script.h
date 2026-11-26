@@ -372,6 +372,9 @@ class CSharpInstance : public ScriptInstance {
 	bool destructing_script_instance = false;
 
 	Ref<CSharpScript> script;
+	// Swapped or replaced under `CSharpLanguage::script_gchandle_release_mutex`, and released under it by the wrapper's
+	// finalizer or Dispose(), as an instance binding's handle: the reference callbacks run on whichever thread changes
+	// the owner's reference count, the finalizer on the finalizer thread.
 	MonoGCHandleData gchandle;
 
 	List<Callable> connected_event_signals;
@@ -399,6 +402,8 @@ public:
 	_FORCE_INLINE_ bool is_destructing_script_instance() { return destructing_script_instance; }
 
 	_FORCE_INLINE_ GCHandleIntPtr get_gchandle_intptr() { return gchandle.get_intptr(); }
+	// For InteropUtils.UnmanagedGetManaged(): get_gchandle_intptr(), read again under the handle mutex if released.
+	GCHandleIntPtr get_gchandle_intptr_for_managed();
 
 	Object *get_owner() override;
 

@@ -206,9 +206,17 @@ void godotsharp_internal_refcounted_disposed(Object *p_ptr, GCHandleIntPtr p_gch
 			CSharpScriptBinding &script_binding = ((RBMap<Object *, CSharpScriptBinding>::Element *)data)->get();
 			if (script_binding.inited.is_set()) {
 				if (!script_binding.gchandle.is_released()) {
-					if (rc->get_reference_count() == 1 && script_binding.gchandle.is_weak()) {
+					// Only for an explicit Dispose() of a wrapper that passed its own handle: a wrapper that passed none
+					// saw the handle of another, live wrapper (re-created after this one was collected, see
+					// CSharpLanguage::recreate_csharp_script_binding_managed()), and a finalizer's handle is a dead one,
+					// which a swap releases instead of replacing. A weak handle with a count of 1 is then the other
+					// wrapper's (only it references the owner): releasing it made the binding forget that live wrapper,
+					// and the next access create another one.
+					if (p_gchandle_to_free.value != nullptr && !p_is_finalizer &&
+							rc->get_reference_count() == 1 && script_binding.gchandle.is_weak()) {
 						// The GCHandle is just swapped, so get the swapped handle to release
 						// See: CSharpLanguage::_instance_binding_reference_callback(void *p_token, void *p_binding, GDExtensionBool p_reference)
+						// A swap keeps the target: the new handle is the disposed wrapper's.
 						p_gchandle_to_free = script_binding.gchandle.get_intptr();
 					}
 					CSharpLanguage::release_binding_gchandle_thread_safe(p_gchandle_to_free, script_binding);
@@ -234,7 +242,7 @@ GCHandleIntPtr godotsharp_internal_unmanaged_get_script_instance_managed(Object 
 
 		if (cs_instance) {
 			*r_has_cs_script_instance = true;
-			return cs_instance->get_gchandle_intptr();
+			return cs_instance->get_gchandle_intptr_for_managed();
 		}
 	}
 
