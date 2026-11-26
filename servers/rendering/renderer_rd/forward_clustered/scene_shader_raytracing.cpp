@@ -810,6 +810,12 @@ void SceneShaderRaytracing::_strip_texture_globals(String &r_globals, const Stri
 	r_globals = r_globals.substr(0, line_start) + r_globals.substr(line_end);
 }
 
+// What path tracing does with a material no hit group can run (_register_slot() gives it hit group 0, build_tlas() decides
+// which surfaces hit group 0 may stand for), for the warnings.
+static String _failed_shader_fallback(bool p_is_procedural) {
+	return p_is_procedural ? String("its procedural instances are not path traced") : String("path tracing traces its opaque surfaces with the default material, and leaves out its transparent and cut-out ones and those vertex() places by the camera matrices");
+}
+
 bool SceneShaderRaytracing::_finalize_uniforms_with_textures(
 		CustomShaderEntry &r_entry,
 		const ShaderCompiler::GeneratedCode &p_gen_code,
@@ -837,7 +843,8 @@ bool SceneShaderRaytracing::_finalize_uniforms_with_textures(
 		}
 		// The bindless tables hold float 2D textures and 2D texture arrays.
 		if ((tex.type != ShaderLanguage::TYPE_SAMPLER2D && tex.type != ShaderLanguage::TYPE_SAMPLER2DARRAY) || tex.array_size > 0) {
-			WARN_PRINT(vformat("RT: texture uniform '%s' has a type path tracing cannot bind; the material falls back to the default.", tex.name));
+			WARN_PRINT(vformat("RT: texture uniform '%s'%s has a type path tracing cannot bind; %s.", tex.name,
+					r_entry.name.is_empty() ? String() : " of " + r_entry.name, _failed_shader_fallback(r_entry.is_procedural)));
 			return false;
 		}
 
@@ -904,10 +911,15 @@ uint32_t SceneShaderRaytracing::_register_slot(uint32_t /*p_shader_id*/, RID p_m
 
 	HashMap<SourceHash128, uint32_t, SourceHash128Hasher>::Iterator it = source_hash_to_slot.find(hash);
 	if (it != source_hash_to_slot.end()) {
+		// A shader no hit group can run is traced with hit group 0 (the default material) on every registration, as on
+		// its first one below. Its slot's index was returned from the second on (the precache's registration is the
+		// first): never ready in any bundle, so the surface waited for it forever, out of the TLAS
+		// (PT-FAILED-HIT-GROUP-FALLBACK-FIXES).
+		const bool failed = hit_group_slots[it->value].state == HGState::Failed;
 		if (r_failed) {
-			*r_failed = hit_group_slots[it->value].state == HGState::Failed;
+			*r_failed = failed;
 		}
-		return it->value;
+		return failed ? 0 : it->value;
 	}
 
 	// New slot: preprocess here; heavy compile is on worker.
@@ -915,7 +927,8 @@ uint32_t SceneShaderRaytracing::_register_slot(uint32_t /*p_shader_id*/, RID p_m
 	entry.is_procedural = p_is_procedural;
 	entry.name = material_storage->material_get_shader_path_hint(p_material);
 	if (!_preprocess_shader(p_material, p_is_procedural, entry)) {
-		// Failed slot still occupies an index so hash lookups stay stable.
+		// Failed slot still occupies an index so hash lookups stay stable (and the warning is printed once per shader); the
+		// material gets hit group 0.
 		HitGroupSlot failed_slot;
 		failed_slot.source_hash = hash;
 		failed_slot.state = HGState::Failed;
@@ -992,9 +1005,10 @@ bool SceneShaderRaytracing::_preprocess_shader(RID p_material, bool p_is_procedu
 	// The path names the shader in the compiler's error (otherwise "--Main Shader--") and in the warning.
 	const String shader_path = RendererRD::MaterialStorage::get_singleton()->material_get_shader_path_hint(p_material);
 	Error err = compiler.compile(RSE::SHADER_SPATIAL, code, &actions, shader_path, gen_code);
+	r_entry.name = shader_path;
 	if (err != OK) {
-		WARN_PRINT(vformat("RT: Failed to preprocess %s shader%s; falling back to default material.",
-				p_is_procedural ? String("procedural") : String("custom"), shader_path.is_empty() ? String() : " " + shader_path));
+		WARN_PRINT(vformat("RT: Failed to preprocess %s shader%s; %s.",
+				p_is_procedural ? String("procedural") : String("custom"), shader_path.is_empty() ? String() : " " + shader_path, _failed_shader_fallback(p_is_procedural)));
 		return false;
 	}
 
@@ -1307,6 +1321,17 @@ bool SceneShaderRaytracing::is_hg_ready_in_bundle(uint32_t p_slot_index, uint32_
 		return false;
 	}
 	return b.live_ready_mask[p_slot_index];
+}
+
+bool SceneShaderRaytracing::is_hg_failed_in_bundle(uint32_t p_slot_index, uint32_t p_rt_flags) const {
+	if (p_slot_index == 0 || p_slot_index >= hit_group_slots.size()) {
+		return false;
+	}
+	if (hit_group_slots[p_slot_index].state == HGState::Failed) {
+		return true;
+	}
+	HashMap<uint32_t, PipelineBundle>::ConstIterator it = pipeline_bundles.find(p_rt_flags);
+	return it != pipeline_bundles.end() && p_slot_index < it->value.per_hg_states.size() && it->value.per_hg_states[p_slot_index] == HGState::Failed;
 }
 
 void SceneShaderRaytracing::request_hit_group(uint32_t p_slot_index, float p_distance) {
@@ -2525,6 +2550,7 @@ void SceneShaderRaytracing::_finalize_pipeline_build(PipelineBuildTask *p_task) 
 			bundle.per_hg_states[i] = HGState::Ready;
 		} else if (si.needs_compile) {
 			bundle.per_hg_states[i] = HGState::Failed;
+			WARN_PRINT(vformat("RT: hit group %d%s failed to compile for variant 0x%x; %s.", i, si.name.is_empty() ? String() : " (" + si.name + ")", p_task->rt_flags, _failed_shader_fallback(si.is_procedural)));
 		}
 	}
 

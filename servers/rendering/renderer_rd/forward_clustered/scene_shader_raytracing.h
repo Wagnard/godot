@@ -556,6 +556,8 @@ public:
 	uint32_t get_pipeline_swap_count() const { return pipeline_swap_count; }
 
 	bool is_hg_ready_in_bundle(uint32_t p_slot_index, uint32_t p_rt_flags) const;
+	// The slot's hit group failed to compile for this variant: it will never be ready there (the default one stands in).
+	bool is_hg_failed_in_bundle(uint32_t p_slot_index, uint32_t p_rt_flags) const;
 	// An instance in the TLAS, p_distance from the camera, waits for this slot's hit group: the next builds take it first.
 	void request_hit_group(uint32_t p_slot_index, float p_distance);
 	// Hit groups registered but not yet in the pipeline of the variant a view traced with last (0 before any trace):

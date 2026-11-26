@@ -3137,6 +3137,41 @@ void RenderRaytracing::update_procedural_blas(RTProceduralState *p_state, LocalV
 // Material processing
 // ---------------------------------------------------------------------------
 
+// A surface whose shape comes from its shader's alpha (raster's flags): no stand-in material may trace it.
+static bool _shader_cuts_out(const SceneShaderForwardClustered::ShaderData *p_shader) {
+	return p_shader && (p_shader->uses_alpha || p_shader->uses_blend_alpha || p_shader->uses_alpha_clip || p_shader->uses_alpha_antialiasing || p_shader->uses_discard);
+}
+
+// A material whose custom shader no hit group can run is traced with hit group 0, the default material
+// (SceneShaderRaytracing::_register_slot()), as the usual error fallback; not where hit group 0 would draw the wrong
+// shape: a cut-out (a quad of foliage traced whole) or a surface vertex() places by its camera matrices (a custom
+// billboard), as _compiling_material_fallback() leaves them out while they compile. The front layer leaves such a
+// transparent surface out too (build_tlas()).
+static bool _failed_shader_shapes(const SceneShaderForwardClustered::ShaderData *p_shader) {
+	return _shader_cuts_out(p_shader) || (p_shader && p_shader->writes_modelview_or_projection);
+}
+
+static bool _failed_shader_left_out(const RTMaterialData *p_mat_data, const SceneShaderForwardClustered::ShaderData *p_shader) {
+	return p_mat_data->shader_failed && _failed_shader_shapes(p_shader);
+}
+
+// The same default material for a hit group that failed to compile for this variant (its shader preprocessed, so the
+// material was built for its slot): the material's BaseMaterial3D-named parameters, read by process_material() whatever
+// the shader, on hit group 0. Returns nullptr where the default would draw the wrong shape. build_tlas() is single
+// threaded and copies the data it returns before the next call.
+static RTMaterialData *_failed_hit_group_material(const RTMaterialData *p_mat_data, const SceneShaderForwardClustered::ShaderData *p_shader) {
+	if (_failed_shader_shapes(p_shader)) {
+		return nullptr;
+	}
+	static RTMaterialData s_failed_mat;
+	s_failed_mat.data = p_mat_data->data;
+	s_failed_mat.data.uniform_address = 0;
+	s_failed_mat.rt_sbt_offset = 0;
+	s_failed_mat.is_custom_shader = true;
+	s_failed_mat.shader_failed = true;
+	return &s_failed_mat;
+}
+
 RTMaterialData *RenderRaytracing::_compiling_material_fallback(const RTMaterialData *p_mat_data, bool p_cut_out) {
 	// A neutral standard material, so the ground and the walls do not vanish for the seconds a new pipeline takes to
 	// compile (a pipeline cache miss: a new shader or engine version). Cut-out and billboard materials wait: their shape
@@ -5004,8 +5039,11 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 				continue;
 			}
 			if (!rt_shader->is_hg_ready_in_bundle(hg_index, p_rt_flags)) {
-				request_hit_group(hg_index, inst->transformed_aabb);
-				render_info_counters.pending_surfaces++;
+				// Failed to compile for this variant: not traced (no hit group 0 for an AABB), and not waited for.
+				if (!rt_shader->is_hg_failed_in_bundle(hg_index, p_rt_flags)) {
+					request_hit_group(hg_index, inst->transformed_aabb);
+					render_info_counters.pending_surfaces++;
+				}
 				continue;
 			}
 
@@ -5130,15 +5168,22 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 
 				uint16_t material_counter = material_storage->material_get_rt_invalidation_counter(material_rid);
 				RTMaterialData *mat_data = process_material(material_rid, material_counter);
+				if (_failed_shader_left_out(mat_data, mm_surf->shader)) {
+					mm_surf = mm_surf->next;
+					continue;
+				}
 
 				bool mm_material_ready = true;
 				if (mat_data->rt_sbt_offset > 0 &&
 						!rt_shader_singleton->is_hg_ready_in_bundle(mat_data->rt_sbt_offset, p_rt_flags)) {
-					mm_material_ready = false;
-					render_info_counters.pending_surfaces++;
-					request_hit_group(mat_data->rt_sbt_offset, inst->transformed_aabb);
-					const SceneShaderForwardClustered::ShaderData *cut_shader = mm_surf->shader;
-					mat_data = _compiling_material_fallback(mat_data, cut_shader && (cut_shader->uses_alpha || cut_shader->uses_blend_alpha || cut_shader->uses_alpha_clip || cut_shader->uses_alpha_antialiasing || cut_shader->uses_discard));
+					if (rt_shader_singleton->is_hg_failed_in_bundle(mat_data->rt_sbt_offset, p_rt_flags)) {
+						mat_data = _failed_hit_group_material(mat_data, mm_surf->shader);
+					} else {
+						mm_material_ready = false;
+						render_info_counters.pending_surfaces++;
+						request_hit_group(mat_data->rt_sbt_offset, inst->transformed_aabb);
+						mat_data = _compiling_material_fallback(mat_data, _shader_cuts_out(mm_surf->shader));
+					}
 					if (!mat_data) {
 						mm_surf = mm_surf->next;
 						continue;
@@ -5382,14 +5427,20 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 				const RID material_rid = part_surf->material_rid;
 				const uint16_t material_counter = material_storage->material_get_rt_invalidation_counter(material_rid);
 				RTMaterialData *mat_data = process_material(material_rid, material_counter);
+				if (_failed_shader_left_out(mat_data, part_surf->shader)) {
+					continue;
+				}
 
 				bool material_ready = true;
 				if (mat_data->rt_sbt_offset > 0 && !rt_shader_singleton->is_hg_ready_in_bundle(mat_data->rt_sbt_offset, p_rt_flags)) {
-					material_ready = false;
-					render_info_counters.pending_surfaces++;
-					request_hit_group(mat_data->rt_sbt_offset, inst->transformed_aabb);
-					const SceneShaderForwardClustered::ShaderData *cut_shader = part_surf->shader;
-					mat_data = _compiling_material_fallback(mat_data, cut_shader && (cut_shader->uses_alpha || cut_shader->uses_blend_alpha || cut_shader->uses_alpha_clip || cut_shader->uses_alpha_antialiasing || cut_shader->uses_discard));
+					if (rt_shader_singleton->is_hg_failed_in_bundle(mat_data->rt_sbt_offset, p_rt_flags)) {
+						mat_data = _failed_hit_group_material(mat_data, part_surf->shader);
+					} else {
+						material_ready = false;
+						render_info_counters.pending_surfaces++;
+						request_hit_group(mat_data->rt_sbt_offset, inst->transformed_aabb);
+						mat_data = _compiling_material_fallback(mat_data, _shader_cuts_out(part_surf->shader));
+					}
 					if (!mat_data) {
 						continue;
 					}
@@ -5534,8 +5585,9 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 			RTMaterialData *mat_data = process_material(material_rid, material_counter);
 			// The front layer only gives a transparent surface the reflection its own material shapes; the raster
 			// transparent pass draws it either way. A stand-in (for a shader no hit group can run, or one still
-			// compiling) would hide the surfaces behind it with a reflection of the wrong material: they keep theirs.
-			if (front_layer && mat_data->shader_failed) {
+			// compiling) would hide the surfaces behind it with a reflection of the wrong material: they keep theirs. An
+			// opaque one is traced with the default material, a cut-out left out (_failed_shader_left_out()).
+			if ((front_layer && mat_data->shader_failed) || _failed_shader_left_out(mat_data, surf->shader)) {
 				surf = surf->next;
 				continue;
 			}
@@ -5544,15 +5596,15 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 
 			if (mat_data->rt_sbt_offset > 0 &&
 					!rt_shader_singleton->is_hg_ready_in_bundle(mat_data->rt_sbt_offset, p_rt_flags)) {
-				material_ready = false;
-				render_info_counters.pending_surfaces++;
-				request_hit_group(mat_data->rt_sbt_offset, inst->transformed_aabb);
-				if (front_layer) {
-					surf = surf->next;
-					continue;
+				if (rt_shader_singleton->is_hg_failed_in_bundle(mat_data->rt_sbt_offset, p_rt_flags)) {
+					// Failed to compile for this variant: as a shader no hit group can run (above), never waited for.
+					mat_data = front_layer ? nullptr : _failed_hit_group_material(mat_data, surf->shader);
+				} else {
+					material_ready = false;
+					render_info_counters.pending_surfaces++;
+					request_hit_group(mat_data->rt_sbt_offset, inst->transformed_aabb);
+					mat_data = front_layer ? nullptr : _compiling_material_fallback(mat_data, _shader_cuts_out(surf->shader));
 				}
-				const SceneShaderForwardClustered::ShaderData *cut_shader = surf->shader;
-				mat_data = _compiling_material_fallback(mat_data, cut_shader && (cut_shader->uses_alpha || cut_shader->uses_blend_alpha || cut_shader->uses_alpha_clip || cut_shader->uses_alpha_antialiasing || cut_shader->uses_discard));
 				if (!mat_data) {
 					surf = surf->next;
 					continue;
