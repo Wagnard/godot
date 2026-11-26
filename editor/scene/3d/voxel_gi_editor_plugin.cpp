@@ -79,8 +79,42 @@ void VoxelGIEditorPlugin::_bake() {
 			}
 		}
 
-		voxel_gi->bake();
+		_start_bake_next_frame(String());
 	}
+}
+
+// The Bake button and the file dialog run their handlers inside the dispatch of an input event, and DisplayServer drops
+// every input event that arrives while one is being dispatched (`_dispatch_input_event()` on Windows and macOS): a bake
+// run from there showed a Cancel button that no click could reach. The bake starts at the next process frame instead, as
+// EditorFileSystem::_queue_refresh_filesystem() runs its scan actions. Not call_deferred(): ProgressDialog::add_task()
+// refuses tasks while the message queue is flushing.
+void VoxelGIEditorPlugin::_start_bake_next_frame(const String &p_save_path) {
+	const Callable bake_callable = callable_mp(this, &VoxelGIEditorPlugin::_bake_and_save).bind(p_save_path);
+	if (!get_tree()->is_connected(SNAME("process_frame"), bake_callable)) {
+		get_tree()->connect(SNAME("process_frame"), bake_callable, CONNECT_ONE_SHOT);
+	}
+}
+
+void VoxelGIEditorPlugin::_bake_and_save(const String &p_save_path) {
+	if (!voxel_gi) {
+		return;
+	}
+
+	voxel_gi->bake();
+	if (p_save_path.is_empty()) {
+		return;
+	}
+
+	// Ensure the VoxelGIData is always saved to an external resource.
+	// This avoids bloating the scene file with large binary data,
+	// which would be serialized as Base64 if the scene is a `.tscn` file.
+	Ref<VoxelGIData> voxel_gi_data = voxel_gi->get_probe_data();
+	if (voxel_gi_data.is_null()) {
+		// The bake was canceled before it created any data.
+		return;
+	}
+	voxel_gi_data->set_path(p_save_path);
+	ResourceSaver::save(voxel_gi_data, p_save_path, ResourceSaver::FLAG_CHANGE_PATH);
 }
 
 void VoxelGIEditorPlugin::edit(Object *p_object) {
@@ -168,16 +202,7 @@ void VoxelGIEditorPlugin::bake_func_end() {
 
 void VoxelGIEditorPlugin::_voxel_gi_save_path_and_bake(const String &p_path) {
 	probe_file->hide();
-	if (voxel_gi) {
-		voxel_gi->bake();
-		// Ensure the VoxelGIData is always saved to an external resource.
-		// This avoids bloating the scene file with large binary data,
-		// which would be serialized as Base64 if the scene is a `.tscn` file.
-		Ref<VoxelGIData> voxel_gi_data = voxel_gi->get_probe_data();
-		ERR_FAIL_COND(voxel_gi_data.is_null());
-		voxel_gi_data->set_path(p_path);
-		ResourceSaver::save(voxel_gi_data, p_path, ResourceSaver::FLAG_CHANGE_PATH);
-	}
+	_start_bake_next_frame(p_path);
 }
 
 VoxelGIEditorPlugin::VoxelGIEditorPlugin() {

@@ -197,6 +197,7 @@ class EditorBuildProfileManager : public AcceptDialog {
 	bool project_scan_canceled = false;
 
 	void _detect_from_project();
+	void _detect_from_project_and_update();
 
 	void _force_detect_classes_changed(const String &p_text);
 

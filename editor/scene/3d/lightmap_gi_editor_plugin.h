@@ -49,6 +49,7 @@ class LightmapGIEditorPlugin : public EditorPlugin {
 	static void bake_func_end(uint64_t p_time_started);
 
 	void _bake_select_file(const String &p_file);
+	void _start_bake_next_frame(const String &p_file);
 	void _bake();
 
 protected:

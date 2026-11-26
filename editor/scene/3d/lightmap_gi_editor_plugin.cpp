@@ -137,7 +137,19 @@ void LightmapGIEditorPlugin::_bake_select_file(const String &p_file) {
 }
 
 void LightmapGIEditorPlugin::_bake() {
-	_bake_select_file("");
+	_start_bake_next_frame("");
+}
+
+// The Bake button and the file dialog run their handlers inside the dispatch of an input event, and DisplayServer drops
+// every input event that arrives while one is being dispatched (`_dispatch_input_event()` on Windows and macOS): a bake
+// run from there showed a Cancel button that no click could reach. The bake starts at the next process frame instead, as
+// EditorFileSystem::_queue_refresh_filesystem() runs its scan actions. Not call_deferred(): ProgressDialog::add_task()
+// refuses tasks while the message queue is flushing.
+void LightmapGIEditorPlugin::_start_bake_next_frame(const String &p_file) {
+	const Callable bake_callable = callable_mp(this, &LightmapGIEditorPlugin::_bake_select_file).bind(p_file);
+	if (!get_tree()->is_connected(SNAME("process_frame"), bake_callable)) {
+		get_tree()->connect(SNAME("process_frame"), bake_callable, CONNECT_ONE_SHOT);
+	}
 }
 
 void LightmapGIEditorPlugin::edit(Object *p_object) {
@@ -222,6 +234,6 @@ LightmapGIEditorPlugin::LightmapGIEditorPlugin() {
 	file_dialog->set_file_mode(EditorFileDialog::FILE_MODE_SAVE_FILE);
 	file_dialog->add_filter("*.lmbake", TTR("LightMap Bake"));
 	file_dialog->set_title(TTR("Select lightmap bake file:"));
-	file_dialog->connect("file_selected", callable_mp(this, &LightmapGIEditorPlugin::_bake_select_file));
+	file_dialog->connect("file_selected", callable_mp(this, &LightmapGIEditorPlugin::_start_bake_next_frame));
 	bake->add_child(file_dialog);
 }

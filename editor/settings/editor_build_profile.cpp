@@ -47,6 +47,7 @@
 #include "scene/gui/line_edit.h"
 #include "scene/gui/margin_container.h"
 #include "scene/gui/separator.h"
+#include "scene/main/scene_tree.h"
 #include "servers/physics_3d/physics_server_3d_manager.h"
 
 #include "modules/modules_enabled.gen.h" // IWYU pragma: keep. For mono.
@@ -1138,6 +1139,11 @@ void EditorBuildProfileManager::_detect_from_project() {
 	EditorNode::get_singleton()->progress_end_task("detect_classes_from_project");
 }
 
+void EditorBuildProfileManager::_detect_from_project_and_update() {
+	_detect_from_project();
+	_update_edited_profile();
+}
+
 void EditorBuildProfileManager::_action_confirm() {
 	switch (last_action) {
 		case ACTION_RESET: {
@@ -1152,8 +1158,15 @@ void EditorBuildProfileManager::_action_confirm() {
 		} break;
 
 		case ACTION_DETECT: {
-			_detect_from_project();
-			_update_edited_profile();
+			// This runs inside the dispatch of an input event (the confirmation's button, Enter), and DisplayServer drops
+			// every input event that arrives while one is being dispatched (`_dispatch_input_event()` on Windows and
+			// macOS): a scan run from here showed a Cancel button that no click could reach. The scan starts at the next
+			// process frame instead, as EditorFileSystem::_queue_refresh_filesystem() runs its scan actions. Not
+			// call_deferred(): ProgressDialog::add_task() refuses tasks while the message queue is flushing.
+			const Callable detect_callable = callable_mp(this, &EditorBuildProfileManager::_detect_from_project_and_update);
+			if (!get_tree()->is_connected(SNAME("process_frame"), detect_callable)) {
+				get_tree()->connect(SNAME("process_frame"), detect_callable, CONNECT_ONE_SHOT);
+			}
 		} break;
 
 		case ACTION_CLEAR_CACHE: {
