@@ -12,10 +12,10 @@
 // Bakes a mesh surface's cut-out with its material into an opacity micromap: one entry per triangle, 4-state, at one
 // subdivision level. Each micro-triangle is evaluated as the any-hit shaders evaluate a hit (raytracing_omm_bake.glsl's
 // custom variant runs the material's vertex() at the corners and its fragment code; the standard one, hit group 0's
-// alpha) at points spaced at most half a texel apart in every texture the decision samples. All of them pass: opaque;
-// none: transparent; otherwise, or when one sits on the threshold (RT_OMM_ALPHA_TIE), unknown, and the any-hit shader
-// decides as before. The decision is taken at the textures' base level, which the any-hit shaders test at any distance
-// too (NVIDIA OMM SDK integration guide: "Pick a texture mip and always use that version").
+// alpha) at every cell of the decisive texture's half-texel grid the micro-triangle touches (rt_omm_classify_grid()). All
+// of them pass: opaque; none: transparent; otherwise, or when one sits on the threshold (RT_OMM_ALPHA_TIE), unknown, and
+// the any-hit shader decides as before. The decision is taken at the textures' base level, which the any-hit shaders
+// test at any distance too (NVIDIA OMM SDK integration guide: "Pick a texture mip and always use that version").
 //
 // Output: the entries' 2-bit states in micro-triangle order (the space-filling curve of VK_EXT_opacity_micromap and
 // D3D12's opacity micromaps), LSB first, and per triangle its 8-byte description (byte offset, level, format).
@@ -105,31 +105,60 @@ params;
 // between two evaluations the gradients span.
 bool rt_omm_measuring = false;
 float rt_omm_footprint = 0.0;
+// The texel grid the classification follows: of the 2D texture (or 2D array layer) with the largest footprint, the
+// sampled point in its texels and the steps the gradients span (the micro-triangle's edges when measured at its first
+// corner). Valid unless a 3D texture's footprint is larger.
+float rt_omm_grid_footprint = 0.0;
+float rt_omm_other_footprint = 0.0;
+vec2 rt_omm_grid_point = vec2(0.0);
+vec2 rt_omm_grid_dx = vec2(0.0);
+vec2 rt_omm_grid_dy = vec2(0.0);
+
+void rt_omm_record_grid(vec2 p_size, vec2 p_coord, vec2 p_dx, vec2 p_dy) {
+	const float footprint = max(length(p_dx * p_size), length(p_dy * p_size));
+	rt_omm_footprint = max(rt_omm_footprint, footprint);
+	if (footprint > rt_omm_grid_footprint) {
+		rt_omm_grid_footprint = footprint;
+		rt_omm_grid_point = p_coord * p_size;
+		rt_omm_grid_dx = p_dx * p_size;
+		rt_omm_grid_dy = p_dy * p_size;
+	}
+}
 
 // The material's texture() calls become textureGrad() (scene_shader_raytracing.cpp). A sampler built in the call cannot be
 // passed to a function: the macro below leaves the call as it is and passes its x gradient through rt_omm_record(),
-// which records the footprint (the texture's size by the gradients) and returns it. Overloads by the size's and the
-// gradients' types: 2D, 2D array (its layers ignored), 3D; a cube map (a direction) has no footprint to measure.
-vec2 rt_omm_record(ivec2 p_size, vec2 p_dx, vec2 p_dy) {
+// which records the footprint (the texture's size by the gradients) and the grid, and returns it. Overloads by the size's,
+// the coordinates' and the gradients' types: 2D, 2D array (its layers ignored), 3D; a cube map or cube map array (a
+// direction) has no footprint to measure.
+vec2 rt_omm_record(ivec2 p_size, vec2 p_coord, vec2 p_dx, vec2 p_dy) {
 	if (rt_omm_measuring) {
-		rt_omm_footprint = max(rt_omm_footprint, max(length(p_dx * vec2(p_size)), length(p_dy * vec2(p_size))));
+		rt_omm_record_grid(vec2(p_size), p_coord, p_dx, p_dy);
 	}
 	return p_dx;
 }
-vec2 rt_omm_record(ivec3 p_size, vec2 p_dx, vec2 p_dy) {
-	return rt_omm_record(p_size.xy, p_dx, p_dy);
-}
-vec3 rt_omm_record(ivec3 p_size, vec3 p_dx, vec3 p_dy) {
+vec2 rt_omm_record(ivec3 p_size, vec3 p_coord, vec2 p_dx, vec2 p_dy) {
 	if (rt_omm_measuring) {
-		rt_omm_footprint = max(rt_omm_footprint, max(length(p_dx * vec3(p_size)), length(p_dy * vec3(p_size))));
+		rt_omm_record_grid(vec2(p_size.xy), p_coord.xy, p_dx, p_dy);
 	}
 	return p_dx;
 }
-vec3 rt_omm_record(ivec2 p_size, vec3 p_dx, vec3 p_dy) {
+vec3 rt_omm_record(ivec3 p_size, vec3 p_coord, vec3 p_dx, vec3 p_dy) {
+	if (rt_omm_measuring) {
+		const float footprint = max(length(p_dx * vec3(p_size)), length(p_dy * vec3(p_size)));
+		rt_omm_footprint = max(rt_omm_footprint, footprint);
+		rt_omm_other_footprint = max(rt_omm_other_footprint, footprint);
+	}
 	return p_dx;
 }
-// Not expanded again inside its own expansion: the inner textureGrad() is the built-in.
-#define textureGrad(m_sampler, m_coord, m_dx, m_dy) textureGrad(m_sampler, m_coord, rt_omm_record(textureSize(m_sampler, 0), m_dx, m_dy), m_dy)
+vec3 rt_omm_record(ivec2 p_size, vec3 p_coord, vec3 p_dx, vec3 p_dy) {
+	return p_dx;
+}
+vec3 rt_omm_record(ivec3 p_size, vec4 p_coord, vec3 p_dx, vec3 p_dy) {
+	return p_dx;
+}
+// Not expanded again inside its own expansion: the inner textureGrad() is the built-in. The coordinates are evaluated
+// again for the record, as the rewritten call's dFdx() already does (scene_shader_raytracing.cpp).
+#define textureGrad(m_sampler, m_coord, m_dx, m_dy) textureGrad(m_sampler, m_coord, rt_omm_record(textureSize(m_sampler, 0), m_coord, m_dx, m_dy), m_dy)
 
 #ifndef RT_OMM_BAKE_STANDARD
 #include "raytracing_custom_globals_inc.glsl"
@@ -253,21 +282,13 @@ void rt_omm_prepare_triangle(OmmBakeJob p_job) {
 // the bake's by rounding, and a cut-out's edge filtered between alpha 0 and 1 runs exactly along the micro-triangles'
 // edges when its texels align with them (the corner of a checkerboard square at 0.5).
 #define RT_OMM_ALPHA_TIE 1e-3
-
-#define RT_OMM_SAMPLE_TRANSPARENT 0u
-#define RT_OMM_SAMPLE_OPAQUE 1u
-#define RT_OMM_SAMPLE_TIE 2u
-
-uint rt_omm_compare(float p_alpha, float p_threshold) {
-	if (abs(p_alpha - p_threshold) < RT_OMM_ALPHA_TIE) {
-		return RT_OMM_SAMPLE_TIE;
-	}
-	return p_alpha >= p_threshold ? RT_OMM_SAMPLE_OPAQUE : RT_OMM_SAMPLE_TRANSPARENT;
-}
+// The bilinear filter's own rounding (rt_omm_grid_edge()): 2^-7 of alpha.
+#define RT_OMM_FILTER_TIE (1.0 / 128.0)
 
 // How a ray fares in the any-hit test at barycentrics p_bary (weights of the triangle's vertices 0, 1, 2), the texture
-// footprint spanning p_bary_dx and p_bary_dy: RT_OMM_SAMPLE_*.
-uint rt_omm_sample(vec3 p_bary, vec3 p_bary_dx, vec3 p_bary_dy) {
+// footprint spanning p_bary_dx and p_bary_dy: the alpha's margin over the threshold (>= 0 the hit stays; -1 discarded,
+// 1 no alpha test).
+float rt_omm_sample(vec3 p_bary, vec3 p_bary_dx, vec3 p_bary_dy) {
 #ifdef RT_OMM_BAKE_STANDARD
 	OmmBakeJob job = jobs[params.job_index];
 	vec2 uv = rt_omm_uv[0] * p_bary.x + rt_omm_uv[1] * p_bary.y + rt_omm_uv[2] * p_bary.z;
@@ -278,7 +299,7 @@ uint rt_omm_sample(vec3 p_bary, vec3 p_bary_dx, vec3 p_bary_dy) {
 	if (job.use_vertex_color != 0u) {
 		alpha *= (rt_omm_color[0] * p_bary.x + rt_omm_color[1] * p_bary.y + rt_omm_color[2] * p_bary.z).a;
 	}
-	return rt_omm_compare(alpha, 0.5);
+	return alpha - 0.5;
 #else
 	rt_hit_bary = p_bary;
 	rt_hit_bary_ddx = p_bary_dx;
@@ -325,10 +346,156 @@ uint rt_omm_sample(vec3 p_bary, vec3 p_bary_dx, vec3 p_bary_dy) {
 	}
 	// The any-hit shader's test.
 	if (rt_discarded) {
-		return RT_OMM_SAMPLE_TRANSPARENT;
+		return -1.0;
 	}
-	return alpha_scissor_threshold > 0.0 ? rt_omm_compare(alpha, alpha_scissor_threshold) : RT_OMM_SAMPLE_OPAQUE;
+	return alpha_scissor_threshold > 0.0 ? alpha - alpha_scissor_threshold : 1.0;
 #endif
+}
+
+// The micro-triangle being classified: its corners' barycentrics, and what its evaluations found (a margin within
+// RT_OMM_ALPHA_TIE of the threshold is both: the hit's barycentrics, interpolated by the hardware, differ from the
+// bake's by rounding).
+vec3 rt_omm_b0;
+vec3 rt_omm_b1;
+vec3 rt_omm_b2;
+bool rt_omm_any_opaque = false;
+bool rt_omm_any_transparent = false;
+
+void rt_omm_classify(float p_margin) {
+	rt_omm_any_opaque = rt_omm_any_opaque || p_margin > -RT_OMM_ALPHA_TIE;
+	rt_omm_any_transparent = rt_omm_any_transparent || p_margin < RT_OMM_ALPHA_TIE;
+}
+
+bool rt_omm_mixed() {
+	return rt_omm_any_opaque && rt_omm_any_transparent;
+}
+
+// Evaluates the cut-out at (s, t) of the micro-triangle (its point b0 + s (b1 - b0) + t (b2 - b0)), at the textures' base
+// level as the any-hit shaders test it (zero gradients, whatever the sampler's mip bias).
+float rt_omm_eval(vec2 p_st) {
+	const vec2 st = max(p_st, vec2(0.0));
+	const float sum = st.x + st.y;
+	const vec2 inside = sum > 1.0 ? st / sum : st;
+	const float margin = rt_omm_sample(rt_omm_b0 + (rt_omm_b1 - rt_omm_b0) * inside.x + (rt_omm_b2 - rt_omm_b0) * inside.y, vec3(0.0), vec3(0.0));
+	rt_omm_classify(margin);
+	return margin;
+}
+
+float rt_omm_cross(vec2 p_a, vec2 p_b) {
+	return p_a.x * p_b.y - p_a.y * p_b.x;
+}
+
+// One edge of the micro-triangle in texels (p_a to p_b; p_st_a, p_st_b its ends' (s, t)): its ends, every crossing of a
+// half-grid line, each piece's middle, and the extremum of the quadratic through a piece's three values.
+void rt_omm_grid_edge(vec2 p_a, vec2 p_b, vec2 p_st_a, vec2 p_st_b) {
+	const vec2 d = p_b - p_a;
+	// The parameter of the next half-grid line the edge crosses on each axis, and the step between two of them.
+	vec2 next_u = vec2(2.0);
+	vec2 step_u = vec2(2.0);
+	for (int axis = 0; axis < 2; axis++) {
+		if (abs(d[axis]) > 1e-12) {
+			const float line = d[axis] > 0.0 ? (floor(p_a[axis] * 2.0) + 1.0) * 0.5 : (ceil(p_a[axis] * 2.0) - 1.0) * 0.5;
+			next_u[axis] = (line - p_a[axis]) / d[axis];
+			step_u[axis] = 0.5 / abs(d[axis]);
+		}
+	}
+	float u0 = 0.0;
+	float m0 = rt_omm_eval(p_st_a);
+	while (!rt_omm_mixed()) {
+		const float u1 = min(min(next_u.x, next_u.y), 1.0);
+		if (next_u.x <= u1) {
+			next_u.x += step_u.x;
+		}
+		if (next_u.y <= u1) {
+			next_u.y += step_u.y;
+		}
+		const float mm = rt_omm_eval(mix(p_st_a, p_st_b, (u0 + u1) * 0.5));
+		const float m1 = rt_omm_eval(mix(p_st_a, p_st_b, u1));
+		// The quadratic q(x) = a x^2 + b x + m0 through m0, mm, m1 (x from 0 to 1 over the piece): its extremum inside. A
+		// model, not a sample: the filter computes its weights with 8 fractional bits (D3D12_SUBTEXEL_FRACTIONAL_BIT_COUNT;
+		// Vulkan's subTexelPrecisionBits, 8 on the GPUs tested), a staircase off the exact bilinear by up to 2^-7 of
+		// alpha. An extremum that close to the threshold is a tie (a level line grazing the edge).
+		const float a = 2.0 * (m0 + m1 - 2.0 * mm);
+		if (abs(a) > 1e-9) {
+			const float b = m1 - m0 - a;
+			const float x = -b / (2.0 * a);
+			if (x > 0.0 && x < 1.0) {
+				const float extremum = m0 - b * b / (4.0 * a);
+				rt_omm_classify(extremum);
+				if (abs(extremum) < RT_OMM_FILTER_TIE) {
+					rt_omm_any_opaque = true;
+					rt_omm_any_transparent = true;
+				}
+			}
+		}
+		if (u1 >= 1.0) {
+			break;
+		}
+		u0 = u1;
+		m0 = m1;
+	}
+}
+
+// Conservative classification on the texel grid of the decisive texture (rt_omm_grid_*), as NVIDIA's OMM SDK bakes
+// ("each micro-triangle will be effectively rasterized and compared to the texels in the texture object"): every cell
+// of the half-texel grid the micro-triangle touches, however thin the part, is evaluated. That grid's cells each lie in
+// one texel (nearest filtering: one value per cell) and in one bilinear patch between four texel centers (linear
+// filtering: a x y + b x + c y + d, whose extremes over the convex part of a cell lie on its boundary, linear along the
+// grid lines, quadratic along the micro-triangle's edges). Evaluated: the half-grid points inside the micro-triangle
+// (each cell's texel center among them), and along its three edges the corners, every crossing of a grid line, each
+// piece's middle, and the extremum of the quadratic through those three (the SDK's level line test on the edges).
+// Point sampling half a texel apart missed the cells a micro-triangle only grazes: on long, thin triangles (coarse LODs)
+// a micro-triangle known opaque or transparent held a sliver of the other state.
+// p_p0: the first corner in texels, p_e1 / p_e2: the steps to the two others.
+void rt_omm_classify_grid(vec2 p_p0, vec2 p_e1, vec2 p_e2) {
+	// Relative to a texel corner near the first one: the grid lines stay at multiples of 0.5, the coordinates small.
+	const vec2 origin = floor(p_p0);
+	const vec2 p0 = p_p0 - origin;
+	const vec2 p1 = p0 + p_e1;
+	const vec2 p2 = p0 + p_e2;
+	rt_omm_grid_edge(p0, p1, vec2(0.0, 0.0), vec2(1.0, 0.0));
+	rt_omm_grid_edge(p1, p2, vec2(1.0, 0.0), vec2(0.0, 1.0));
+	rt_omm_grid_edge(p2, p0, vec2(0.0, 1.0), vec2(0.0, 0.0));
+	if (rt_omm_mixed()) {
+		return;
+	}
+	// The half-grid points inside, row by row: on each row the span between the edges. A micro-triangle flat in texture
+	// space (its UVs on a line) has none: its edges covered every cell.
+	const float det = rt_omm_cross(p_e1, p_e2);
+	if (abs(det) < 1e-12) {
+		return;
+	}
+	const float inv_det = 1.0 / det;
+	const vec2 corners[3] = vec2[3](p0, p1, p2);
+	const int row_first = int(ceil(min(p0.y, min(p1.y, p2.y)) * 2.0));
+	const int row_last = int(floor(max(p0.y, max(p1.y, p2.y)) * 2.0));
+	for (int row = row_first; row <= row_last; row++) {
+		const float y = float(row) * 0.5;
+		float x_min = 1e30;
+		float x_max = -1e30;
+		for (int e = 0; e < 3; e++) {
+			const vec2 a = corners[e];
+			const vec2 b = corners[(e + 1) % 3];
+			if (y < min(a.y, b.y) || y > max(a.y, b.y)) {
+				continue;
+			}
+			if (a.y == b.y) {
+				x_min = min(x_min, min(a.x, b.x));
+				x_max = max(x_max, max(a.x, b.x));
+			} else {
+				const float x = a.x + (y - a.y) * (b.x - a.x) / (b.y - a.y);
+				x_min = min(x_min, x);
+				x_max = max(x_max, x);
+			}
+		}
+		for (int column = int(ceil(x_min * 2.0)); column <= int(floor(x_max * 2.0)); column++) {
+			const vec2 d = vec2(float(column) * 0.5, y) - p0;
+			rt_omm_eval(vec2(rt_omm_cross(d, p_e2), rt_omm_cross(p_e1, d)) * inv_det);
+			if (rt_omm_mixed()) {
+				return;
+			}
+		}
+	}
 }
 
 void main() {
@@ -362,11 +529,21 @@ void main() {
 		get_triangle_indices_ex(rt_omm_geom, triangle, rt_omm_i0, rt_omm_i1, rt_omm_i2);
 		rt_omm_prepare_triangle(job);
 		rt_omm_measuring = true;
-		rt_omm_footprint = 0.0;
 		rt_omm_sample(vec3(1.0 / 3.0), vec3(-1.0, 1.0, 0.0) / float(n), vec3(-1.0, 0.0, 1.0) / float(n));
 		rt_omm_measuring = false;
 		const uint steps = max(1u, uint(ceil(rt_omm_footprint * 2.0)));
-		const uint64_t samples = steps <= job.max_samples ? uint64_t(steps + 1u) * uint64_t(steps + 2u) / 2u + 1u : 1u;
+		uint64_t samples = 1u;
+		if (steps <= job.max_samples) {
+			if (rt_omm_grid_footprint >= rt_omm_other_footprint) {
+				// rt_omm_classify_grid(): the half-grid points inside (four per texel of area), and along the edges two
+				// evaluations per half-grid line crossed.
+				const vec2 e3 = rt_omm_grid_dy - rt_omm_grid_dx;
+				const float crossings = 2.0 * (abs(rt_omm_grid_dx.x) + abs(rt_omm_grid_dx.y) + abs(rt_omm_grid_dy.x) + abs(rt_omm_grid_dy.y) + abs(e3.x) + abs(e3.y));
+				samples = uint64_t(2.0 * abs(rt_omm_cross(rt_omm_grid_dx, rt_omm_grid_dy)) + 2.0 * crossings) + 8u;
+			} else {
+				samples = uint64_t(steps + 1u) * uint64_t(steps + 2u) / 2u + 1u;
+			}
+		}
 		const uint64_t units = (samples * uint64_t(micro_count) + uint64_t(RT_OMM_COST_UNIT - 1u)) / uint64_t(RT_OMM_COST_UNIT);
 		omm_cost.v[triangle] = uint(min(units, uint64_t(0xFFFFFFFFu)));
 		return;
@@ -412,32 +589,31 @@ void main() {
 	const vec3 b1 = vec3(1.0 - c1.x - c1.y, c1.x, c1.y);
 	const vec3 b2 = vec3(1.0 - c2.x - c2.y, c2.x, c2.y);
 
-	// The texel footprint of the micro-triangle's edges, from the textures the decision samples: half a texel between
-	// evaluations. Beyond max_samples (a bound on one thread's work), the micro-triangle stays unknown.
+	// The texel footprint of the micro-triangle's edges and its corners on the decisive texture's grid, from the textures
+	// the decision samples, measured at its first corner (the gradients reach the two others). Beyond max_samples (a bound
+	// on one thread's work), the micro-triangle stays unknown.
 	rt_omm_measuring = true;
-	rt_omm_footprint = 0.0;
-	rt_omm_sample((b0 + b1 + b2) / 3.0, b1 - b0, b2 - b0);
+	rt_omm_sample(b0, b1 - b0, b2 - b0);
 	rt_omm_measuring = false;
 	const uint steps = max(1u, uint(ceil(rt_omm_footprint * 2.0)));
 
 	uint state = 3u; // Unknown opaque.
 	if (steps <= job.max_samples) {
-		const vec3 step_dx = (b1 - b0) / float(steps);
-		const vec3 step_dy = (b2 - b0) / float(steps);
-		bool any_opaque = false;
-		bool any_transparent = false;
-		for (uint j = 0u; j <= steps && !(any_opaque && any_transparent); j++) {
-			for (uint i = 0u; i + j <= steps; i++) {
-				// Level 0, as the any-hit shaders test it: zero gradients, whatever the sampler's mip bias.
-				const uint sample_state = rt_omm_sample(b0 + step_dx * float(i) + step_dy * float(j), vec3(0.0), vec3(0.0));
-				any_opaque = any_opaque || sample_state != RT_OMM_SAMPLE_TRANSPARENT;
-				any_transparent = any_transparent || sample_state != RT_OMM_SAMPLE_OPAQUE;
-				if (any_opaque && any_transparent) {
-					break;
+		rt_omm_b0 = b0;
+		rt_omm_b1 = b1;
+		rt_omm_b2 = b2;
+		if (rt_omm_grid_footprint >= rt_omm_other_footprint) {
+			rt_omm_classify_grid(rt_omm_grid_point, rt_omm_grid_dx, rt_omm_grid_dy);
+		} else {
+			// A 3D texture decides: points half of its texels apart.
+			const vec2 step_st = vec2(1.0 / float(steps));
+			for (uint j = 0u; j <= steps && !rt_omm_mixed(); j++) {
+				for (uint i = 0u; i + j <= steps && !rt_omm_mixed(); i++) {
+					rt_omm_eval(vec2(float(i), float(j)) * step_st);
 				}
 			}
 		}
-		state = any_opaque && any_transparent ? 3u : (any_opaque ? 1u : 0u);
+		state = rt_omm_mixed() ? 3u : (rt_omm_any_opaque ? 1u : 0u);
 	}
 
 	if (state != 0u) {
