@@ -2691,26 +2691,41 @@ const SceneShaderRaytracing::PipelineBundle *SceneShaderRaytracing::_get_last_tr
 	return last;
 }
 
-uint32_t SceneShaderRaytracing::get_pending_hit_group_count() const {
-	const PipelineBundle *bundle = _get_last_traced_bundle();
-	if (!bundle) {
-		return 0;
-	}
-	// Displacement and opacity micromap bake programs too: built at first use, they stall that frame.
-	uint32_t pending = program_builds.size();
+uint32_t SceneShaderRaytracing::_get_bundle_pending_hit_group_count(const PipelineBundle &p_bundle) const {
+	uint32_t pending = 0;
 	for (uint32_t i = 1; i < hit_group_slots.size(); i++) {
 		if (hit_group_slots[i].state != HGState::Ready) {
 			continue;
 		}
-		if (i < bundle->per_hg_states.size() && bundle->per_hg_states[i] == HGState::Failed) {
+		if (i < p_bundle.per_hg_states.size() && p_bundle.per_hg_states[i] == HGState::Failed) {
 			continue;
 		}
-		if (i < bundle->live_hg_count && i < bundle->live_ready_mask.size() && bundle->live_ready_mask[i]) {
+		if (i < p_bundle.live_hg_count && i < p_bundle.live_ready_mask.size() && p_bundle.live_ready_mask[i]) {
 			continue;
 		}
 		pending++;
 	}
 	return pending;
+}
+
+uint32_t SceneShaderRaytracing::get_pending_hit_group_count() const {
+	const PipelineBundle *last = _get_last_traced_bundle();
+	if (!last) {
+		return 0;
+	}
+	// Every variant traced in the newest traced frame, not only one of them: two views trace with different variants in
+	// the same frame (godot3d's main view with DLSS-RR while another view falls back to NRD), and the one found first
+	// could be complete while the other still waits for hit groups the driver is adding (a grey fallback on screen).
+	// The largest count of them: each variant waits for the same materials' hit groups.
+	uint32_t pending = 0;
+	for (const KeyValue<uint32_t, PipelineBundle> &kv : pipeline_bundles) {
+		const PipelineBundle &bundle = kv.value;
+		if (bundle.initial_pipeline_built && bundle.last_used_frame == last->last_used_frame) {
+			pending = MAX(pending, _get_bundle_pending_hit_group_count(bundle));
+		}
+	}
+	// Displacement and opacity micromap bake programs too: built at first use, they stall that frame.
+	return pending + program_builds.size();
 }
 
 void SceneShaderRaytracing::drain_completed_compiles() {

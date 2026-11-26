@@ -599,6 +599,8 @@ private:
 	bool _build_initial_bundle(uint32_t p_rt_flags, PipelineBundle &r_bundle);
 	void _kick_rebuild_if_idle();
 	const PipelineBundle *_get_last_traced_bundle() const;
+	// Hit groups compiled or compiling whose slot is not live in p_bundle's pipeline yet.
+	uint32_t _get_bundle_pending_hit_group_count(const PipelineBundle &p_bundle) const;
 
 	// Compile lane / worker.
 	void _enqueue_build(PipelineBuildTask *p_task);
