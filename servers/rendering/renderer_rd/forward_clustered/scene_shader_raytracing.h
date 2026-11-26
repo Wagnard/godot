@@ -466,6 +466,8 @@ public:
 		// Its cut-out can be baked into an opacity micromap per surface (rt_alpha_dependencies()); COLOR reaches it.
 		bool alpha_bakeable = false;
 		bool alpha_reads_color = false;
+		// The material uniforms its cut-out reads (rt_alpha_dependencies()): their values key its opacity micromaps.
+		HashSet<StringName> alpha_uniforms;
 	};
 
 	// 128-bit identity (dual hash64 with distinct salt). Treated as source equality.

@@ -43,6 +43,9 @@ struct RTAlphaDependencies {
 	bool bakeable = false;
 	// COLOR reaches the decision: a MultiMesh's instance colors multiply it, so its instances may differ.
 	bool reads_color = false;
+	// The material's uniforms that reach the decision (values and textures): only a change of one of them changes the
+	// cut-out, so they and the hit group key its opacity micromaps (RTMaterialData::omm_alpha_key).
+	Vector<StringName> uniforms;
 	// The first input that prevents baking, for the logs.
 	String reason;
 };

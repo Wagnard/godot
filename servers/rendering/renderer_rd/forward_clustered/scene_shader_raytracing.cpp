@@ -1036,6 +1036,10 @@ bool SceneShaderRaytracing::_preprocess_shader(RID p_material, bool p_is_procedu
 		const RTAlphaDependencies alpha_dependencies = rt_alpha_dependencies(compiler.get_parsed_shader());
 		r_entry.alpha_bakeable = alpha_dependencies.bakeable && !uses_ray_state;
 		r_entry.alpha_reads_color = alpha_dependencies.reads_color;
+		r_entry.alpha_uniforms.clear();
+		for (const StringName &uniform : alpha_dependencies.uniforms) {
+			r_entry.alpha_uniforms.insert(uniform);
+		}
 	}
 	r_entry.writes_vertex = (writes_vertex || writes_modelview) && !p_is_procedural;
 	r_entry.writes_modelview = writes_modelview && !p_is_procedural;

@@ -481,6 +481,9 @@ RTAlphaDependencies rt_alpha_dependencies(const ShaderLanguage::ShaderNode *p_sh
 					uniform->hint != ShaderLanguage::ShaderNode::Uniform::HINT_DEPTH_TEXTURE &&
 					uniform->hint != ShaderLanguage::ShaderNode::Uniform::HINT_NORMAL_ROUGHNESS_TEXTURE &&
 					uniform->hint < ShaderLanguage::ShaderNode::Uniform::HINT_BLIT_SOURCE0;
+			if (fixed) {
+				result.uniforms.push_back(StringName(leaf.substr(2)));
+			}
 		} else if (leaf.begins_with("C:")) {
 			fixed = true;
 		} else if (leaf.begins_with("IN:")) {

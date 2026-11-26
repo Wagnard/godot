@@ -2495,7 +2495,7 @@ bool RenderRaytracing::_omm_enabled() {
 	return omm_enabled;
 }
 
-RTOmmEntry *RenderRaytracing::_omm_entry(void *p_mesh_surface, RID p_mesh, uint32_t p_surface_index, uint32_t p_surface_counter, RID p_material, uint16_t p_material_counter, const RTMaterialData *p_mat_data, bool p_multimesh, uint32_t p_lod) {
+RTOmmEntry *RenderRaytracing::_omm_entry(void *p_mesh_surface, RID p_mesh, uint32_t p_surface_index, uint32_t p_surface_counter, RID p_material, const RTMaterialData *p_mat_data, bool p_multimesh, uint32_t p_lod) {
 	RD *rd = RD::get_singleton();
 	if (!_omm_enabled() || !p_mat_data || !p_material.is_valid() || !p_mesh_surface || !p_mesh.is_valid()) {
 		return nullptr;
@@ -2519,20 +2519,22 @@ RTOmmEntry *RenderRaytracing::_omm_entry(void *p_mesh_surface, RID p_mesh, uint3
 	key.surface_index = p_surface_index;
 	key.surface_counter = p_surface_counter;
 	key.material = p_material;
-	key.material_counter = p_material_counter;
+	// What the cut-out depends on, not the material's invalidation counter: a parameter the alpha test does not read (a
+	// uniform set every frame) rebaked every micromap of the material.
+	key.alpha_key = p_mat_data->omm_alpha_key;
 	key.lod = p_lod;
 	// A surface baked once it lasts RT_OMM_STABLE_FRAMES: a sprite's mesh replaced every frame would be baked and its BLAS
 	// built again every frame.
 	static constexpr uint32_t RT_OMM_STABLE_FRAMES = 10;
+	RTOmmKey slot_key = key;
+	slot_key.surface_counter = 0;
+	slot_key.alpha_key = 0;
 	RTOmmEntry *existing = omm_entries.getptr(key);
 	if (!existing) {
-		// The material's counter moves with every parameter or shader change, the surface's with its data: the entry of
-		// the previous key can never be asked for again. Kept until the TTL, every change held one more micromap and its
-		// BLAS (+13 MB per tree surface, a minute of shader swaps under path tracing: +1.6 GB). It goes at the next sweep,
-		// once nothing traced in the current frame uses it.
-		RTOmmKey slot_key = key;
-		slot_key.surface_counter = 0;
-		slot_key.material_counter = 0;
+		// A new cut-out (the material's alpha inputs or shader changed) or new surface data: the entry of the previous key
+		// is no longer traced. Kept until the TTL, every change held one more micromap and its BLAS (+13 MB per tree
+		// surface, a minute of shader swaps under path tracing: +1.6 GB). It goes at the next sweep, once nothing traced in
+		// the current frame uses it.
 		RTOmmKey *previous = omm_current_keys.getptr(slot_key);
 		if (previous) {
 			RTOmmEntry *stale = omm_entries.getptr(*previous);
@@ -2547,6 +2549,21 @@ RTOmmEntry *RenderRaytracing::_omm_entry(void *p_mesh_surface, RID p_mesh, uint3
 		waiting.first_seen_frame = current_frame;
 		waiting.last_used_frame = current_frame;
 		return nullptr;
+	}
+	if (existing->superseded) {
+		// The cut-out came back to an earlier state (an alpha uniform set back) before the sweep freed its entry: it is the
+		// current one again, and the one that superseded it goes instead.
+		RTOmmKey *current = omm_current_keys.getptr(slot_key);
+		if (current) {
+			RTOmmEntry *newer = omm_entries.getptr(*current);
+			if (newer && newer != existing) {
+				newer->superseded = true;
+			}
+			*current = key;
+		} else {
+			omm_current_keys.insert(slot_key, key);
+		}
+		existing->superseded = false;
 	}
 	existing->last_used_frame = current_frame;
 	if (existing->micromap.is_valid() || existing->failed) {
@@ -2624,6 +2641,7 @@ RTOmmEntry *RenderRaytracing::_omm_entry(void *p_mesh_surface, RID p_mesh, uint3
 	entry.bake_serial = ++omm_bake_serial;
 	entry.refreshed_frame = current_frame;
 	omm_bake_queue.push_back(key);
+	omm_bakes_started++;
 	entry.failed = false;
 	return nullptr;
 }
@@ -2876,6 +2894,7 @@ void RenderRaytracing::_omm_dispatch_bakes() {
 			entry.micromap = entry.pending_micromap;
 			entry.pending_micromap = RID();
 			entry.bake_state = RTOmmEntry::BAKE_NONE;
+			omm_bakes_done++;
 			entry.triangle_cost.reset();
 			rd->free_rid(entry.cost_buffer);
 			entry.cost_buffer = RID();
@@ -2916,8 +2935,8 @@ void RenderRaytracing::_omm_evict(bool p_all) {
 	for (KeyValue<RTOmmKey, RTOmmEntry> &E : omm_entries) {
 		// An entry still waiting to be baked holds nothing: one a second or two old is a surface that did not last.
 		const uint32_t entry_ttl = (E.value.micromap.is_valid() || E.value.failed) ? ttl : 120;
-		// A superseded entry still used in the last frames waits: another viewport may trace it in this frame, or still
-		// ask for it with a counter it read before the change.
+		// A superseded entry still used in the last frames waits: another viewport may trace it in this frame, or the
+		// cut-out come back to it (_omm_entry() makes it current again).
 		const bool superseded = E.value.superseded && current_frame - E.value.last_used_frame > 2;
 		if (p_all || superseded || current_frame - E.value.last_used_frame > entry_ttl) {
 			_omm_free_entry(E.value);
@@ -2928,7 +2947,7 @@ void RenderRaytracing::_omm_evict(bool p_all) {
 		omm_entries.erase(key);
 		RTOmmKey slot = key;
 		slot.surface_counter = 0;
-		slot.material_counter = 0;
+		slot.alpha_key = 0;
 		const RTOmmKey *current = omm_current_keys.getptr(slot);
 		if (current && *current == key) {
 			omm_current_keys.erase(slot);
@@ -3279,8 +3298,9 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 	// resource reload does too): BindlessBlock::_scrub_dead_textures() frees its slot and gives it to the next texture
 	// added, so the material would sample another one (a normal map as albedo). Rebuilt now, before this frame's table:
 	// the material's invalidation counter is not enough, it advances only when the material's raster uniform set dies.
-	// The material's counter is advanced too, so that the other caches keyed by it (its opacity micromaps, baked from the
-	// alpha texture's resident level; displaced geometry) rebuild as well: the rebuilt data is cached with the new value.
+	// The material's counter is advanced too, so that the other caches keyed by it (displaced geometry) rebuild as well: the
+	// rebuilt data is cached with the new value. Its opacity micromaps are keyed by the RD textures their cut-out reads
+	// (omm_alpha_key): a new one bakes them again from the new resident level.
 	if (!needs_refresh) {
 		for (const RID &texture : entry->ptr->bindless_textures) {
 			if (!RD::get_singleton()->texture_is_valid(texture)) {
@@ -3327,6 +3347,11 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 			mat_data->bindless_textures.push_back(p_texture);
 		}
 		return p_table->add_texture(p_texture);
+	};
+	// What the cut-out reads, hashed as it is filled in (RTMaterialData::omm_alpha_key).
+	uint64_t alpha_key = 0;
+	auto alpha_key_add = [&alpha_key](uint64_t p_value) {
+		alpha_key = hash64_murmur3_64(p_value, alpha_key);
 	};
 
 	// Initialize defaults
@@ -3522,6 +3547,15 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 					// opaque black colors) when unset.
 					Variant val = material_storage->material_get_param(p_material_rid, kv.key);
 					RendererRD::MaterialStorage::fill_std140_uniform(u, val.get_type() == Variant::NIL ? nullptr : &val, dst, true);
+					if (cse->alpha_uniforms.has(kv.key)) {
+						// Its value as the bake reads it from this buffer.
+						const uint32_t size = SceneShaderRaytracing::material_buffer_uniform_size(u);
+						for (uint32_t b = 0; b + 4 <= size; b += 4) {
+							uint32_t word;
+							memcpy(&word, dst + b, 4);
+							alpha_key_add(word);
+						}
+					}
 				}
 			}
 
@@ -3530,6 +3564,7 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 				const SceneShaderRaytracing::TextureUniformInfo &tui = cse->texture_uniforms[ti];
 				BindlessBlock *table = tui.is_array ? bindless_array_block : bindless_block;
 				uint32_t bindless_idx = 0;
+				RID bound_rd; // The RD texture the index names.
 
 				if (tui.is_global) {
 					RID tex_rid = material_storage->global_shader_uniform_get_texture(tui.name);
@@ -3537,6 +3572,7 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 						RID rd_tex = ts->texture_get_rd_texture(tex_rid, tui.use_color);
 						if (rd_tex.is_valid()) {
 							bindless_idx = bindless_add(table, rd_tex);
+							bound_rd = rd_tex;
 						}
 					}
 				} else {
@@ -3547,6 +3583,7 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 							RID rd_tex = ts->texture_get_rd_texture(tex_rid, tui.use_color);
 							if (rd_tex.is_valid()) {
 								bindless_idx = bindless_add(table, rd_tex);
+								bound_rd = rd_tex;
 							}
 						}
 					}
@@ -3576,7 +3613,13 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 					RID default_tex = ts->texture_rd_get_default(default_type);
 					if (default_tex.is_valid()) {
 						bindless_idx = bindless_add(table, default_tex);
+						bound_rd = default_tex;
 					}
+				}
+				if (cse->alpha_uniforms.has(tui.name)) {
+					// The texture itself, not its slot: texture streaming replaces a texture's RD texture at each mip change,
+					// and the cut-out is baked again from the new level.
+					alpha_key_add(bound_rd.get_id());
 				}
 
 				if (tui.buffer_offset + 4 <= cse->uniform_total_size) {
@@ -3792,6 +3835,21 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 			mat.flags |= RT_MAT_FLAG_POINT_FILTER;
 		}
 	}
+
+	// Hit group 0's cut-out (raytracing_omm_bake.glsl's standard variant, _omm_fill_job()): the albedo texture's alpha times
+	// the color's, through the UV1 transform, times the vertex color's when used.
+	if (!mat_data->is_custom_shader) {
+		alpha_key_add(albedo_rd.get_id());
+		const float inputs[5] = { mat.albedo_color[3], mat.uv1_scale[0], mat.uv1_scale[1], mat.uv1_offset[0], mat.uv1_offset[1] };
+		for (const float input : inputs) {
+			uint32_t bits;
+			memcpy(&bits, &input, 4);
+			alpha_key_add(bits);
+		}
+		alpha_key_add(mat.flags & RT_MAT_FLAG_VERTEX_COLOR_ALBEDO);
+	}
+	// The hit group runs the cut-out's code (a slot per shader source, SceneShaderRaytracing::register_custom_shader()).
+	mat_data->omm_alpha_key = hash64_murmur3_64(mat_data->rt_sbt_offset, alpha_key);
 
 	// Update cache entry
 	entry->cached_counter = p_material_invalidation_counter;
@@ -4380,7 +4438,7 @@ bool RenderRaytracing::_build_merged_mm_blas(
 	RID omm_micromap;
 	uint32_t omm_level = 0;
 	if (p_allow_omm) {
-		const RTOmmEntry *omm = _omm_entry(p_mesh_surface, mesh_storage->multimesh_get_mesh(p_mm_rid), p_surface_index, p_surface_counter, p_material, p_material_counter, p_mat_data, true, lod);
+		const RTOmmEntry *omm = _omm_entry(p_mesh_surface, mesh_storage->multimesh_get_mesh(p_mm_rid), p_surface_index, p_surface_counter, p_material, p_mat_data, true, lod);
 		if (omm && omm->micromap.is_valid() && rd->acceleration_structure_is_valid(omm->micromap)) {
 			omm_micromap = omm->micromap;
 			omm_level = omm->level;
@@ -5721,7 +5779,7 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 			{
 				RTOmmEntry *omm = nullptr;
 				if (material_ready && !front_layer && !(inst_flags & RD::ACCELERATION_STRUCTURE_INSTANCE_FORCE_OPAQUE_BIT)) {
-					omm = _omm_entry(mesh_surface, surf->owner->data->base, surf->surface_index, surface_counter, material_rid, material_counter, mat_data, false);
+					omm = _omm_entry(mesh_surface, surf->owner->data->base, surf->surface_index, surface_counter, material_rid, mat_data, false);
 				}
 				if (surf_data->geometry.flags & RT_GEOM_FLAG_DEFORMED) {
 					RTDeformedCacheEntry *deformed = deformed_pool.get_or_null(surf->rt_deformed_handle);
@@ -5893,7 +5951,7 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 			job.blas = surf_data->blas;
 			// Not for particles yet: their cut-out runs the any-hit shader.
 			if (!pending.particles && pending.material_ready && !(pending.inst_flags & RD::ACCELERATION_STRUCTURE_INSTANCE_FORCE_OPAQUE_BIT)) {
-				RTOmmEntry *omm = _omm_entry(pending.mesh_surface, mesh_storage->multimesh_get_mesh(pending.mm_rid), pending.surface_index, pending.surface_counter, pending.material_rid, pending.material_counter, pending.mat_data, true);
+				RTOmmEntry *omm = _omm_entry(pending.mesh_surface, mesh_storage->multimesh_get_mesh(pending.mm_rid), pending.surface_index, pending.surface_counter, pending.material_rid, pending.mat_data, true);
 				const RID omm_blas = omm ? _omm_static_blas(omm, pending.mesh_surface, dirty_blas_list) : RID();
 				if (omm_blas.is_valid()) {
 					job.blas = omm_blas;
@@ -6276,6 +6334,14 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 		held_max_age = 0;
 		print_line(vformat("RTCACHES displaced: %d refit, %d guard rebuilds since the previous log", displaced_refitted, displaced_guard_rebuilds));
 		displaced_guard_rebuilds = 0;
+		uint32_t omm_baked = 0;
+		for (const KeyValue<RTOmmKey, RTOmmEntry> &E : omm_entries) {
+			omm_baked += E.value.micromap.is_valid() ? 1 : 0;
+		}
+		print_line(vformat("RTCACHES opacity micromaps: %d entries, %d baked, %d queued | bakes since the previous log: %d started, %d done",
+				omm_entries.size(), omm_baked, omm_bake_queue.size(), omm_bakes_started, omm_bakes_done));
+		omm_bakes_started = 0;
+		omm_bakes_done = 0;
 		print_line(vformat("RTCACHES frame %d: TLAS %d instances, %d BLAS builds, %d refits | displaced %d (%d vertices), %d deferred | surfaces %d, merged MultiMeshes %d, deformed %d, LOD views %d, materials %d, dedicated UBOs %d | hit groups %d, pipeline swaps %d | video %d MB",
 				RSG::rasterizer->get_frame_number(), tlas_instance_count, rt_blas_builds, rt_blas_refits,
 				displaced_evaluated, int64_t(displaced_vertices), displaced_deferred,

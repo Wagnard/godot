@@ -558,12 +558,12 @@ struct RTOmmKey {
 	uint32_t surface_index = 0;
 	uint32_t surface_counter = 0; // The surface's data changed.
 	RID material;
-	uint16_t material_counter = 0;
+	uint64_t alpha_key = 0; // RTMaterialData::omm_alpha_key: what the material's cut-out depends on.
 	uint32_t lod = 0; // The LOD's triangles, in its index order.
 
 	bool operator==(const RTOmmKey &p_other) const {
 		return mesh == p_other.mesh && surface_index == p_other.surface_index && surface_counter == p_other.surface_counter &&
-				material == p_other.material && material_counter == p_other.material_counter && lod == p_other.lod;
+				material == p_other.material && alpha_key == p_other.alpha_key && lod == p_other.lod;
 	}
 	static uint32_t hash(const RTOmmKey &p_key) {
 		uint32_t h = hash_murmur3_one_64(p_key.mesh.get_id());
@@ -571,7 +571,7 @@ struct RTOmmKey {
 		h = hash_murmur3_one_32(p_key.surface_counter, h);
 		h = hash_murmur3_one_32(p_key.lod, h);
 		h = hash_murmur3_one_64(p_key.material.get_id(), h);
-		return hash_fmix32(hash_murmur3_one_32(p_key.material_counter, h));
+		return hash_fmix32(hash_murmur3_one_64(p_key.alpha_key, h));
 	}
 };
 
@@ -665,6 +665,11 @@ struct RTMaterialData {
 	RID emission_texture_rd;
 	// The RD textures the material put in the bindless tables: one destroyed makes process_material() rebuild it.
 	LocalVector<RID> bindless_textures;
+	// What the material's cut-out depends on, hashed: its hit group, and what its alpha test reads (hit group 0: the albedo
+	// texture, alpha, UV1 transform and vertex color switch; a custom shader: the values and textures of the uniforms
+	// rt_alpha_dependencies() finds). Its opacity micromaps are keyed by it (RTOmmKey), not by the material's invalidation
+	// counter: a parameter the cut-out does not read (a uniform set every frame) keeps them.
+	uint64_t omm_alpha_key = 0;
 };
 
 struct RTCacheEntry {
@@ -1358,9 +1363,13 @@ class RenderRaytracing {
 	RID omm_job_buffer;
 	uint32_t omm_job_capacity = 0;
 	uint32_t omm_sweep_frame = 0;
+	// Bakes started and finished since the previous GODOT_RT_LOG_CACHES log.
+	uint32_t omm_bakes_started = 0;
+	uint32_t omm_bakes_done = 0;
 	// The surface's cut-out baked with the material into a micromap, when the material allows it, the surface lasted and
 	// its bake is done, or null (the bake started or carried on for this frame). With p_lod, the triangles of that LOD.
-	RTOmmEntry *_omm_entry(void *p_mesh_surface, RID p_mesh, uint32_t p_surface_index, uint32_t p_surface_counter, RID p_material, uint16_t p_material_counter, const RTMaterialData *p_mat_data, bool p_multimesh, uint32_t p_lod = 0);
+	// Keyed by the material's cut-out (RTMaterialData::omm_alpha_key), not by its invalidation counter.
+	RTOmmEntry *_omm_entry(void *p_mesh_surface, RID p_mesh, uint32_t p_surface_index, uint32_t p_surface_counter, RID p_material, const RTMaterialData *p_mat_data, bool p_multimesh, uint32_t p_lod = 0);
 	// Takes the bake's inputs from the live surface and material (false: the surface cannot be baked).
 	bool _omm_fill_job(RTOmmEntry &r_entry, void *p_mesh_surface, const RTMaterialData *p_mat_data, uint32_t p_lod);
 	static void _omm_estimate_arrived_static(const Vector<uint8_t> &p_data, uint64_t p_serial);
