@@ -10573,6 +10573,19 @@ Error RenderingDevice::initialize(RenderingContextDriver *p_context, DisplayServ
 Vector<uint8_t> RenderingDevice::_load_pipeline_cache() {
 	DirAccess::make_dir_recursive_absolute(pipeline_cache_file_path.get_base_dir());
 
+	// A save killed while it wrote leaves its temporary file (_save_pipeline_cache()); the cache itself is the previous one.
+	{
+		Ref<DirAccess> d = DirAccess::open(pipeline_cache_file_path.get_base_dir());
+		if (d.is_valid()) {
+			const String temporary_prefix = pipeline_cache_file_path.get_file() + ".";
+			for (const String &file : d->get_files()) {
+				if (file.begins_with(temporary_prefix) && file.ends_with(".tmp")) {
+					d->remove(file);
+				}
+			}
+		}
+	}
+
 	if (FileAccess::exists(pipeline_cache_file_path)) {
 		Ref<FileAccess> f = FileAccess::open(pipeline_cache_file_path, FileAccess::READ);
 		const uint64_t file_size = f.is_valid() ? f->get_length() : 0;
@@ -10674,9 +10687,23 @@ void RenderingDevice::_save_pipeline_cache(void *p_data) {
 	}
 	print_verbose(vformat("Updated PSO cache (%.1f MiB)", cache_blob.size() / (1024.0f * 1024.0f)));
 
-	Ref<FileAccess> f = FileAccess::open(self->pipeline_cache_file_path, FileAccess::WRITE, nullptr);
-	if (f.is_valid()) {
-		f->store_buffer(cache_blob);
+	// Written aside in the same folder, then renamed over the previous cache: a process killed while writing leaves that
+	// one whole instead of a truncated file the next launch rejects (every pipeline compiled again). One name per process:
+	// two instances of a project share the path. _load_pipeline_cache() removes what a killed write left.
+	const String temporary_path = self->pipeline_cache_file_path + "." + itos(OS::get_singleton()->get_process_id()) + ".tmp";
+	{
+		Ref<FileAccess> f = FileAccess::open(temporary_path, FileAccess::WRITE);
+		ERR_FAIL_COND_MSG(f.is_null(), "Can't write the pipeline cache: " + temporary_path);
+		if (!f->store_buffer(cache_blob)) {
+			f.unref();
+			DirAccess::remove_absolute(temporary_path);
+			ERR_FAIL_MSG("Can't write the pipeline cache: " + temporary_path);
+		}
+	}
+	if (DirAccess::rename_absolute(temporary_path, self->pipeline_cache_file_path) != OK) {
+		// The previous cache stays; the next save tries again.
+		DirAccess::remove_absolute(temporary_path);
+		WARN_PRINT_ONCE("Can't replace the pipeline cache: " + self->pipeline_cache_file_path);
 	}
 }
 
