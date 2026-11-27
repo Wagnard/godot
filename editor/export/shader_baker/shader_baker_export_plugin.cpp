@@ -415,17 +415,18 @@ Node *ShaderBakerExportPlugin::_customize_scene(Node *p_root, const String &p_pa
 	LocalVector<Node *> nodes_to_visit;
 	nodes_to_visit.push_back(p_root);
 	while (!nodes_to_visit.is_empty()) {
-		// Visit all nodes recursively in the scene to find the Label3Ds and Sprite3Ds.
+		// Visit all nodes recursively in the scene to find the Label3Ds, Sprite3Ds and AnimatedSprite3Ds.
 		Node *node = nodes_to_visit[nodes_to_visit.size() - 1];
 		nodes_to_visit.remove_at(nodes_to_visit.size() - 1);
 
 		Label3D *label_3d = Object::cast_to<Label3D>(node);
-		Sprite3D *sprite_3d = Object::cast_to<Sprite3D>(node);
+		// Sprite3D and AnimatedSprite3D: SpriteBase3D::draw_texture_rect() picks the material of both.
+		SpriteBase3D *sprite_3d = Object::cast_to<SpriteBase3D>(node);
 		if (label_3d != nullptr || sprite_3d != nullptr) {
-			// Create materials for Label3D and Sprite3D, which are normally generated at runtime on demand.
+			// Create materials for Label3D and SpriteBase3D, which are normally generated at runtime on demand.
 			HashMap<StringName, Variant> properties;
 
-			// These must match the defaults set by Sprite3D/Label3D.
+			// These must match the defaults set by SpriteBase3D/Label3D.
 			properties["transparent"] = true; // Label3D doesn't have this property, but it is always true anyway.
 			properties["shaded"] = false;
 			properties["double_sided"] = true;
@@ -446,7 +447,7 @@ Node *ShaderBakerExportPlugin::_customize_scene(Node *p_root, const String &p_pa
 				}
 			}
 
-			// This must follow the logic in Sprite3D::draw_texture_rect().
+			// This must follow the logic in SpriteBase3D::draw_texture_rect().
 			BaseMaterial3D::Transparency mat_transparency = BaseMaterial3D::Transparency::TRANSPARENCY_DISABLED;
 			if (properties["transparent"]) {
 				SpriteBase3D::AlphaCutMode acm = SpriteBase3D::AlphaCutMode(int(properties["alpha_cut"]));
@@ -466,8 +467,8 @@ Node *ShaderBakerExportPlugin::_customize_scene(Node *p_root, const String &p_pa
 			_customize_resource(sprite_3d_material, String());
 
 			if (sprite_3d != nullptr) {
-				// Sprite3D picks texture repeat at draw time, when its UVs leave [0, 1] (a region reaching outside its texture):
-				// bake that version too.
+				// SpriteBase3D picks texture repeat at draw time, when its UVs leave [0, 1] (a Sprite3D region, or an
+				// AtlasTexture region, reaching outside its texture): bake that version too.
 				sprite_3d_material = StandardMaterial3D::get_material_for_2d(bool(properties["shaded"]), mat_transparency, bool(properties["double_sided"]), billboard_mode == StandardMaterial3D::BILLBOARD_ENABLED, billboard_mode == StandardMaterial3D::BILLBOARD_FIXED_Y, false, bool(properties["no_depth_test"]), bool(properties["fixed_size"]), BaseMaterial3D::TextureFilter(int(properties["texture_filter"])), BaseMaterial3D::AlphaAntiAliasing(int(properties["alpha_antialiasing_mode"])), true);
 				_customize_resource(sprite_3d_material, String());
 			}
