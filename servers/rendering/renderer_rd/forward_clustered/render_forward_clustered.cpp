@@ -6672,8 +6672,9 @@ void RenderForwardClustered::sdfgi_update(const Ref<RenderSceneBuffers> &p_rende
 		sdfgi = rb->get_custom_data(RB_SCOPE_SDFGI);
 	}
 
-	// SDFGI is incompatible with raytracing -- disable entirely when RT is active.
-	bool rt_active = pathtracing_is_used(p_environment, p_viewport);
+	// SDFGI is incompatible with raytracing -- disable entirely when RT is active. Also over the few frames a path traced
+	// view is rasterized while its variant's base builds: SDFGI made for them would be freed again at once.
+	bool rt_active = _pathtracing_is_wanted(p_environment, p_viewport);
 	bool needs_sdfgi = !rt_active && p_environment.is_valid() && environment_get_sdfgi_enabled(p_environment);
 	bool needs_reset = sdfgi.is_valid() ? sdfgi->version != gi.sdfgi_current_version : false;
 

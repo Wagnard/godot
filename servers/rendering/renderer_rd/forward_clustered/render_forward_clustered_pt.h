@@ -50,6 +50,13 @@ class RenderForwardClusteredPT : public RenderForwardClustered {
 
 	bool _setup_rt();
 	void _age_out_motion_vectors(const RenderDataRD *p_render_data);
+	// The variant the view asks for this frame: its environment's (SceneShaderRaytracing::compute_rt_flags()), with NRD
+	// where DLSS Ray Reconstruction cannot denoise it.
+	uint32_t _view_rt_flags(RID p_env, const Ref<RenderSceneBuffersRD> &p_render_buffers) const;
+	// The variant the view traces with this frame, false when it is rasterized: the one it asks for once its base is built;
+	// until then the one it traced with last, when the two differ only by what the view shows (the debug views). Never
+	// waits: Unreal's non-blocking ray tracing pipeline lookups keep the last complete pipeline meanwhile.
+	bool _view_trace_rt_flags(RID p_env, const Ref<RenderSceneBuffersRD> &p_render_buffers, uint32_t &r_rt_flags) const;
 
 	// Hit groups compiled when their instances are created rather than first traced (rt_precache_materials).
 	static bool _rt_precaches_hit_groups();
@@ -92,9 +99,10 @@ protected:
 	virtual void _render_scene(RenderDataRD *p_render_data, const Color &p_default_bg_color) override;
 	virtual void _render_buffers_debug_draw(const RenderDataRD *p_render_data) override;
 	virtual void _free_rt_viewport_state(RenderSceneBuffersRD *p_render_buffers) override;
+	virtual bool _pathtracing_is_wanted(RID p_env, RID p_viewport) const override;
 
 public:
-	virtual bool pathtracing_is_used(RID p_env, RID p_viewport) const override;
+	virtual bool pathtracing_is_used(RID p_env, RID p_viewport, const Ref<RenderSceneBuffers> &p_render_buffers) const override;
 	virtual bool environment_pathtracing_replaces_shadow_maps(RID p_env) const override;
 	virtual bool environment_pathtracing_fog_traces_shadows(RID p_env) const override;
 	virtual void update() override;

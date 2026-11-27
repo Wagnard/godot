@@ -3587,7 +3587,7 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 
 	// RT: build wider AABB cull volume for TLAS and light gathering.
 	// The same test as the path tracer's own (RenderForwardClusteredPT::_render_scene()): reflection probes are rasterized.
-	cull.rt_enabled = p_reflection_probe.is_null() && scene_render->pathtracing_is_used(p_environment, p_viewport);
+	cull.rt_enabled = p_reflection_probe.is_null() && scene_render->pathtracing_is_used(p_environment, p_viewport, p_render_buffers);
 	if (cull.rt_enabled) {
 		float z_far = p_camera_data->main_projection.get_z_far();
 		Vector3 cam_origin = p_camera_data->main_transform.origin;

@@ -508,7 +508,14 @@ public:
 
 	LocalVector<HitGroupSlot> hit_group_slots;
 	uint32_t pipeline_swap_count = 0; // Pipelines rebuilt and swapped in (GODOT_RT_LOG_CACHES).
-	bool usable = false;
+	// init()'s probe (the RT_FLAG_NONE variant's base) decides it: until its build is done, usable (the views wait for their
+	// own variant's base meanwhile, rasterized).
+	enum class UsableState : uint8_t {
+		PENDING,
+		USABLE,
+		UNUSABLE,
+	};
+	UsableState usable_state = UsableState::PENDING;
 	HashMap<SourceHash128, uint32_t, SourceHash128Hasher> source_hash_to_slot;
 
 	// One RD RT pipeline variant (rt_flags key). Owns base + per-slot HG shaders (each with the layout stub's RG + miss).
@@ -538,9 +545,28 @@ public:
 		bool initial_pipeline_built = false;
 		// The frame a view last traced with it (-1: never, as init()'s probe); only bundles in use are rebuilt.
 		int64_t last_used_frame = -1;
+		// The frame a view last asked for it (request_pipeline_bundle()) while it could not trace with it yet (its base still
+		// building): the view traced another variant or was rasterized. Counted as pending until a view traces with it.
+		int64_t last_requested_frame = -1;
 	};
 
 	HashMap<uint32_t, PipelineBundle> pipeline_bundles;
+
+	// A variant's base built on RenderingCompilationPool (_base_build_worker()): its program (ray generation, miss and hit
+	// group 0, through the binary cache) and its first pipeline, with hit group 0 only. Adopted by the render thread
+	// (_finish_base_build()), which makes its shader binding table. Unreal's non-blocking ray tracing pipeline creation
+	// (ERayTracingPipelineCacheFlags::NonBlocking): the frame never waits for it.
+	struct BaseBuild;
+	HashMap<uint32_t, BaseBuild *> base_builds; // In flight, by variant.
+	HashSet<uint32_t> failed_base_variants; // Their base failed: not built again (the views stay rasterized).
+	void _start_base_build(uint32_t p_rt_flags);
+	void _build_base(BaseBuild *p_build) const;
+	static void _base_build_worker(void *p_userdata);
+	// Waits for its worker if needed (only at shutdown: drain_completed_compiles() adopts finished builds), then installs
+	// its result into its variant's bundle.
+	void _finish_base_build(BaseBuild *p_build);
+	void _join_base_builds_for_shutdown();
+	static bool _async_base_builds();
 
 	// Single-lane async bundle rebuild (worker: SPIR-V + raytracing_pipeline_create; main: SBT + swap).
 	struct PipelineBuildTask;
@@ -565,7 +591,8 @@ public:
 	// An instance in the TLAS, p_distance from the camera, waits for this slot's hit group: the next builds take it first.
 	void request_hit_group(uint32_t p_slot_index, float p_distance);
 	// Hit groups registered but not yet in the pipeline of the variant a view traced with last (0 before any trace):
-	// their surfaces trace with the compiling fallback, or not at all for cut-outs.
+	// their surfaces trace with the compiling fallback, or not at all for cut-outs. A variant a view waits for (its base
+	// still building) counts as its base plus every hit group it will add.
 	uint32_t get_pending_hit_group_count() const;
 
 	// Compute pipeline running the slot's vertex() on every vertex (raytracing_displace.glsl); invalid if the slot
@@ -583,6 +610,16 @@ public:
 	void drain_completed_compiles();
 	void finalize_custom_shaders();
 
+	// Whether p_rt_flags' base pipeline is built: a view can trace with it. Never waits.
+	bool is_pipeline_bundle_ready(uint32_t p_rt_flags) const;
+	// Its base failed to build: it never will be.
+	bool is_pipeline_bundle_failed(uint32_t p_rt_flags) const { return failed_base_variants.has(p_rt_flags); }
+	// A view would trace with p_rt_flags this frame: starts building its base on RenderingCompilationPool unless it is
+	// built, building or failed; the view traces another variant or is rasterized meanwhile
+	// (RenderForwardClusteredPT::_view_trace_rt_flags()). Built here, waited for, when
+	// rendering/pathtracing/async_shader_compilation is off or GODOT_RT_ASYNC_BASE=0.
+	void request_pipeline_bundle(uint32_t p_rt_flags);
+	// The variant's bundle, invalid (no pipeline) while its base builds (requested then, never waited for).
 	// p_mark_used: a view traces with it this frame (its hit groups are then compiled first).
 	const PipelineBundle &ensure_pipeline_bundle(uint32_t p_rt_flags, bool p_mark_used = true);
 
@@ -602,7 +639,10 @@ private:
 
 	// Bundle build / rebuild.
 	void _bundle_resize_for_slots(PipelineBundle &r_bundle);
-	bool _build_initial_bundle(uint32_t p_rt_flags, PipelineBundle &r_bundle);
+	// A variant's first pipeline, hit group 0 only (any thread: RenderingDevice's pipeline creation is thread safe).
+	static RID _create_initial_pipeline(RID p_base_shader, uint32_t p_rt_flags);
+	// Its shader binding table, on the render thread; takes p_pipeline (freed on failure).
+	bool _install_initial_pipeline(uint32_t p_rt_flags, PipelineBundle &r_bundle, RID p_pipeline);
 	void _kick_rebuild_if_idle();
 	const PipelineBundle *_get_last_traced_bundle() const;
 	// Hit groups compiled or compiling whose slot is not live in p_bundle's pipeline yet.
@@ -649,6 +689,7 @@ private:
 	// reduced to their declarations.
 	Vector<String> _variant_stage_sources(uint32_t p_rt_flags, bool p_layout_stub);
 	bool _build_variant_compile_context(uint32_t p_rt_flags, VariantCompileContext &r_ctx);
+	// Its sources only (strings, on the render thread): its base is built by _start_base_build().
 	bool _ensure_variant_compile_context(uint32_t p_rt_flags);
 
 	// A custom hit group's own stages, from the variant's templates (ah: empty without the slot's own any-hit, is: empty
@@ -789,8 +830,8 @@ public:
 
 	void init(const String p_defines);
 	// False when the base ray tracing pipeline could not be built (shader translation or pipeline creation failed):
-	// the path tracer then stays off and the views are rasterized.
-	bool is_usable() const { return usable; }
+	// the path tracer then stays off and the views are rasterized. True while init()'s probe still builds.
+	bool is_usable() const { return usable_state != UsableState::UNUSABLE; }
 	void set_default_specialization(const ShaderSpecialization &p_specialization);
 	void enable_advanced_shader_group(bool p_needs_multiview = false);
 	bool is_multiview_shader_group_enabled() const;

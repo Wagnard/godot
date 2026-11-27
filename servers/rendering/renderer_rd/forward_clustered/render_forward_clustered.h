@@ -1705,6 +1705,9 @@ protected:
 	bool _feeds_fsr_frame_generation(const RenderDataRD *p_render_data) const;
 	void _prepare_fsr_frame_generation(const RenderDataRD *p_render_data, double p_time_step);
 	virtual void _free_rt_viewport_state(RenderSceneBuffersRD *p_render_buffers);
+	// The view's environment and viewport ask for path tracing, whether or not it can trace this frame
+	// (pathtracing_is_used()).
+	virtual bool _pathtracing_is_wanted(RID p_env, RID p_viewport) const { return false; }
 	// Compiles pipelines a subclass draws the surface with, after the surface cache's own were queued.
 	virtual void _mesh_generate_extra_pipelines_for_surface_cache(GeometryInstanceSurfaceDataCache *p_surface_cache) {}
 	// A surface whose vertex() output the path tracer takes from the raster vertex shader (rendering/pathtracing/

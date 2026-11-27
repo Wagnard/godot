@@ -276,7 +276,9 @@ public:
 	virtual bool environment_pathtracing_replaces_shadow_maps(RID p_env) const { return false; }
 	// Its volumetric fog traces its lights' shadows too (rendering/pathtracing/volumetric_fog_shadows): no shadow map at all.
 	virtual bool environment_pathtracing_fog_traces_shadows(RID p_env) const { return false; }
-	virtual bool pathtracing_is_used(RID p_env, RID p_viewport) const { return false; }
+	// The view of p_render_buffers is path traced this frame (the scene cull, SDFGI and the render agree on it): its
+	// environment asks for it, and the path tracer has a pipeline it can trace with (else it is rasterized meanwhile).
+	virtual bool pathtracing_is_used(RID p_env, RID p_viewport, const Ref<RenderSceneBuffers> &p_render_buffers) const { return false; }
 
 	// Adjustment
 	void environment_set_adjustment(RID p_env, bool p_enable, float p_brightness, float p_contrast, float p_saturation, bool p_use_1d_color_correction, RID p_color_correction);

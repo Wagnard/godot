@@ -857,6 +857,10 @@ struct RTMaterialCacheEntry {
 struct RTViewportState {
 	RID tlas;
 	uint32_t tlas_max_instances = 0;
+	// The variant (SceneShaderRaytracing::RaytracingFlags) its last TLAS was built for: the view keeps tracing with it while
+	// the base of a new one it asks for builds, where their outputs agree (RenderForwardClusteredPT::_view_trace_rt_flags()).
+	uint32_t traced_rt_flags = 0;
+	bool has_traced = false;
 
 	RID geometry_buffer;
 	uint32_t geometry_buffer_capacity = 0;
@@ -1271,6 +1275,8 @@ class RenderRaytracing {
 	uint32_t next_material_slot = 0;
 	uint64_t vram_used = 0;
 	uint32_t last_trace_frame = 0; // 0: nothing cached since the last cleanup_caches().
+	// The last frame a view that path traces was rasterized while its variant's base built (keep_caches_while_waiting()).
+	uint32_t last_wait_frame = 0;
 	uint32_t cache_hits = 0;
 	uint32_t cache_misses = 0;
 
@@ -1432,6 +1438,11 @@ public:
 	// Frees every cache cleanup_caches() frees once no view has traced for a few frames: a game that turns path tracing
 	// off gets the memory back for raster's effects.
 	void free_caches_if_unused();
+	// A view that path traces is rasterized this frame, its variant's base still building: free_caches_if_unused() keeps
+	// the caches it will trace with, as if it had traced.
+	void keep_caches_while_waiting();
+	// The variant p_render_buffers' view built its last TLAS for; false when it has no path tracing state.
+	bool get_viewport_traced_rt_flags(RenderSceneBuffersRD *p_render_buffers, uint32_t &r_rt_flags) const;
 
 	RTViewportState *build_tlas(const RenderDataRD *p_render_data, uint32_t p_rt_flags);
 	// Queues the hit groups of these materials' shaders (duplicates and freed materials allowed), whether or not their

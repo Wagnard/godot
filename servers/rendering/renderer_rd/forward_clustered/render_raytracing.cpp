@@ -744,7 +744,7 @@ void RenderRaytracing::free_caches_if_unused() {
 	// A few frames of margin: a view can skip frames (an UPDATE_WHEN_VISIBLE SubViewport), and rebuilding the caches
 	// is a hitch.
 	const uint32_t RT_UNUSED_FRAMES = 10;
-	if (last_trace_frame == 0 || RSG::rasterizer->get_frame_number() - last_trace_frame <= RT_UNUSED_FRAMES) {
+	if (last_trace_frame == 0 || RSG::rasterizer->get_frame_number() - MAX(last_trace_frame, last_wait_frame) <= RT_UNUSED_FRAMES) {
 		return;
 	}
 	for (KeyValue<RenderSceneBuffersRD *, RTViewportState *> &kv : viewport_states) {
@@ -752,6 +752,19 @@ void RenderRaytracing::free_caches_if_unused() {
 	}
 	viewport_states.clear();
 	cleanup_caches();
+}
+
+void RenderRaytracing::keep_caches_while_waiting() {
+	last_wait_frame = RSG::rasterizer->get_frame_number();
+}
+
+bool RenderRaytracing::get_viewport_traced_rt_flags(RenderSceneBuffersRD *p_render_buffers, uint32_t &r_rt_flags) const {
+	HashMap<RenderSceneBuffersRD *, RTViewportState *>::ConstIterator it = viewport_states.find(p_render_buffers);
+	if (it == viewport_states.end() || !it->value || !it->value->has_traced) {
+		return false;
+	}
+	r_rt_flags = it->value->traced_rt_flags;
+	return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -4915,9 +4928,12 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 	prepare_frame();
 	last_trace_frame = MAX(RSG::rasterizer->get_frame_number(), 1u);
 
-	// Builds bundle if needed; live_ready_mask drives TLAS inclusion below.
+	// Marks the bundle used (its base is built: the caller traces only with a ready variant); live_ready_mask drives TLAS
+	// inclusion below.
 	SceneShaderRaytracing *rt_shader_singleton = SceneShaderRaytracing::get_singleton();
 	rt_shader_singleton->ensure_pipeline_bundle(p_rt_flags);
+	state->traced_rt_flags = p_rt_flags;
+	state->has_traced = true;
 
 	render_info_counters = RenderInfoCounters();
 	merged_displaced_records.clear();

@@ -61,7 +61,29 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 	}
 	bool is_reflection_probe = p_render_data->reflection_probe.is_valid();
 
-	const bool use_rt = !is_reflection_probe && pathtracing_is_used(p_render_data->environment, p_render_data->viewport) && _setup_rt();
+	// The variant this view traces with, decided as pathtracing_is_used() decided it for this view's scene cull: bases are
+	// adopted only by update() and by an earlier view's build_tlas() (drain_completed_compiles()), never between the two.
+	// A view whose variant's base still builds asks for it and is rasterized meanwhile, its path tracing state and caches
+	// kept: it traces within a few frames.
+	const bool wants_rt = !is_reflection_probe && _pathtracing_is_wanted(p_render_data->environment, p_render_data->viewport) && _setup_rt();
+	uint32_t view_rt_flags = SceneShaderRaytracing::RT_FLAG_NONE;
+	const bool use_rt = wants_rt && _view_trace_rt_flags(p_render_data->environment, rb, view_rt_flags);
+	bool waits_for_rt = false;
+	if (wants_rt) {
+		// Built here, waited for, when asynchronous compilation is off (GODOT_RT_ASYNC_BASE=0 too): traced from the next
+		// frame on, whose scene cull agrees.
+		const uint32_t asked_flags = _view_rt_flags(p_render_data->environment, rb);
+		if (!use_rt || view_rt_flags != asked_flags) {
+			raytracing->get_shader()->request_pipeline_bundle(asked_flags);
+		}
+		// A variant whose base failed is never traced: the view is rasterized as with path tracing off.
+		waits_for_rt = !use_rt && raytracing->get_shader()->is_usable() && !raytracing->get_shader()->is_pipeline_bundle_failed(asked_flags);
+	}
+	if (waits_for_rt) {
+		raytracing->keep_caches_while_waiting();
+		// The game's loading screen reads it (godot3d's LoadingScreen.WarmUpTracer): the base counts as pending.
+		_rt_publish_pending_hit_groups();
+	}
 	if (!use_rt) {
 		_age_out_motion_vectors(p_render_data);
 
@@ -73,7 +95,9 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 		if (rb_data.is_valid()) {
 			// Raster honours the viewport's 3D MSAA again.
 			rb_data->set_single_sample(false);
-			if (raytracing && keep_caches) {
+			if (waits_for_rt) {
+				// Kept for the frames it traces again: its state (the variant it traced with) and its denoiser's textures.
+			} else if (raytracing && keep_caches) {
 				if (raytracing->dlss_rr_has_buffers(rb.ptr())) {
 					raytracing->dlss_rr_free_buffers(rb.ptr());
 				}
@@ -85,7 +109,7 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 			}
 			rb->set_depth_reconstruct_requested(false);
 		}
-		if (raytracing && !is_reflection_probe && !keep_caches) {
+		if (raytracing && !is_reflection_probe && !keep_caches && !waits_for_rt) {
 			raytracing->free_caches_if_unused();
 		}
 		RenderForwardClustered::_render_scene(p_render_data, p_default_bg_color);
@@ -358,22 +382,8 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 
 	if (rb_data.is_valid() && raytracing && raytracing->get_shader()) {
 		RENDER_TIMESTAMP("Build Acceleration Structures");
-		RID rt_environment = p_render_data->environment.is_valid() ? p_render_data->environment : RID();
-		rt_flags = SceneShaderRaytracing::compute_rt_flags(rt_environment);
-
-		// DLSS Ray Reconstruction where it cannot denoise (a GPU it does not support, or a view not scaled with DLSS, which
-		// carries it): NRD instead, where the engine was built with it, rather than no denoiser.
-		if ((rt_flags & SceneShaderRaytracing::RT_FLAG_DLSS_RR_ENABLED) && RendererRD::NRDDenoiser::is_available()) {
-			bool rr_runs = scale_type == SCALE_3D_DLSS;
-#ifdef STREAMLINE_ENABLED
-			rr_runs = rr_runs && StreamlineContext::get().streamline_capabilities.dlss_rr_available;
-#else
-			rr_runs = false;
-#endif
-			if (!rr_runs) {
-				rt_flags = (rt_flags & ~(SceneShaderRaytracing::RT_FLAG_DLSS_RR_ENABLED | SceneShaderRaytracing::RT_FLAG_DLSS_RR_SPECULAR_MOTION_VECTORS)) | SceneShaderRaytracing::RT_FLAG_NRD_ENABLED | SceneShaderRaytracing::nrd_direct_light_flag();
-			}
-		}
+		// Decided at the top (_view_trace_rt_flags()): its base is built.
+		rt_flags = view_rt_flags;
 
 		const bool dlss_rr_enabled = (rt_flags & SceneShaderRaytracing::RT_FLAG_DLSS_RR_ENABLED) != 0;
 		rr_specular_motion_vectors_traced = dlss_rr_enabled && (rt_flags & SceneShaderRaytracing::RT_FLAG_DLSS_RR_SPECULAR_MOTION_VECTORS);
@@ -1142,10 +1152,61 @@ bool RenderForwardClusteredPT::_transparent_pass_traces_shadows() {
 	return RD::get_singleton()->has_feature(RD::SUPPORTS_RAY_QUERY) && !off;
 }
 
-bool RenderForwardClusteredPT::pathtracing_is_used(RID p_env, RID p_viewport) const {
+bool RenderForwardClusteredPT::_pathtracing_is_wanted(RID p_env, RID p_viewport) const {
 	// Viewport.use_pathtracing = false: that viewport rasterizes even when its environment path traces.
 	return p_env.is_valid() && environment_get_pathtracing_enabled(p_env) &&
 			(p_viewport.is_null() || RSG::viewport->viewport_get_use_pathtracing(p_viewport));
+}
+
+bool RenderForwardClusteredPT::pathtracing_is_used(RID p_env, RID p_viewport, const Ref<RenderSceneBuffers> &p_render_buffers) const {
+	if (!_pathtracing_is_wanted(p_env, p_viewport)) {
+		return false;
+	}
+	// Before the path tracer's first frame (_render_scene() sets it up), or on a device that cannot path trace:
+	// rasterized, as _render_scene() then renders it.
+	const Ref<RenderSceneBuffersRD> rb = p_render_buffers;
+	uint32_t rt_flags = 0;
+	return rb.is_valid() && raytracing && raytracing->get_shader() && raytracing->get_shader()->is_usable() && _view_trace_rt_flags(p_env, rb, rt_flags);
+}
+
+uint32_t RenderForwardClusteredPT::_view_rt_flags(RID p_env, const Ref<RenderSceneBuffersRD> &p_render_buffers) const {
+	uint32_t rt_flags = SceneShaderRaytracing::compute_rt_flags(p_env);
+	// DLSS Ray Reconstruction where it cannot denoise (a GPU it does not support, or a view not scaled with DLSS, which
+	// carries it): NRD instead, where the engine was built with it, rather than no denoiser.
+	if ((rt_flags & SceneShaderRaytracing::RT_FLAG_DLSS_RR_ENABLED) && RendererRD::NRDDenoiser::is_available()) {
+		bool rr_runs = _resolve_scale_3d_mode(p_render_buffers) == SCALE_3D_DLSS;
+#ifdef STREAMLINE_ENABLED
+		rr_runs = rr_runs && StreamlineContext::get().streamline_capabilities.dlss_rr_available;
+#else
+		rr_runs = false;
+#endif
+		if (!rr_runs) {
+			rt_flags = (rt_flags & ~(SceneShaderRaytracing::RT_FLAG_DLSS_RR_ENABLED | SceneShaderRaytracing::RT_FLAG_DLSS_RR_SPECULAR_MOTION_VECTORS)) | SceneShaderRaytracing::RT_FLAG_NRD_ENABLED | SceneShaderRaytracing::nrd_direct_light_flag();
+		}
+	}
+	return rt_flags;
+}
+
+bool RenderForwardClusteredPT::_view_trace_rt_flags(RID p_env, const Ref<RenderSceneBuffersRD> &p_render_buffers, uint32_t &r_rt_flags) const {
+	const SceneShaderRaytracing *rt_shader = raytracing->get_shader();
+	const uint32_t asked_flags = _view_rt_flags(p_env, p_render_buffers);
+	if (rt_shader->is_pipeline_bundle_ready(asked_flags)) {
+		r_rt_flags = asked_flags;
+		return true;
+	}
+	// The flags that change only what the view shows (a debug view, the timing heatmap), not the textures the frame
+	// writes and reads after the trace (the denoisers' guides and signals) nor what the raster passes leave to the rays
+	// (peeled transparency, shadow groups): until the asked variant is built, the view keeps tracing with the variant it
+	// traced with last, as Unreal keeps its last complete ray tracing pipeline while a non-blocking one compiles. Any
+	// other difference (NRD <-> DLSS-RR, a project setting changed) rasterizes the view meanwhile.
+	static constexpr uint32_t VIEW_ONLY_FLAGS = SceneShaderRaytracing::RT_FLAG_DEBUG_VIS_ENABLED | SceneShaderRaytracing::RT_FLAG_TIMING_ENABLED;
+	uint32_t traced_flags = 0;
+	if (raytracing->get_viewport_traced_rt_flags(p_render_buffers.ptr(), traced_flags) && ((traced_flags ^ asked_flags) & ~VIEW_ONLY_FLAGS) == 0 &&
+			rt_shader->is_pipeline_bundle_ready(traced_flags)) {
+		r_rt_flags = traced_flags;
+		return true;
+	}
+	return false;
 }
 
 bool RenderForwardClusteredPT::environment_pathtracing_replaces_shadow_maps(RID p_env) const {
@@ -1188,12 +1249,9 @@ bool RenderForwardClusteredPT::_setup_rt() {
 		// Opacity micromaps are a variant flag (SceneShaderRaytracing::RT_FLAG_OPACITY_MICROMAPS), not a define here:
 		// these defines are in every ray tracing program's cache key, which must not depend on the device for the
 		// shader baker's binaries to be found on a player's.
+		// Its probe's base builds on RenderingCompilationPool: usable until it fails (SceneShaderRaytracing::is_usable(),
+		// which reports it), the views rasterized meanwhile as while their own variant builds.
 		raytracing->shader->init(rt_defines);
-		if (!raytracing->shader->is_usable()) {
-			// Nothing else of the path tracer is compiled or run: a driver whose shader translation cannot handle its
-			// shaders (missing ray tracing features) rasterizes instead of rendering nothing or failing further on.
-			ERR_PRINT("Path tracing is unavailable on this device: its base ray tracing pipeline could not be built. Rendering with rasterization instead.");
-		}
 	}
 
 	return raytracing->get_shader()->is_usable();
@@ -1345,12 +1403,19 @@ void RenderForwardClusteredPT::_rt_publish_pending_hit_groups() {
 void RenderForwardClusteredPT::update() {
 	RenderForwardClustered::update();
 
+	if (!raytracing || !raytracing->get_shader()) {
+		return;
+	}
+	SceneShaderRaytracing *rt_shader = raytracing->get_shader();
 	if (!rt_precache_materials_enabled) {
+		// Before the first traced frame: the variants' bases building (init()'s probe, the views' variants), adopted here
+		// at the start of a frame, before any view decides how it renders (pathtracing_is_used()).
+		rt_shader->drain_completed_compiles();
+		_rt_publish_pending_hit_groups();
 		return;
 	}
 	// Frames that trace nothing (a loading screen over a hidden 3D view) still compile what the instances created meanwhile
 	// need, for the variant traced last.
-	SceneShaderRaytracing *rt_shader = raytracing->get_shader();
 	_rt_precache_hit_groups();
 	rt_shader->drain_completed_compiles();
 	rt_shader->finalize_custom_shaders();

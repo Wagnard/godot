@@ -404,6 +404,7 @@ SceneShaderRaytracing::SceneShaderRaytracing() {
 
 SceneShaderRaytracing::~SceneShaderRaytracing() {
 	_join_lane_for_shutdown();
+	_join_base_builds_for_shutdown();
 	while (!program_builds.is_empty()) {
 		_finish_program_build(program_builds[0]); // Into the programs freed below.
 	}
@@ -516,6 +517,24 @@ struct SceneShaderRaytracing::PipelineBuildTask {
 	SafeFlag abort_requested;
 	SafeFlag done;
 	WorkerThreadPool::TaskID worker_id = WorkerThreadPool::INVALID_TASK_ID;
+};
+
+// A variant's base, built by _base_build_worker() (SceneShaderRaytracing::base_builds).
+struct SceneShaderRaytracing::BaseBuild {
+	uint32_t rt_flags = 0;
+	// VariantCompileContext::base_sources / base_sources_key, assembled on the render thread.
+	Vector<String> sources;
+	String sources_key;
+	// Worker output: both valid, or both invalid with an error.
+	RID shader;
+	RID pipeline;
+	String error;
+	bool from_cache = false;
+	uint64_t queued_usec = 0;
+	uint64_t program_usec = 0; // The binary (cache load, or glslang + the driver's translation) and its shader.
+	uint64_t pipeline_usec = 0; // raytracing_pipeline_create().
+	uint64_t done_usec = 0;
+	WorkerThreadPool::TaskID task = WorkerThreadPool::INVALID_TASK_ID;
 };
 
 // The identifier ShaderCompiler gives a uniform ("__" is reserved in GLSL).
@@ -1698,35 +1717,181 @@ bool SceneShaderRaytracing::_ensure_variant_compile_context(uint32_t p_rt_flags)
 	if (!_build_variant_compile_context(p_rt_flags, ctx)) {
 		return false;
 	}
-	const Vector<String> sources = ctx.base_sources;
 	variant_compile_contexts.insert(p_rt_flags, ctx);
-
-	// Creates layout-defining base_shader RID for uniform sets (immutable per variant).
-	HashMap<uint32_t, PipelineBundle>::Iterator bit = pipeline_bundles.find(p_rt_flags);
-	if (bit != pipeline_bundles.end() && bit->value.base_shader.is_valid()) {
-		return true;
-	}
-
-	Vector<uint8_t> base_binary = _binary_cache_load(ctx.base_sources_key);
-	if (base_binary.is_empty()) {
-		const Vector<RD::ShaderStageSPIRVData> base_stages = ShaderRD::compile_stages(sources, {});
-		ERR_FAIL_COND_V(base_stages.is_empty(), false);
-		base_binary = RD::get_singleton()->shader_compile_binary_from_spirv(base_stages, "RT_base");
-		ERR_FAIL_COND_V(base_binary.is_empty(), false);
-		_binary_cache_save(ctx.base_sources_key, base_binary);
-	}
-
-	RID base_shader_rd = RD::get_singleton()->shader_create_from_bytecode(base_binary);
-	ERR_FAIL_COND_V(!base_shader_rd.is_valid(), false);
-
-	PipelineBundle &bundle = pipeline_bundles[p_rt_flags];
-	bundle.base_shader = base_shader_rd;
-	_bundle_resize_for_slots(bundle);
-	if (!bundle.per_hg_states.is_empty()) {
-		bundle.per_hg_states[0] = HGState::Ready;
-	}
-
 	return true;
+}
+
+// Variant bases: built off the render thread.
+
+bool SceneShaderRaytracing::_async_base_builds() {
+	// GODOT_RT_ASYNC_BASE=0: built on the render thread at first use, as before (comparisons).
+	static const bool off = OS::get_singleton()->get_environment("GODOT_RT_ASYNC_BASE") == "0";
+	return !off;
+}
+
+void SceneShaderRaytracing::_build_base(BaseBuild *p_build) const {
+	const uint64_t begin = OS::get_singleton()->get_ticks_usec();
+	// The layout-defining base shader (uniform sets are made with it, immutable for the variant's lifetime), through the
+	// binary cache: the driver's translation (Mesa's DXIL on D3D12) took seconds.
+	Vector<uint8_t> binary = _binary_cache_load(p_build->sources_key);
+	p_build->from_cache = !binary.is_empty();
+	if (binary.is_empty()) {
+		const Vector<RD::ShaderStageSPIRVData> stages = ShaderRD::compile_stages(p_build->sources, {});
+		if (stages.is_empty()) {
+			p_build->error = "its stages failed to compile";
+			return;
+		}
+		binary = RD::get_singleton()->shader_compile_binary_from_spirv(stages, "RT_base");
+		if (binary.is_empty()) {
+			p_build->error = "shader_compile_binary_from_spirv failed";
+			return;
+		}
+		_binary_cache_save(p_build->sources_key, binary);
+	}
+	p_build->shader = RD::get_singleton()->shader_create_from_bytecode(binary);
+	const uint64_t pipeline_begin = OS::get_singleton()->get_ticks_usec();
+	p_build->program_usec = pipeline_begin - begin;
+	if (p_build->shader.is_null()) {
+		p_build->error = "shader_create_from_bytecode failed";
+		return;
+	}
+	// Vulkan cold: seconds of the driver's compile (2.8-11.4 s per variant, PT-LOADING-STUDY 0).
+	p_build->pipeline = _create_initial_pipeline(p_build->shader, p_build->rt_flags);
+	p_build->pipeline_usec = OS::get_singleton()->get_ticks_usec() - pipeline_begin;
+	if (p_build->pipeline.is_null()) {
+		RD::get_singleton()->free_rid(p_build->shader);
+		p_build->shader = RID();
+		p_build->error = "raytracing_pipeline_create failed";
+	}
+}
+
+void SceneShaderRaytracing::_base_build_worker(void *p_userdata) {
+	BaseBuild *build = static_cast<BaseBuild *>(p_userdata);
+	// The singleton waits for its builds before it is destroyed (_join_base_builds_for_shutdown()).
+	if (singleton) {
+		singleton->_build_base(build);
+	}
+	build->done_usec = OS::get_singleton()->get_ticks_usec();
+}
+
+void SceneShaderRaytracing::_start_base_build(uint32_t p_rt_flags) {
+	if (base_builds.has(p_rt_flags) || failed_base_variants.has(p_rt_flags) || is_pipeline_bundle_ready(p_rt_flags)) {
+		return;
+	}
+	const uint64_t begin = OS::get_singleton()->get_ticks_usec();
+	if (!_ensure_variant_compile_context(p_rt_flags)) {
+		WARN_PRINT(vformat("RT: Failed to build base compile context for variant 0x%x.", p_rt_flags));
+		failed_base_variants.insert(p_rt_flags);
+		if (p_rt_flags == RT_FLAG_NONE && usable_state == UsableState::PENDING) {
+			usable_state = UsableState::UNUSABLE;
+			ERR_PRINT("Path tracing is unavailable on this device: its base ray tracing pipeline could not be built. Rendering with rasterization instead.");
+		}
+		return;
+	}
+	const VariantCompileContext &ctx = variant_compile_contexts[p_rt_flags];
+	BaseBuild *build = memnew(BaseBuild);
+	build->rt_flags = p_rt_flags;
+	build->sources = ctx.base_sources;
+	build->sources_key = ctx.base_sources_key;
+	build->queued_usec = OS::get_singleton()->get_ticks_usec();
+	const uint64_t context_usec = build->queued_usec - begin;
+	base_builds.insert(p_rt_flags, build);
+
+	if (async_compilation_enabled && _async_base_builds()) {
+		// High priority, as the hit group builds and the programs (_dispatch_next_locked(), _start_program_build()): a view
+		// waits for it. Refused while the engine quits (a frame replayed by finalize_display()): the view stays rasterized.
+		build->task = RenderingCompilationPool::get()->try_add_native_task(&SceneShaderRaytracing::_base_build_worker, build, true, "RT base pipeline");
+		if (build->task != WorkerThreadPool::INVALID_TASK_ID) {
+			print_verbose(vformat("RT: variant 0x%x: base build started (sources %.1f ms on the render thread).", p_rt_flags, double(context_usec) / 1000.0));
+			return;
+		}
+		base_builds.erase(p_rt_flags);
+		memdelete(build);
+		return;
+	}
+	// Synchronous: the frame that asks for it waits, as before.
+	_base_build_worker(build);
+	_finish_base_build(build);
+}
+
+void SceneShaderRaytracing::_finish_base_build(BaseBuild *p_build) {
+	if (p_build->task != WorkerThreadPool::INVALID_TASK_ID && WorkerThreadPool::get_singleton()) {
+		RenderingCompilationPool::get()->wait_for_task_completion(p_build->task);
+	}
+	const uint32_t flags = p_build->rt_flags;
+	base_builds.erase(flags);
+	const uint64_t now = OS::get_singleton()->get_ticks_usec();
+
+	bool built = false;
+	if (p_build->pipeline.is_valid()) {
+		PipelineBundle &bundle = pipeline_bundles[flags];
+		if (bundle.initial_pipeline_built) {
+			// Never: a variant has one build in flight and none once built. Its outputs are not needed.
+			RD::get_singleton()->free_rid(p_build->pipeline);
+			RD::get_singleton()->free_rid(p_build->shader);
+			built = true;
+		} else {
+			bundle.base_shader = p_build->shader;
+			_bundle_resize_for_slots(bundle);
+			if (!bundle.per_hg_states.is_empty()) {
+				bundle.per_hg_states[0] = HGState::Ready;
+			}
+			if (_install_initial_pipeline(flags, bundle, p_build->pipeline)) {
+				// Dirty if custom slots exist: a full or incremental build adds them (_kick_rebuild_if_idle()).
+				if (hit_group_slots.size() > 1) {
+					bundle.dirty = true;
+				}
+				bundle.initial_pipeline_built = true;
+				built = true;
+			} else {
+				p_build->error = "its shader binding table could not be made";
+			}
+		}
+	}
+	if (built) {
+		// "on the render thread": what the render thread spent on it here (its shader binding table, or the whole build
+		// when it was synchronous); the program and pipeline times are the worker's.
+		const bool sync = p_build->task == WorkerThreadPool::INVALID_TASK_ID;
+		const uint64_t render_thread_usec = OS::get_singleton()->get_ticks_usec() - (sync ? p_build->queued_usec : now);
+		print_verbose(vformat("RT: variant 0x%x: base built in %.1f ms (program %.1f ms%s, pipeline %.1f ms), adopted %.1f ms after it was queued, %.1f ms on the render thread%s.", flags,
+				double(p_build->done_usec - p_build->queued_usec) / 1000.0, double(p_build->program_usec) / 1000.0, p_build->from_cache ? String(" from the shader cache") : String(),
+				double(p_build->pipeline_usec) / 1000.0, double(now - p_build->queued_usec) / 1000.0, double(render_thread_usec) / 1000.0, sync ? String(" (synchronous)") : String()));
+	} else {
+		WARN_PRINT(vformat("RT: the base ray tracing pipeline of variant 0x%x could not be built (%s); views that need it are rasterized.", flags, p_build->error));
+		failed_base_variants.insert(flags);
+	}
+	if (flags == RT_FLAG_NONE && usable_state == UsableState::PENDING) {
+		usable_state = built ? UsableState::USABLE : UsableState::UNUSABLE;
+		if (!built) {
+			// Nothing else of the path tracer is compiled or run: a driver whose shader translation cannot handle its
+			// shaders (missing ray tracing features) rasterizes instead of rendering nothing or failing further on.
+			ERR_PRINT("Path tracing is unavailable on this device: its base ray tracing pipeline could not be built. Rendering with rasterization instead.");
+		}
+	}
+	memdelete(p_build);
+}
+
+void SceneShaderRaytracing::_join_base_builds_for_shutdown() {
+	// A build still running at quit: waited for (the compilation pool runs until Main::cleanup() ends,
+	// RENDERING-COMPILATION-POOL-FIXES), then its outputs go to its bundle, which invalidate_pipeline_bundles() frees.
+	while (!base_builds.is_empty()) {
+		_finish_base_build(base_builds.begin()->value);
+	}
+}
+
+bool SceneShaderRaytracing::is_pipeline_bundle_ready(uint32_t p_rt_flags) const {
+	HashMap<uint32_t, PipelineBundle>::ConstIterator it = pipeline_bundles.find(p_rt_flags);
+	return it != pipeline_bundles.end() && it->value.initial_pipeline_built;
+}
+
+void SceneShaderRaytracing::request_pipeline_bundle(uint32_t p_rt_flags) {
+	if (is_pipeline_bundle_ready(p_rt_flags)) {
+		return;
+	}
+	_start_base_build(p_rt_flags);
+	if (!is_pipeline_bundle_ready(p_rt_flags) && !failed_base_variants.has(p_rt_flags)) {
+		pipeline_bundles[p_rt_flags].last_requested_frame = int64_t(RSG::rasterizer->get_frame_number());
+	}
 }
 
 // Shader baker.
@@ -1936,35 +2101,23 @@ const SceneShaderRaytracing::PipelineBundle &SceneShaderRaytracing::ensure_pipel
 		return it->value;
 	}
 
-	if (!_ensure_variant_compile_context(p_rt_flags)) {
-		WARN_PRINT(vformat("RT: Failed to build base compile context for variant 0x%x.", p_rt_flags));
+	// Its base is built on RenderingCompilationPool, never here (unless asynchronous compilation is off): the callers
+	// trace only with a ready variant (RenderForwardClusteredPT::_view_trace_rt_flags()), and a frame given no bundle
+	// records no trace (no uniform set).
+	request_pipeline_bundle(p_rt_flags);
+	it = pipeline_bundles.find(p_rt_flags);
+	if (it == pipeline_bundles.end() || !it->value.initial_pipeline_built) {
 		return EMPTY_BUNDLE;
 	}
-
-	PipelineBundle &bundle = pipeline_bundles[p_rt_flags];
-	_bundle_resize_for_slots(bundle);
-
-	// Sync bootstrap: HG0-only pipeline + SBT on render thread; dirty if extra slots exist.
-	if (!_build_initial_bundle(p_rt_flags, bundle)) {
-		return EMPTY_BUNDLE;
-	}
-	if (hit_group_slots.size() > 1) {
-		bundle.dirty = true;
-	}
-	bundle.initial_pipeline_built = true;
 	if (p_mark_used) {
-		bundle.last_used_frame = int64_t(RSG::rasterizer->get_frame_number());
+		it->value.last_used_frame = int64_t(RSG::rasterizer->get_frame_number());
 	}
-	return bundle;
+	return it->value;
 }
 
 // Minimal HG0 + empty sentinel pipeline/SBT for first use of a variant.
 
-bool SceneShaderRaytracing::_build_initial_bundle(uint32_t p_rt_flags, PipelineBundle &r_bundle) {
-	if (!r_bundle.base_shader.is_valid()) {
-		return false;
-	}
-
+RID SceneShaderRaytracing::_create_initial_pipeline(RID p_base_shader, uint32_t p_rt_flags) {
 	Vector<RD::PipelineSpecializationConstant> spec_constants;
 	{
 		RD::PipelineSpecializationConstant sc;
@@ -1974,13 +2127,13 @@ bool SceneShaderRaytracing::_build_initial_bundle(uint32_t p_rt_flags, PipelineB
 		spec_constants.push_back(sc);
 	}
 
-	RD::PipelineShader base_ps = { r_bundle.base_shader, spec_constants };
+	RD::PipelineShader base_ps = { p_base_shader, spec_constants };
 	RD::HitGroup hg0_default;
 	hg0_default.closest_hit_shader = base_ps;
 	hg0_default.any_hit_shader = base_ps;
 	const RD::HitGroup empty_hg;
 
-	// HG[0]=default, HG[1]=empty until rebuild maps custom slots.
+	// HG[0]=default, HG[1]=empty until rebuild maps custom slots (_install_initial_pipeline()'s pipeline_group_count).
 	LocalVector<RD::HitGroup> hit_groups;
 	hit_groups.push_back(hg0_default);
 	hit_groups.push_back(empty_hg);
@@ -1991,10 +2144,15 @@ bool SceneShaderRaytracing::_build_initial_bundle(uint32_t p_rt_flags, PipelineB
 			RT_MAX_RECURSION_DEPTH);
 	if (new_pipeline.is_null()) {
 		WARN_PRINT(vformat("RT: initial raytracing_pipeline_create failed for variant 0x%x.", p_rt_flags));
-		return false;
+		return RID();
 	}
 	RD::get_singleton()->set_resource_name(new_pipeline, String("RT Pipeline initial [flags=") + itos(p_rt_flags) + "]");
+	return new_pipeline;
+}
 
+bool SceneShaderRaytracing::_install_initial_pipeline(uint32_t p_rt_flags, PipelineBundle &r_bundle, RID p_pipeline) {
+	RID new_pipeline = p_pipeline;
+	static constexpr uint32_t HIT_GROUP_COUNT = 2; // _create_initial_pipeline()'s.
 	static constexpr uint32_t HIT_SBT_CAPACITY = 4096;
 	uint32_t sbt_size = HIT_SBT_CAPACITY;
 
@@ -2029,7 +2187,7 @@ bool SceneShaderRaytracing::_build_initial_bundle(uint32_t p_rt_flags, PipelineB
 	r_bundle.live_ready_mask.push_back(true);
 	r_bundle.slot_groups.clear();
 	r_bundle.slot_groups.push_back(0);
-	r_bundle.pipeline_group_count = hit_groups.size();
+	r_bundle.pipeline_group_count = HIT_GROUP_COUNT;
 	r_bundle.empty_group = 1;
 	return true;
 }
@@ -2765,18 +2923,23 @@ uint32_t SceneShaderRaytracing::_get_bundle_pending_hit_group_count(const Pipeli
 
 uint32_t SceneShaderRaytracing::get_pending_hit_group_count() const {
 	const PipelineBundle *last = _get_last_traced_bundle();
-	if (!last) {
-		return 0;
-	}
 	// Every variant traced in the newest traced frame, not only one of them: two views trace with different variants in
 	// the same frame (godot3d's main view with DLSS-RR while another view falls back to NRD), and the one found first
 	// could be complete while the other still waits for hit groups the driver is adding (a grey fallback on screen).
 	// The largest count of them: each variant waits for the same materials' hit groups.
 	uint32_t pending = 0;
+	// And every variant a view asked for lately without tracing with it since (its base building, the view rasterized
+	// or tracing another variant): its base, then every hit group it has yet to add. A game's loading screen waiting
+	// for 0 (godot3d's LoadingScreen.WarmUpTracer) must not lift on the raster frames of a view that will trace.
+	// A variant no view asked for in RT_REQUESTED_BUNDLE_FRAMES (a setting changed back) stops counting.
+	static constexpr int64_t RT_REQUESTED_BUNDLE_FRAMES = 120;
+	const int64_t frame = int64_t(RSG::rasterizer->get_frame_number());
 	for (const KeyValue<uint32_t, PipelineBundle> &kv : pipeline_bundles) {
 		const PipelineBundle &bundle = kv.value;
-		if (bundle.initial_pipeline_built && bundle.last_used_frame == last->last_used_frame) {
+		if (last && bundle.initial_pipeline_built && bundle.last_used_frame == last->last_used_frame) {
 			pending = MAX(pending, _get_bundle_pending_hit_group_count(bundle));
+		} else if (bundle.last_requested_frame > bundle.last_used_frame && frame - bundle.last_requested_frame <= RT_REQUESTED_BUNDLE_FRAMES && !failed_base_variants.has(kv.key)) {
+			pending = MAX(pending, (bundle.initial_pipeline_built ? 0u : 1u) + _get_bundle_pending_hit_group_count(bundle));
 		}
 	}
 	// Displacement and opacity micromap bake programs too: built at first use, they stall that frame.
@@ -2784,6 +2947,19 @@ uint32_t SceneShaderRaytracing::get_pending_hit_group_count() const {
 }
 
 void SceneShaderRaytracing::drain_completed_compiles() {
+	// The variants' bases first: a bundle adopted now gets its hit groups from the next build (_kick_rebuild_if_idle()).
+	if (!base_builds.is_empty()) {
+		LocalVector<BaseBuild *> finished;
+		for (const KeyValue<uint32_t, BaseBuild *> &kv : base_builds) {
+			if (RenderingCompilationPool::get()->is_task_completed(kv.value->task)) {
+				finished.push_back(kv.value);
+			}
+		}
+		for (BaseBuild *build : finished) {
+			_finish_base_build(build);
+		}
+	}
+
 	for (uint32_t i = 0; i < program_builds.size();) {
 		if (RenderingCompilationPool::get()->is_task_completed(program_builds[i]->task)) {
 			_finish_program_build(program_builds[i]); // Removes it.
@@ -2934,14 +3110,13 @@ void SceneShaderRaytracing::init(const String p_defines) {
 	// Now create a version to access the embedded raytracing shader
 	raygen_shader_version = raygen_shader.version_create();
 	if (raygen_shader_version.is_valid()) {
-		// A probe: no view traces with it unless its flags come up, so its hit groups are not compiled for it.
-		const PipelineBundle &b = ensure_pipeline_bundle(RT_FLAG_NONE, false);
-		usable = b.pipeline.is_valid();
-		if (!usable) {
-			WARN_PRINT("Failed to create default raytracing pipeline bundle");
-		}
+		// A probe: no view traces with it unless its flags come up, so its hit groups are not compiled for it. Built on
+		// RenderingCompilationPool as every variant's base: _finish_base_build() decides usable_state. Not a request: no
+		// view waits for it (get_pending_hit_group_count()).
+		_start_base_build(RT_FLAG_NONE);
 	} else {
-		WARN_PRINT("Failed to create raytracing shader version");
+		usable_state = UsableState::UNUSABLE;
+		ERR_PRINT("Path tracing is unavailable on this device: its ray tracing shader version could not be created. Rendering with rasterization instead.");
 	}
 
 	{
