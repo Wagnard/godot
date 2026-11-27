@@ -2093,6 +2093,9 @@ int32_t MaterialStorage::global_shader_parameters_instance_allocate(RID p_instan
 	global_shader_uniforms.instance_version++;
 	ERR_FAIL_COND_V_MSG(pos < 0, -1, "Too many instances using shader instance variables. Increase buffer size in Project Settings.");
 	global_shader_uniforms.buffer_usage[pos].elements = ShaderLanguage::MAX_INSTANCE_UNIFORM_INDICES;
+	// A freed block keeps its previous owner's values: start from zero.
+	memset(&global_shader_uniforms.buffer_values[pos], 0, sizeof(GlobalShaderUniforms::Value) * ShaderLanguage::MAX_INSTANCE_UNIFORM_INDICES);
+	_global_shader_uniform_mark_buffer_dirty(pos, ShaderLanguage::MAX_INSTANCE_UNIFORM_INDICES);
 	return pos;
 }
 
