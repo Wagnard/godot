@@ -37,44 +37,22 @@ params;
 // As NRD_ALBEDO_MIN (raytracing_inc.glsl): the floor the raygen divided by.
 #define NRD_ALBEDO_MIN 0.001
 
-// PT-NRD-COMPOSITE-NAN-WA: every value this pass adds up is read from a texture another pass wrote, and a component that is
-// not finite becomes 0. Intel's D3D12 shader compiler (Arc B580, driver 32.0.101.9150) gives the raygen's NRD variant a NaN
-// or Inf at ~220 random pixels per 1080p frame, in values whose terms are all finite; Vulkan on the same GPU and NVIDIA
-// never do, the DXIL validates and holds no undefined value. The NaN reached the output copy, which turns it into 100.0:
-// white dots. The test is on the bits of loaded values: in the raygen the DXIL is fast-math, and Intel's compiler removed
-// isnan() / isinf() tests of computed values there. NRD's own front end replaces non-finite inputs with 0 the same way
-// (REBLUR_FrontEnd_PackRadianceAndNormHitDist(..., true)). Remove when an Intel driver passes ptsnowtest (render-benches)
-// with NRD without it: no white dot (count_dots.ps1) and no non-finite image value at this pass.
-vec3 finite_or_zero(vec3 p_value) {
-	const bvec3 not_finite = equal(floatBitsToUint(p_value) & uvec3(0x7F800000u), uvec3(0x7F800000u));
-	return mix(p_value, vec3(0.0), not_finite);
-}
-
 void main() {
 	const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
-	if (any(greaterThanEqual(pixel, params.size))) {
-		return;
-	}
-	vec4 color = imageLoad(output_image, pixel);
-	const vec3 color_finite = finite_or_zero(color.rgb);
-	if (imageLoad(depth_image, pixel).r == 0.0) {
-		// Where the camera ray missed, the image is the sky's light alone: written back only when it was not finite.
-		if (any(notEqual(floatBitsToUint(color_finite), floatBitsToUint(color.rgb)))) {
-			imageStore(output_image, pixel, vec4(color_finite, color.a));
-		}
+	if (any(greaterThanEqual(pixel, params.size)) || imageLoad(depth_image, pixel).r == 0.0) {
 		return;
 	}
 
-	const vec3 diffuse_albedo = max(finite_or_zero(texelFetch(diffuse_albedo_texture, pixel, 0).rgb), vec3(NRD_ALBEDO_MIN));
-	const vec3 specular_albedo = max(finite_or_zero(texelFetch(specular_albedo_texture, pixel, 0).rgb), vec3(NRD_ALBEDO_MIN));
-	color.rgb = color_finite;
-	color.rgb += finite_or_zero(texelFetch(diffuse_texture, pixel, 0).rgb) * diffuse_albedo + finite_or_zero(texelFetch(specular_texture, pixel, 0).rgb) * specular_albedo;
+	const vec3 diffuse = texelFetch(diffuse_texture, pixel, 0).rgb * max(texelFetch(diffuse_albedo_texture, pixel, 0).rgb, vec3(NRD_ALBEDO_MIN));
+	const vec3 specular = texelFetch(specular_texture, pixel, 0).rgb * max(texelFetch(specular_albedo_texture, pixel, 0).rgb, vec3(NRD_ALBEDO_MIN));
+	vec4 color = imageLoad(output_image, pixel);
+	color.rgb += diffuse + specular;
 	if (params.direct != 0u) {
-		color.rgb += finite_or_zero(texelFetch(direct_texture, pixel, 0).rgb) * diffuse_albedo;
+		color.rgb += texelFetch(direct_texture, pixel, 0).rgb * max(texelFetch(diffuse_albedo_texture, pixel, 0).rgb, vec3(NRD_ALBEDO_MIN));
 	}
 	if (params.sun != 0u) {
 		const vec4 sun = texelFetch(sun_texture, pixel, 0);
-		color.rgb += finite_or_zero(sun.rgb) * finite_or_zero(sun.aaa).x;
+		color.rgb += sun.rgb * sun.a;
 	}
 	imageStore(output_image, pixel, color);
 }
