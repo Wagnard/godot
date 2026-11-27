@@ -38,6 +38,7 @@
 #include "editor/editor_node.h"
 #include "scene/3d/label_3d.h"
 #include "scene/3d/sprite_3d.h"
+#include "scene/3d/trail_3d.h"
 #include "servers/rendering/renderer_rd/effects/nrd_denoiser.h"
 #include "servers/rendering/renderer_rd/forward_clustered/render_forward_clustered_pt.h"
 #include "servers/rendering/renderer_rd/forward_clustered/scene_shader_raytracing.h"
@@ -475,6 +476,17 @@ Node *ShaderBakerExportPlugin::_customize_scene(Node *p_root, const String &p_pa
 				// Generate variants with and without MSDF support since we don't have access to the font here.
 				Ref<Material> label_3d_material = StandardMaterial3D::get_material_for_2d(bool(properties["shaded"]), mat_transparency, bool(properties["double_sided"]), billboard_mode == StandardMaterial3D::BILLBOARD_ENABLED, billboard_mode == StandardMaterial3D::BILLBOARD_FIXED_Y, true, bool(properties["no_depth_test"]), bool(properties["fixed_size"]), BaseMaterial3D::TextureFilter(int(properties["texture_filter"])), BaseMaterial3D::AlphaAntiAliasing(int(properties["alpha_antialiasing_mode"])));
 				_customize_resource(label_3d_material, String());
+			}
+		}
+
+		if (Object::cast_to<Trail3D>(node) != nullptr) {
+			// Trail3D draws with default materials made at run time on demand: the one of its material mode and alignment,
+			// the default mode's when it is made (before its properties are set) and whichever a script switches to. The
+			// four are baked (a version already queued is skipped).
+			for (const LineBase3D::MaterialMode material_mode : { LineBase3D::MATERIAL_MODE_MIX, LineBase3D::MATERIAL_MODE_ADD }) {
+				for (const LineBase3D::MeshAlignment alignment : { LineBase3D::MESH_ALIGNMENT_LOCAL, LineBase3D::MESH_ALIGNMENT_BILLBOARD }) {
+					_customize_resource(Trail3D::get_default_material(material_mode, alignment), String());
+				}
 			}
 		}
 

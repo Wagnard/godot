@@ -30,6 +30,7 @@
 
 #pragma once
 
+#include "core/os/mutex.h"
 #include "scene/3d/line_base_3d.h"
 #include "scene/resources/curve.h"
 #include "scene/resources/gradient.h"
@@ -48,8 +49,10 @@ protected:
 	static void _bind_methods();
 
 public:
-	static void init_shaders();
 	static void finish_shaders();
+	// The material of MATERIAL_MODE_MIX or MATERIAL_MODE_ADD for an alignment, made at its first use. The export shader
+	// baker bakes all of them for the scenes holding a Trail3D.
+	static Ref<ShaderMaterial> get_default_material(MaterialMode p_material_mode, MeshAlignment p_alignment);
 
 	void set_width(float p_width);
 	float get_width() const;
@@ -149,15 +152,9 @@ private:
 	int _last_index_count = 0;
 	Ref<ArrayMesh> _mesh;
 
-	static inline Ref<Shader> billboard_additive_shader;
-	static inline Ref<Shader> billboard_shader;
-	static inline Ref<Shader> local_additive_shader;
-	static inline Ref<Shader> local_shader;
-
-	static inline Ref<ShaderMaterial> billboard_additive_material;
-	static inline Ref<ShaderMaterial> billboard_material;
-	static inline Ref<ShaderMaterial> local_additive_material;
-	static inline Ref<ShaderMaterial> local_material;
+	// [additive][billboard], see get_default_material().
+	static Mutex default_materials_mutex;
+	static inline Ref<ShaderMaterial> default_materials[2][2];
 
 	real_t min_section_length = 0.2;
 

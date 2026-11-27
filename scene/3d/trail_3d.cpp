@@ -61,9 +61,11 @@
 /* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
 /**************************************************************************/
 
-void Trail3D::init_shaders() {
-	billboard_additive_shader.instantiate();
-	billboard_additive_shader->set_code(R"(
+Mutex Trail3D::default_materials_mutex;
+
+static const char *_get_default_shader_code(bool p_additive, bool p_billboard) {
+	if (p_additive && p_billboard) {
+		return R"(
 shader_type spatial;
 render_mode blend_add, depth_draw_never, unshaded, cull_disabled;
 
@@ -88,9 +90,10 @@ void fragment() {
 	ALBEDO = COLOR.rgb;
 	ALPHA = COLOR.a;
 }
-)");
-	billboard_shader.instantiate();
-	billboard_shader->set_code(R"(
+)";
+	}
+	if (p_billboard) {
+		return R"(
 shader_type spatial;
 render_mode blend_mix, depth_draw_never, unshaded, cull_disabled;
 
@@ -115,9 +118,10 @@ void fragment() {
 	ALBEDO = COLOR.rgb;
 	ALPHA = COLOR.a;
 }
-)");
-	local_additive_shader.instantiate();
-	local_additive_shader->set_code(R"(
+)";
+	}
+	if (p_additive) {
+		return R"(
 shader_type spatial;
 render_mode blend_add, depth_draw_never, unshaded, cull_disabled;
 
@@ -125,9 +129,9 @@ void fragment() {
 	ALBEDO = COLOR.rgb;
 	ALPHA = COLOR.a;
 }
-)");
-	local_shader.instantiate();
-	local_shader->set_code(R"(
+)";
+	}
+	return R"(
 shader_type spatial;
 render_mode blend_mix, depth_draw_never, unshaded, cull_disabled;
 
@@ -135,27 +139,36 @@ void fragment() {
 	ALBEDO = COLOR.rgb;
 	ALPHA = COLOR.a;
 }
-)");
+)";
+}
 
-	billboard_additive_material.instantiate();
-	billboard_additive_material->set_shader(billboard_additive_shader);
-	billboard_material.instantiate();
-	billboard_material->set_shader(billboard_shader);
-	local_additive_material.instantiate();
-	local_additive_material->set_shader(local_additive_shader);
-	local_material.instantiate();
-	local_material->set_shader(local_shader);
+Ref<ShaderMaterial> Trail3D::get_default_material(MaterialMode p_material_mode, MeshAlignment p_alignment) {
+	ERR_FAIL_COND_V(p_material_mode != MATERIAL_MODE_MIX && p_material_mode != MATERIAL_MODE_ADD, Ref<ShaderMaterial>());
+	const bool additive = p_material_mode == MATERIAL_MODE_ADD;
+	const bool billboard = p_alignment == MESH_ALIGNMENT_BILLBOARD;
+
+	// Made at the first use, as BaseMaterial3D::get_material_for_2d() makes Sprite3D's: setting a Shader's code compiles
+	// it, which register_scene_types() did for every project (godotengine/godot#125454). A Trail3D can be made on a
+	// loading thread.
+	MutexLock lock(default_materials_mutex);
+	Ref<ShaderMaterial> &material = default_materials[additive][billboard];
+	if (material.is_null()) {
+		Ref<Shader> shader;
+		shader.instantiate();
+		shader->set_code(_get_default_shader_code(additive, billboard));
+		material.instantiate();
+		material->set_shader(shader);
+	}
+	return material;
 }
 
 void Trail3D::finish_shaders() {
-	billboard_additive_material.unref();
-	billboard_material.unref();
-	local_additive_material.unref();
-	local_material.unref();
-	billboard_shader.unref();
-	billboard_additive_shader.unref();
-	local_shader.unref();
-	local_additive_shader.unref();
+	MutexLock lock(default_materials_mutex);
+	for (int additive = 0; additive < 2; additive++) {
+		for (int billboard = 0; billboard < 2; billboard++) {
+			default_materials[additive][billboard].unref();
+		}
+	}
 }
 
 void Trail3D::_notification(int p_what) {
@@ -255,20 +268,8 @@ void Trail3D::set_material_mode(MaterialMode p_material_mode) {
 	if (material_mode == p_material_mode) {
 		return;
 	}
-	if (material.is_null()) {
-		if (material_mode == MATERIAL_MODE_ADD) {
-			if (alignment == MESH_ALIGNMENT_LOCAL) {
-				material = local_additive_material->duplicate_deep();
-			} else {
-				material = billboard_additive_material->duplicate_deep();
-			}
-		} else if (material_mode == MATERIAL_MODE_MIX) {
-			if (alignment == MESH_ALIGNMENT_LOCAL) {
-				material = local_material->duplicate_deep();
-			} else {
-				material = billboard_material->duplicate_deep();
-			}
-		}
+	if (material.is_null() && (material_mode == MATERIAL_MODE_ADD || material_mode == MATERIAL_MODE_MIX)) {
+		material = get_default_material(material_mode, alignment)->duplicate_deep();
 	}
 	material_mode = p_material_mode;
 	notify_property_list_changed();
@@ -914,24 +915,15 @@ void Trail3D::_validate_property(PropertyInfo &p_property) const {
 }
 
 void Trail3D::_ensure_material() {
-	if (!_mesh.is_valid()) {
+	// Entering the tree sets it (clear()): a Trail3D never in a tree, such as the one ClassDB makes for the class
+	// reference's default values, makes no default material.
+	if (!_mesh.is_valid() || !is_inside_tree()) {
 		return;
 	}
 	switch (material_mode) {
-		case MATERIAL_MODE_ADD: {
-			if (alignment == MESH_ALIGNMENT_BILLBOARD) {
-				_mesh->surface_set_material(0, billboard_additive_material);
-			} else {
-				_mesh->surface_set_material(0, local_additive_material);
-			}
-
-		} break;
+		case MATERIAL_MODE_ADD:
 		case MATERIAL_MODE_MIX: {
-			if (alignment == MESH_ALIGNMENT_BILLBOARD) {
-				_mesh->surface_set_material(0, billboard_material);
-			} else {
-				_mesh->surface_set_material(0, local_material);
-			}
+			_mesh->surface_set_material(0, get_default_material(material_mode, alignment));
 		} break;
 		case MATERIAL_MODE_CUSTOM: {
 			_mesh->surface_set_material(0, material);
