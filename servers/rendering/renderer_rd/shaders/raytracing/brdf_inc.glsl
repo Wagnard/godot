@@ -1108,6 +1108,22 @@ BrdfData prepareBRDFData(float3 N, float3 L, float3 V, MaterialProperties materi
 	return data;
 }
 
+// The smallest roughness of the lights' specular lobe, raster's ROUGHNESS_MIN (half_inc.glsl, fp32: this shader is fp32
+// throughout), which light_compute() clamps to before its GGX terms (scene_forward_lights_inc.glsl): Frostbite clamps the
+// roughness of analytical lights to 0.045 in single precision (Filament, "Roughness remapping and clamping"). A mirror then
+// shows a light's highlight as it does in raster. Only the lights: a reflection ray of a mirror-smooth surface is still
+// sampled as a perfect mirror (sampleSpecularMicrofacet()), as raster's reflections are and as production path tracers
+// take a near-zero roughness (pbrt-v4 EffectivelySmooth(), Falcor kMinGGXAlpha, Cycles alpha_is_almost_specular()).
+#define RT_LIGHT_ROUGHNESS_MIN 0.045f
+
+// The BRDF data of a light's specular lobe: the roughness clamped as raster's, the rest unchanged.
+BrdfData lightSpecularBRDFData(BrdfData data) {
+	data.roughness = clamp(data.roughness, RT_LIGHT_ROUGHNESS_MIN, 1.0f);
+	data.alpha = data.roughness * data.roughness;
+	data.alphaSquared = data.alpha * data.alpha;
+	return data;
+}
+
 #ifdef RT_RASTER_BRDF
 // -------------------------------------------------------------------------
 //    Godot's shading model (rendering/pathtracing/raster_brdf)
@@ -1140,25 +1156,23 @@ float godotDiffuseSampleWeight(const BrdfData data, uint p_mode) {
 	return p_mode == GODOT_DIFFUSE_BURLEY ? disneyDiffuse(data) : 1.0f;
 }
 
-// The specular term times the cosine. Toon is raster's band (light_compute() :255-261), which raster adds to the diffuse
-// light: tinted by the diffuse reflectance; 0 at roughness 0, where raster skips the lights' specular light (:249) and the
-// band's edges would meet. Schlick-GGX keeps ours at roughness 0 (a mirror's highlight).
+// The specular term times the cosine, with raster's clamped roughness (lightSpecularBRDFData(), light_compute() :250).
+// Toon is raster's band (:255-261), which raster adds to the diffuse light: tinted by the diffuse reflectance.
 float3 godotSpecularNdotL(const BrdfData data, uint p_mode) {
 	if (p_mode == GODOT_SPECULAR_DISABLED) {
 		return float3(0.0f, 0.0f, 0.0f);
 	}
+	const BrdfData spec_data = lightSpecularBRDFData(data);
 	if (p_mode == GODOT_SPECULAR_TOON) {
-		if (data.roughness <= 0.0f) {
-			return float3(0.0f, 0.0f, 0.0f);
-		}
 		const float RdotV = dot(reflect(-data.L, data.N), data.V);
-		const float mid = (1.0f - data.roughness) * (1.0f - data.roughness);
-		return data.diffuseReflectance * (smoothstep(mid - data.roughness * 0.5f, mid + data.roughness * 0.5f, RdotV) * mid);
+		const float mid = (1.0f - spec_data.roughness) * (1.0f - spec_data.roughness);
+		return data.diffuseReflectance * (smoothstep(mid - spec_data.roughness * 0.5f, mid + spec_data.roughness * 0.5f, RdotV) * mid);
 	}
 	if (data.Lbackfacing) {
 		return float3(0.0f, 0.0f, 0.0f);
 	}
-	float3 specular = evalSpecular(data);
+	// The energy compensation from the material's roughness, as raster's (computed before light_compute()).
+	float3 specular = evalSpecular(spec_data);
 #ifdef RT_SPECULAR_ENERGY_COMPENSATION
 	specular *= rt_specular_energy_compensation(data.specularF0, data.roughness, data.NdotV);
 #endif
@@ -1181,8 +1195,8 @@ float3 evalCombinedBRDF(float3 N, float3 L, float3 V, MaterialProperties materia
 		return float3(0.0f, 0.0f, 0.0f);
 	}
 
-	// Eval specular and diffuse BRDFs
-	float3 specular = evalSpecular(data);
+	// Eval specular and diffuse BRDFs (the specular lobe with raster's clamped roughness, lightSpecularBRDFData())
+	float3 specular = evalSpecular(lightSpecularBRDFData(data));
 #ifdef RT_SPECULAR_ENERGY_COMPENSATION
 	specular *= rt_specular_energy_compensation(data.specularF0, data.roughness, data.NdotV);
 #endif
@@ -1216,8 +1230,8 @@ void evalCombinedBRDFSeparate(float3 N, float3 L, float3 V, MaterialProperties m
 		return;
 	}
 
-	// Eval specular and diffuse BRDFs
-	outSpecular = evalSpecular(data);
+	// Eval specular and diffuse BRDFs (the specular lobe with raster's clamped roughness, lightSpecularBRDFData())
+	outSpecular = evalSpecular(lightSpecularBRDFData(data));
 #ifdef RT_SPECULAR_ENERGY_COMPENSATION
 	outSpecular *= rt_specular_energy_compensation(data.specularF0, data.roughness, data.NdotV);
 #endif
