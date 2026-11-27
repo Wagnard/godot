@@ -447,6 +447,20 @@ class BindingsGenerator {
 		 */
 		String cs_managed_to_variant;
 
+		/**
+		 * The parameter of this type needs `GC.KeepAlive` after unmanaged call to keep it alive.
+		 */
+		bool cs_keep_alive;
+
+		/**
+		 * The local declared by [cs_in] and passed to the internal call, kept alive instead of the parameter
+		 * (it may hold a value made for a null parameter, which nothing else references during the call).
+		 * If empty, the parameter is kept alive.
+		 * Formatting elements:
+		 * %0: name of the parameter
+		 */
+		String cs_keep_alive_local;
+
 		const DocData::ClassDoc *class_doc = nullptr;
 
 		bool is_deprecated = false;
@@ -618,6 +632,7 @@ class BindingsGenerator {
 			static String default_cs_managed_to_variant = "VariantUtils.CreateFrom<%1>(%0)";
 			cs_variant_to_managed = default_cs_variant_to_managed;
 			cs_managed_to_variant = default_cs_managed_to_variant;
+			cs_keep_alive = false;
 		}
 	};
 

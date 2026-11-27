@@ -91,6 +91,7 @@ StringBuilder &operator<<(StringBuilder &r_sb, const char *p_cstring) {
 #define CS_METHOD_INVOKE_GODOT_CLASS_METHOD "InvokeGodotClassMethod"
 #define CS_METHOD_HAS_GODOT_CLASS_METHOD "HasGodotClassMethod"
 #define CS_METHOD_HAS_GODOT_CLASS_SIGNAL "HasGodotClassSignal"
+#define CS_MANAGED_KEEP_ALIVE "global::System.GC.KeepAlive"
 
 #define CS_STATIC_FIELD_NATIVE_CTOR "NativeCtor"
 #define CS_STATIC_FIELD_METHOD_BIND_PREFIX "MethodBind"
@@ -2883,20 +2884,15 @@ Error BindingsGenerator::_generate_cs_method(const BindingsGenerator::TypeInterf
 	StringBuilder cs_in_statements;
 	bool cs_in_expr_is_unsafe = false;
 
+	StringBuilder icall_keepalive;
 	String icall_params = method_bind_field;
-
-	// The managed objects whose native pointer the call takes. Once the pointer is read, nothing else keeps such an object
-	// reachable, and the GC may finalize it during the native call (an optimized build ends a local's lifetime at its last
-	// use): the finalizer of a RefCounted wrapper that holds the last reference frees the native object under the call
-	// (a PackedScene freed during its own instantiate()). Each one is kept alive until the call returns (CA2115).
-	Vector<String> keep_alive;
 
 	if (!p_imethod.is_static) {
 		String self_reference = "this";
 		if (p_itype.is_singleton) {
 			self_reference = CS_PROPERTY_SINGLETON;
-		} else if (p_itype.is_object_type) {
-			keep_alive.push_back(self_reference);
+		} else {
+			icall_keepalive << INDENT2 CS_MANAGED_KEEP_ALIVE "(" + self_reference + ");\n";
 		}
 
 		if (p_itype.cs_in.size()) {
@@ -2969,6 +2965,9 @@ Error BindingsGenerator::_generate_cs_method(const BindingsGenerator::TypeInterf
 
 		icall_params += ", ";
 
+		// The name [cs_in] and [cs_in_expr] are formatted with.
+		String arg_in_name = iarg.name;
+
 		if (iarg.default_argument.size() && iarg.def_param_mode != ArgumentInterface::CONSTANT && !use_span_for_arg) {
 			// The default value of an argument must be constant. Otherwise we make it Nullable and do the following:
 			// Type arg_in = arg.HasValue ? arg.Value : <non-const default value>;
@@ -3000,6 +2999,7 @@ Error BindingsGenerator::_generate_cs_method(const BindingsGenerator::TypeInterf
 
 			cs_in_statements << def_arg << ";\n";
 
+			arg_in_name = arg_or_defval_local;
 			if (arg_type->cs_in.size()) {
 				cs_in_statements << sformat(arg_type->cs_in, arg_type->c_type, arg_or_defval_local,
 						String(), String(), String(), INDENT2);
@@ -3009,10 +3009,6 @@ Error BindingsGenerator::_generate_cs_method(const BindingsGenerator::TypeInterf
 				icall_params += arg_or_defval_local;
 			} else {
 				icall_params += sformat(arg_type->cs_in_expr, arg_or_defval_local, arg_type->c_type);
-			}
-
-			if (arg_type->is_object_type) {
-				keep_alive.push_back(arg_or_defval_local);
 			}
 
 			// Apparently the name attribute must not include the @
@@ -3028,13 +3024,40 @@ Error BindingsGenerator::_generate_cs_method(const BindingsGenerator::TypeInterf
 			}
 
 			icall_params += arg_type->cs_in_expr.is_empty() ? iarg.name : sformat(arg_type->cs_in_expr, iarg.name, arg_type->c_type);
-
-			if (arg_type->is_object_type && !use_span_for_arg) {
-				keep_alive.push_back(iarg.name);
-			}
 		}
 
 		cs_in_expr_is_unsafe |= arg_type->cs_in_expr_is_unsafe;
+
+		if (arg_type->cs_keep_alive) {
+			if (arg_type->name == "VarArg") {
+				// TODO: Figure out a better way to keep Variant disposers alive after native calls.
+				icall_keepalive << INDENT2 "foreach (var " + iarg.name + "_elem in " + iarg.name + (!p_use_span ? " ?? System.Array.Empty<Variant>()" : "") + ")\n";
+				icall_keepalive << OPEN_BLOCK_L2 INDENT3 CS_MANAGED_KEEP_ALIVE "(" + iarg.name + "_elem.Disposer);\n" CLOSE_BLOCK_L2;
+			} else {
+				String keep_alive_expr = INDENT2 CS_MANAGED_KEEP_ALIVE "(";
+				if (!arg_type->cs_keep_alive_local.is_empty()) {
+					// The local passed to the call (never null), which may be a value made for a null parameter.
+					keep_alive_expr += sformat(arg_type->cs_keep_alive_local, arg_in_name);
+				} else {
+					keep_alive_expr += iarg.name;
+					if (iarg.def_param_mode == ArgumentInterface::NULLABLE_VAL) {
+						keep_alive_expr += "?";
+					}
+				}
+
+				if (arg_type->name == "Callable") {
+					icall_keepalive << keep_alive_expr + ".Target);\n";
+					icall_keepalive << keep_alive_expr + ".Method);\n";
+				} else if (arg_type->name == "Signal") {
+					icall_keepalive << keep_alive_expr + ".Owner);\n";
+					icall_keepalive << keep_alive_expr + ".Name);\n";
+				} else if (arg_type->name == "Variant") {
+					icall_keepalive << keep_alive_expr + ".Disposer);\n";
+				} else {
+					icall_keepalive << keep_alive_expr + ");\n";
+				}
+			}
+		}
 	}
 
 	if (p_use_span && !has_span_argument) {
@@ -3168,9 +3191,8 @@ Error BindingsGenerator::_generate_cs_method(const BindingsGenerator::TypeInterf
 			p_output.append("\n");
 		}
 
-		// `this` (upstream keeps only that one) and every object argument.
-		for (const String &object : keep_alive) {
-			p_output << INDENT2 "global::System.GC.KeepAlive(" << object << ");\n";
+		if (icall_keepalive.get_string_length() > 0) {
+			p_output << icall_keepalive.as_string();
 		}
 
 		if (return_type->cname != name_cache.type_void) {
@@ -3939,6 +3961,8 @@ bool BindingsGenerator::_populate_object_type_interfaces() {
 		itype.cs_in_expr = "GodotObject." CS_STATIC_METHOD_GETINSTANCE "(%0)";
 
 		itype.cs_out = "%5%4 (%2)%0(%1);";
+
+		itype.cs_keep_alive = !itype.is_singleton;
 
 		itype.c_arg_in = "&%s";
 		itype.c_type = "IntPtr";
@@ -4875,6 +4899,7 @@ void BindingsGenerator::_populate_builtin_type_interfaces() {
 	itype.proxy_name = "StringName";
 	itype.cs_type = itype.proxy_name;
 	itype.cs_in_expr = "(%1)(%0?.NativeValue ?? default)";
+	itype.cs_keep_alive = true;
 	// Cannot pass null StringName to ptrcall
 	itype.c_out = "%5%4 %0.CreateTakingOwnershipOfDisposableValue(%1);\n";
 	itype.c_arg_in = "&%s";
@@ -4893,6 +4918,7 @@ void BindingsGenerator::_populate_builtin_type_interfaces() {
 	itype.proxy_name = "NodePath";
 	itype.cs_type = itype.proxy_name;
 	itype.cs_in_expr = "(%1)(%0?.NativeValue ?? default)";
+	itype.cs_keep_alive = true;
 	// Cannot pass null NodePath to ptrcall
 	itype.c_out = "%5%4 %0.CreateTakingOwnershipOfDisposableValue(%1);\n";
 	itype.c_arg_in = "&%s";
@@ -4921,6 +4947,7 @@ void BindingsGenerator::_populate_builtin_type_interfaces() {
 	itype.cname = itype.name;
 	itype.proxy_name = "Variant";
 	itype.cs_type = itype.proxy_name;
+	itype.cs_keep_alive = true; // Will need special handling.
 	itype.c_in = "%5%0 %1_in = (%0)%1.NativeVar;\n";
 	itype.c_out = "%5%4 Variant.CreateTakingOwnershipOfDisposableValue(%1);\n";
 	itype.c_arg_in = "&%s_in";
@@ -4934,6 +4961,7 @@ void BindingsGenerator::_populate_builtin_type_interfaces() {
 	// Callable
 	itype = TypeInterface::create_value_type(String("Callable"));
 	itype.cs_in_expr = "%0";
+	itype.cs_keep_alive = true; // Will need special handling.
 	itype.c_in = "%5using %0 %1_in = " C_METHOD_MANAGED_TO_CALLABLE "(in %1);\n";
 	itype.c_out = "%5%4 " C_METHOD_MANAGED_FROM_CALLABLE "(in %1);\n";
 	itype.c_arg_in = "&%s_in";
@@ -4950,6 +4978,7 @@ void BindingsGenerator::_populate_builtin_type_interfaces() {
 	itype.proxy_name = "Signal";
 	itype.cs_type = itype.proxy_name;
 	itype.cs_in_expr = "%0";
+	itype.cs_keep_alive = true; // Will need special handling.
 	itype.c_in = "%5using %0 %1_in = " C_METHOD_MANAGED_TO_SIGNAL "(in %1);\n";
 	itype.c_out = "%5%4 " C_METHOD_MANAGED_FROM_SIGNAL "(in %1);\n";
 	itype.c_arg_in = "&%s_in";
@@ -4966,6 +4995,7 @@ void BindingsGenerator::_populate_builtin_type_interfaces() {
 	itype.proxy_name = "ReadOnlySpan<Variant>";
 	itype.cs_type = "params Variant[]";
 	itype.cs_in_expr = "%0";
+	itype.cs_keep_alive = true; // Will need special handling.
 	// c_type, c_in and c_arg_in are hard-coded in the generator.
 	// c_out and c_type_out are not applicable to VarArg.
 	itype.c_arg_in = "&%s_in";
@@ -5016,7 +5046,11 @@ void BindingsGenerator::_populate_builtin_type_interfaces() {
 	itype.proxy_name = itype.name;
 	itype.type_parameter_count = 1;
 	itype.cs_type = BINDINGS_NAMESPACE_COLLECTIONS "." + itype.proxy_name;
-	itype.cs_in_expr = "(%1)(%0 ?? new()).NativeValue";
+	// A local, so that the empty array made for a null argument is kept alive during the call too.
+	itype.cs_in = "%5var %1_in = %1 ?? new();\n";
+	itype.cs_in_expr = "(%1)%0_in.NativeValue";
+	itype.cs_keep_alive = true;
+	itype.cs_keep_alive_local = "%0_in";
 	itype.c_out = "%5%4 %0.CreateTakingOwnershipOfDisposableValue(%1);\n";
 	itype.c_arg_in = "&%s";
 	itype.c_type = "godot_array";
@@ -5043,7 +5077,11 @@ void BindingsGenerator::_populate_builtin_type_interfaces() {
 	itype.proxy_name = itype.name;
 	itype.type_parameter_count = 2;
 	itype.cs_type = BINDINGS_NAMESPACE_COLLECTIONS "." + itype.proxy_name;
-	itype.cs_in_expr = "(%1)(%0 ?? new()).NativeValue";
+	// A local, so that the empty dictionary made for a null argument is kept alive during the call too.
+	itype.cs_in = "%5var %1_in = %1 ?? new();\n";
+	itype.cs_in_expr = "(%1)%0_in.NativeValue";
+	itype.cs_keep_alive = true;
+	itype.cs_keep_alive_local = "%0_in";
 	itype.c_out = "%5%4 %0.CreateTakingOwnershipOfDisposableValue(%1);\n";
 	itype.c_arg_in = "&%s";
 	itype.c_type = "godot_dictionary";
