@@ -387,7 +387,9 @@ class CSharpInstance : public ScriptInstance {
 	bool _unreference_owner_unsafe();
 
 	/*
-	 * If false is returned, the caller must destroy the script instance by removing it from its owner.
+	 * Gives the owner a new managed instance, from a collected wrapper's finalizer (mono_object_disposed_baseref()).
+	 * The caller holds a reference to the owner across it. If false is returned, the caller must destroy the script
+	 * instance by removing it from its owner.
 	 */
 	bool _internal_new_managed();
 

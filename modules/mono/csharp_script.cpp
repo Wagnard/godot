@@ -1999,26 +1999,22 @@ bool CSharpInstance::_unreference_owner_unsafe() {
 }
 
 bool CSharpInstance::_internal_new_managed() {
+	// Under the handle mutex (release_script_gchandle() locks it): the reference callbacks of other threads swap the
+	// handle under it. A swap that found the collected wrapper dead already left it released.
 	CSharpLanguage::get_singleton()->release_script_gchandle(gchandle);
 
 	ERR_FAIL_NULL_V(owner, false);
 	ERR_FAIL_COND_V(script.is_null(), false);
 	ERR_FAIL_COND_V(!script->can_instantiate(), false);
 
-	bool ok = GDMonoCache::managed_callbacks.ScriptManagerBridge_CreateManagedForGodotObjectScriptInstance(
+	// Runs the user's constructor, so no lock is held here. The new wrapper's base constructor publishes its handle and
+	// counts its reference (tie_managed_to_unmanaged_with_pre_setup()).
+	// The handle is not checked afterwards: once published, it belongs to the reference callbacks, and another thread
+	// that changes the owner's reference count meanwhile swaps it (it reads as released in the middle of a swap), or lets
+	// the new wrapper be collected again (then a swap releases it for real). Upstream's CRASH_COND(gchandle.is_released())
+	// here was false under concurrency, in release builds too.
+	return GDMonoCache::managed_callbacks.ScriptManagerBridge_CreateManagedForGodotObjectScriptInstance(
 			script.ptr(), owner, nullptr, 0);
-
-	if (!ok) {
-		// Important to clear this before destroying the script instance here
-		script = Ref<CSharpScript>();
-		owner = nullptr;
-
-		return false;
-	}
-
-	CRASH_COND(gchandle.is_released());
-
-	return true;
 }
 
 void CSharpInstance::mono_object_disposed(GCHandleIntPtr p_gchandle_to_free) {
@@ -2044,30 +2040,68 @@ void CSharpInstance::mono_object_disposed_baseref(GCHandleIntPtr p_gchandle_to_f
 	// Must make sure event signals are not left dangling
 	disconnect_event_signals();
 
+	r_delete_owner = false;
 	r_remove_script_instance = false;
 
+	RefCounted *rc_owner = static_cast<RefCounted *>(owner);
+	// TODO: Last usage of 'is_finalizing_scripts_domain'. It should be replaced with a check to determine if the load context is being unloaded.
+	const bool may_new_managed = p_is_finalizer && !GDMono::get_singleton()->is_finalizing_scripts_domain();
+
+	// A finalizer gives an owner that is still referenced elsewhere a new managed instance (below). It holds a reference
+	// of its own until the new managed instance has counted its own, as ~CSharpInstance() does when it hands the owner
+	// to an instance binding: other threads may drop theirs meanwhile, and the count must not reach 0 (another thread
+	// then deletes the owner, and this script instance with it) while the new managed instance is created.
+	// This wrapper's reference is still counted here, so reference() cannot fail.
+	bool owner_kept = may_new_managed && unsafe_referenced && rc_owner->get_reference_count() > 1 && rc_owner->reference();
+
 	if (_unreference_owner_unsafe()) {
+		// Never with `owner_kept`.
 		// Safe to self destruct here with memdelete(owner), but it's deferred to the caller to prevent future mistakes.
 		r_delete_owner = true;
-	} else {
-		r_delete_owner = false;
-		CSharpLanguage::get_singleton()->release_script_gchandle_thread_safe(p_gchandle_to_free, gchandle);
+		return;
+	}
 
-		if (!p_is_finalizer) {
-			// If the native instance is still alive and Dispose() was called
-			// (instead of the finalizer), then we remove the script instance.
-			r_remove_script_instance = true;
-			// TODO: Last usage of 'is_finalizing_scripts_domain'. It should be replaced with a check to determine if the load context is being unloaded.
-		} else if (!GDMono::get_singleton()->is_finalizing_scripts_domain()) {
-			// If the native instance is still alive and this is called from the finalizer,
-			// then it was referenced from another thread before the finalizer could
-			// unreference and delete it, so we want to keep it.
-			// GC.ReRegisterForFinalize(this) is not safe because the objects referenced by 'this'
-			// could have already been collected. Instead we will create a new managed instance here.
-			if (!_internal_new_managed()) {
-				r_remove_script_instance = true;
-			}
+	CSharpLanguage::get_singleton()->release_script_gchandle_thread_safe(p_gchandle_to_free, gchandle);
+
+	if (!p_is_finalizer) {
+		// If the native instance is still alive and Dispose() was called
+		// (instead of the finalizer), then we remove the script instance.
+		r_remove_script_instance = true;
+		return;
+	}
+
+	if (!may_new_managed) {
+		return;
+	}
+
+	// If the native instance is still alive and this is called from the finalizer,
+	// then it was referenced from another thread before the finalizer could
+	// unreference and delete it, so we want to keep it.
+	// GC.ReRegisterForFinalize(this) is not safe because the objects referenced by 'this'
+	// could have already been collected. Instead we will create a new managed instance here.
+
+	if (!owner_kept) {
+		// Only this wrapper's reference was counted above, and another thread referenced the owner before it was
+		// dropped. Hold one now. If that fails, the count went back to 0 and the thread that dropped it last deletes the
+		// owner: nothing is left to do here.
+		owner_kept = rc_owner->reference();
+		if (!owner_kept) {
+			return;
 		}
+	}
+
+	bool ok = _internal_new_managed();
+
+	// The new managed instance counts its own reference now (unless another thread already disposed of it): this one
+	// goes. A 2 -> 1 change swaps the new handle to weak, as for any owner that only its managed instance references.
+	r_delete_owner = rc_owner->unreference();
+
+	if (!ok && !r_delete_owner) {
+		// Important to clear this before destroying the script instance here
+		script = Ref<CSharpScript>();
+		owner = nullptr;
+
+		r_remove_script_instance = true;
 	}
 }
 
