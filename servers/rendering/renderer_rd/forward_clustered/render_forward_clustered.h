@@ -129,6 +129,13 @@ public:
 	public:
 		ClusterBuilderRD *cluster_builder = nullptr;
 
+		// RenderForwardClusteredPT: the view was drawn at least once, rasterized or path traced. Until then, a view waiting
+		// for its path tracing variant's base draws its background only (no raster geometry, whose variants a path traced
+		// scene never compiled); once drawn, it is rasterized while it waits.
+		bool pt_view_drawn = false;
+		// Its last frame drew the background only: the next traced frame drops the temporal histories, as a camera cut.
+		bool pt_background_only = false;
+
 		struct SSEffectsData {
 			Projection ssil_last_frame_projections[RendererSceneRender::MAX_RENDER_VIEWS];
 			Transform3D ssil_last_frame_transform;

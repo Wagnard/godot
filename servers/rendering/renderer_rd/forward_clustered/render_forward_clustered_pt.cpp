@@ -63,8 +63,8 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 
 	// The variant this view traces with, decided as pathtracing_is_used() decided it for this view's scene cull: bases are
 	// adopted only by update() and by an earlier view's build_tlas() (drain_completed_compiles()), never between the two.
-	// A view whose variant's base still builds asks for it and is rasterized meanwhile, its path tracing state and caches
-	// kept: it traces within a few frames.
+	// A view whose variant's base still builds asks for it and meanwhile is rasterized, or draws its background only when
+	// it was never drawn, its path tracing state and caches kept: it traces within a few frames.
 	const bool wants_rt = !is_reflection_probe && _pathtracing_is_wanted(p_render_data->environment, p_render_data->viewport) && _setup_rt();
 	uint32_t view_rt_flags = SceneShaderRaytracing::RT_FLAG_NONE;
 	const bool use_rt = wants_rt && _view_trace_rt_flags(p_render_data->environment, rb, view_rt_flags);
@@ -112,8 +112,53 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 		if (raytracing && !is_reflection_probe && !keep_caches && !waits_for_rt) {
 			raytracing->free_caches_if_unused();
 		}
+		if (waits_for_rt && _view_draws_background_only(p_render_data->environment, rb)) {
+			// A view never drawn yet (a scene loaded path traced, an editor viewport opened on one): its background only
+			// until its base is built, as Unreal's PSO precaching skips a draw whose pipeline is not ready
+			// (r.PSOPrecache.ProxyCreationDelayStrategy 0). Rasterized, it would compile and wait for the raster variants of
+			// every material in view, which a path traced scene never needs (the village walk froze 25 s at its first frames
+			// on a cold shader cache). The raster pass with no geometry: the sky or the clear color, the fog, and the
+			// post-processing chain as usual. The scene cull treated the view as path traced (pathtracing_is_used()): the
+			// only shadow maps it asks for are those a traced frame renders too (the volumetric fog's), the others stay dirty
+			// for a view that rasterizes them. No trace is recorded.
+			static const PagedArray<RenderGeometryInstance *> no_instances;
+			const PagedArray<RenderGeometryInstance *> *instances = p_render_data->instances;
+			p_render_data->instances = &no_instances;
+			rb_data->pt_background_only = true;
+			RenderForwardClustered::_render_scene(p_render_data, p_default_bg_color);
+			p_render_data->instances = instances;
+			return;
+		}
+		if (rb_data.is_valid()) {
+			rb_data->pt_view_drawn = true;
+			rb_data->pt_background_only = false;
+		}
 		RenderForwardClustered::_render_scene(p_render_data, p_default_bg_color);
 		return;
+	}
+
+	// The temporal histories hold the background-only frames drawn while the base built: dropped on this first traced frame
+	// (viewport_reset_temporal_history()'s camera cut: TAA, the upscalers, NRD, the volumetric fog, frame generation), not
+	// reprojected into the traced image. For this frame only, as RendererViewport sets it around one render.
+	struct TemporalResetScope {
+		Ref<RenderSceneBuffersRD> rb;
+		bool reset = false;
+		~TemporalResetScope() {
+			if (reset) {
+				rb->set_temporal_history_reset(false);
+			}
+		}
+	} temporal_reset_scope;
+	if (rb_data.is_valid()) {
+		rb_data->pt_view_drawn = true;
+		if (rb_data->pt_background_only) {
+			rb_data->pt_background_only = false;
+			if (!rb->get_temporal_history_reset()) {
+				rb->set_temporal_history_reset(true);
+				temporal_reset_scope.rb = rb;
+				temporal_reset_scope.reset = true;
+			}
+		}
 	}
 
 	if (!rt_precache_materials_enabled && _rt_precaches_hit_groups()) {
@@ -1162,11 +1207,35 @@ bool RenderForwardClusteredPT::pathtracing_is_used(RID p_env, RID p_viewport, co
 	if (!_pathtracing_is_wanted(p_env, p_viewport)) {
 		return false;
 	}
-	// Before the path tracer's first frame (_render_scene() sets it up), or on a device that cannot path trace:
-	// rasterized, as _render_scene() then renders it.
+	// On a device that cannot path trace: rasterized, as _render_scene() then renders it.
 	const Ref<RenderSceneBuffersRD> rb = p_render_buffers;
-	uint32_t rt_flags = 0;
-	return rb.is_valid() && raytracing && raytracing->get_shader() && raytracing->get_shader()->is_usable() && _view_trace_rt_flags(p_env, rb, rt_flags);
+	if (rb.is_null() || !RD::get_singleton()->has_feature(RD::SUPPORTS_RAYTRACING_PIPELINE)) {
+		return false;
+	}
+	if (raytracing && raytracing->get_shader()) {
+		if (!raytracing->get_shader()->is_usable()) {
+			return false;
+		}
+		uint32_t rt_flags = 0;
+		if (_view_trace_rt_flags(p_env, rb, rt_flags)) {
+			return true;
+		}
+	}
+	// A view drawing its background only while its base builds (before the path tracer's first frame too, which
+	// _render_scene() sets up) is culled as a traced one: no shadow map a traced frame would not render.
+	return _view_draws_background_only(p_env, rb);
+}
+
+bool RenderForwardClusteredPT::_view_draws_background_only(RID p_env, const Ref<RenderSceneBuffersRD> &p_render_buffers) const {
+	if (!p_render_buffers->has_custom_data(RB_SCOPE_FORWARD_CLUSTERED)) {
+		return false;
+	}
+	const Ref<RenderBufferDataForwardClustered> rb_data = p_render_buffers->get_custom_data(RB_SCOPE_FORWARD_CLUSTERED);
+	if (rb_data.is_null() || rb_data->pt_view_drawn) {
+		return false;
+	}
+	// A variant whose base failed is never traced: rasterized as with path tracing off.
+	return !(raytracing && raytracing->get_shader() && raytracing->get_shader()->is_pipeline_bundle_failed(_view_rt_flags(p_env, p_render_buffers)));
 }
 
 uint32_t RenderForwardClusteredPT::_view_rt_flags(RID p_env, const Ref<RenderSceneBuffersRD> &p_render_buffers) const {

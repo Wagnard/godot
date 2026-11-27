@@ -57,6 +57,9 @@ class RenderForwardClusteredPT : public RenderForwardClustered {
 	// until then the one it traced with last, when the two differ only by what the view shows (the debug views). Never
 	// waits: Unreal's non-blocking ray tracing pipeline lookups keep the last complete pipeline meanwhile.
 	bool _view_trace_rt_flags(RID p_env, const Ref<RenderSceneBuffersRD> &p_render_buffers, uint32_t &r_rt_flags) const;
+	// A view that cannot trace yet and was never drawn (RenderBufferDataForwardClustered::pt_view_drawn) draws its
+	// background only (Unreal's skip-draw), rather than rasterizing what a path traced scene never compiled for raster.
+	bool _view_draws_background_only(RID p_env, const Ref<RenderSceneBuffersRD> &p_render_buffers) const;
 
 	// Hit groups compiled when their instances are created rather than first traced (rt_precache_materials).
 	static bool _rt_precaches_hit_groups();
