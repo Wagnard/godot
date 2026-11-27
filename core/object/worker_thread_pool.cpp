@@ -993,6 +993,23 @@ void WorkerThreadPool::exit_languages_threads() {
 	while (runlevel_data.exit_languages.num_exited_threads != threads.size()) {
 		control_cond_var.wait(lock);
 	}
+
+	// Release the callables of completed tasks that were never waited for while the script languages are still alive:
+	// finish() frees those tasks after ScriptServer::finish_languages(), and a script callable (a GDScript lambda)
+	// destroyed then crashed. Queued tasks keep theirs (they run, or wait for finish(), as before); group tasks are not
+	// in `tasks`. Destroyed outside the lock, as a callable's destructor may use the pool.
+	LocalVector<Callable> leftovers;
+	for (KeyValue<TaskID, Task *> &E : tasks) {
+		if (E.value->completed && E.value->callable.is_valid()) {
+			leftovers.push_back(E.value->callable);
+			E.value->callable = Callable();
+		}
+	}
+	if (!leftovers.is_empty()) {
+		lock.temp_unlock();
+		leftovers.clear();
+		lock.temp_relock();
+	}
 }
 
 void WorkerThreadPool::finish() {
