@@ -266,7 +266,7 @@ bool TileSetAtlasSourceEditor::AtlasTileProxyObject::_set(const StringName &p_na
 				}
 			}
 			notify_property_list_changed();
-			emit_signal(CoreStringName(changed), "animation_separation");
+			emit_signal(CoreStringName(changed), "animation_frames_count");
 			return true;
 		} else if (components.size() == 2 && components[0].begins_with("animation_frame_") && components[0].trim_prefix("animation_frame_").is_valid_int()) {
 			for (TileSelection tile : tiles) {
@@ -1505,7 +1505,7 @@ void TileSetAtlasSourceEditor::_end_dragging() {
 				}
 			}
 
-			undo_redo->create_action(TTR("Remove tiles"));
+			undo_redo->create_action(TTR("Remove tiles"), UndoRedo::MERGE_DISABLE, tile_set_atlas_source);
 			undo_redo->add_do_method(this, "_set_selection_from_array", Array());
 			for (const Vector2i &E : to_delete) {
 				Vector2i coords = E;

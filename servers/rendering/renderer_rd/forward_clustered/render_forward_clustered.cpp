@@ -3292,9 +3292,7 @@ void RenderForwardClustered::_render_3d_upscaling(const RenderDataRD *p_render_d
 		}
 
 		RD::get_singleton()->draw_command_begin_label("MetalFX Temporal");
-		// Scale to ±0.5.
-		Vector2 jitter = p_render_data->scene_data->taa_jitter * 0.5f;
-		jitter *= Vector2(1.0, -1.0); // Flip y-axis as bottom left is origin.
+		Vector2 jitter = p_render_data->scene_data->taa_jitter * Vector2(rb->get_internal_size()) * 0.5f;
 
 		for (uint32_t v = 0; v < rb->get_view_count(); v++) {
 			RendererRD::MFXTemporalEffect::Params params;

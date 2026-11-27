@@ -11,9 +11,9 @@
 	</description>
 	<tutorials>
 		<link title="Project Settings">$DOCS_URL/tutorials/editor/project_settings.html</link>
-		<link title="3D Physics Tests Demo">https://godotengine.org/asset-library/asset/2747</link>
-		<link title="3D Platformer Demo">https://godotengine.org/asset-library/asset/2748</link>
-		<link title="Operating System Testing Demo">https://godotengine.org/asset-library/asset/2789</link>
+		<link title="3D Physics Tests Demo">https://store.godotengine.org/asset/godot-foundation/physics-tests-3d-demo/</link>
+		<link title="3D Platformer Demo">https://store.godotengine.org/asset/godot-foundation/platformer-3d-demo/</link>
+		<link title="Operating System Testing Demo">https://store.godotengine.org/asset/godot-foundation/operating-system-testing-demo/</link>
 	</tutorials>
 	<methods>
 		<method name="add_property_info">
@@ -432,11 +432,6 @@
 		</member>
 		<member name="application/run/print_header" type="bool" setter="" getter="" default="true">
 			If [code]true[/code], the engine header is printed in the console on startup. This header describes the current version of the engine, as well as the renderer being used. This behavior can also be disabled on the command line with the [code]--no-header[/code] option.
-		</member>
-		<member name="application/run/use_game_mode" type="bool" setter="" getter="" default="true">
-			If [code]true[/code], the engine will request [url=https://github.com/FeralInteractive/gamemode]GameMode[/url] to be activated. This allows optimizing system performance during gameplay, e.g. by using a specific CPU governor or forcing a high GPU power state. The GameMode daemon needs to be installed and running on the system to work (typically available as [code]gamemode[/code] in Linux distribution repositories).
-			[b]Note:[/b] This setting does not affect the editor itself, although it affects projects being run from the editor.
-			[b]Note:[/b] This setting is available only on Linux.
 		</member>
 		<member name="audio/buses/channel_disable_threshold_db" type="float" setter="" getter="" default="-60.0">
 			Audio buses will disable automatically when sound goes below a given dB threshold for a given time. This saves CPU as effects assigned to that bus will no longer do any processing.
